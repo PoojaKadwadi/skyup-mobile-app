@@ -1,0 +1,8 @@
+# ninja log v5
+7	183	0	D:/lms/crm/mobile-app/android/app/.cxx/Debug/7256um31/armeabi-v7a/CMakeFiles/cmake.verify_globs	43d78fdec0ee67f0
+3	14538	7992473149698108	CMakeFiles/appmodules.dir/D_/lms/crm/mobile-app/android/app/build/generated/rncli/src/main/jni/rncli.cpp.o	f1eb9e8c9b6d96c
+86	14918	7992473155667173	CMakeFiles/appmodules.dir/OnLoad.cpp.o	89609bac41f5270a
+14921	15766	7992473164839251	D:/lms/crm/mobile-app/android/app/build/intermediates/cxx/Debug/7256um31/obj/armeabi-v7a/libappmodules.so	73ce4390708c9c1c
+18	214	0	D:/lms/crm/mobile-app/android/app/.cxx/Debug/7256um31/armeabi-v7a/CMakeFiles/cmake.verify_globs	43d78fdec0ee67f0
+34	281	0	D:/lms/crm/mobile-app/android/app/.cxx/Debug/7256um31/armeabi-v7a/CMakeFiles/cmake.verify_globs	43d78fdec0ee67f0
+0	51	0	clean	76eafe580b03784f
