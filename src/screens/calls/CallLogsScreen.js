@@ -199,10 +199,11 @@ export default function CallLogsScreen() {
         setAgents(Array.from(agentMap, ([id, name]) => ({ _id: id, name })));
       }
 
-      const valid = logs.filter(l => {
-        const ts = l.timestamp ? new Date(l.timestamp).getTime() : 0;
-        return ts && !isNaN(ts) && ts > 1000000000000;
-      });
+      // PERF FIX: pre-compute _tsMs once during data load so keyExtractor and
+      // any sort operations never allocate new Date() objects during rendering.
+      const valid = logs
+        .map(l => ({ ...l, _tsMs: l.timestamp ? new Date(l.timestamp).getTime() : 0 }))
+        .filter(l => l._tsMs && !isNaN(l._tsMs) && l._tsMs > 1000000000000);
       setTodayLogs(valid);
     } catch (e) {
       Alert.alert('Error', 'Could not load today\'s call logs: ' + e.message);
@@ -278,7 +279,8 @@ export default function CallLogsScreen() {
   );
 
   const keyExtractor = useCallback(
-    (item) => `${new Date(item.timestamp).getTime()}_${item.phoneNumber}`,
+    // PERF FIX: use pre-computed _tsMs field — no Date allocation per render
+    (item) => `${item._tsMs}_${item.phoneNumber}`,
     [],
   );
 

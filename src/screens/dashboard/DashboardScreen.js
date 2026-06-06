@@ -20,7 +20,7 @@ import {
 } from 'react-native';
 import AsyncStorage                     from '@react-native-async-storage/async-storage';
 import { useDispatch, useSelector }     from 'react-redux';
-import { useNavigation }                from '@react-navigation/native';
+import { useNavigation, useFocusEffect }                from '@react-navigation/native';
 import Icon                             from 'react-native-vector-icons/MaterialCommunityIcons';
 import { fetchLeads }                   from '../../store/slices/leadsSlice';
 import { triggerManualSync }            from '../../services/backgroundSyncService';
@@ -31,6 +31,21 @@ import AttendanceWidget                 from '../../components/AttendanceWidget'
 import NotificationPermissionBanner    from '../../components/NotificationPermissionBanner';
 
 const AUTO_SYNC_SETUP_KEY = 'crm_auto_sync_setup_done';
+
+// PERF FIX: Module-level cache so repeated AsyncStorage.getItem calls for this
+// key (useAutoSyncSetup hook + handleAutoSyncSetup button) become memory reads
+// after the first access. Cleared to null on logout via clearAutoSyncCache().
+let _autoSyncSetupCache = null;
+async function isAutoSyncDone() {
+  if (_autoSyncSetupCache !== null) return _autoSyncSetupCache === 'true';
+  try { _autoSyncSetupCache = await AsyncStorage.getItem(AUTO_SYNC_SETUP_KEY); } catch {}
+  return _autoSyncSetupCache === 'true';
+}
+async function markAutoSyncDone() {
+  _autoSyncSetupCache = 'true';
+  try { await AsyncStorage.setItem(AUTO_SYNC_SETUP_KEY, 'true'); } catch {}
+}
+export function clearAutoSyncCache() { _autoSyncSetupCache = null; }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers (unchanged)
@@ -128,14 +143,14 @@ function useAutoSyncSetup() {
     // Defer past the first paint — let the dashboard load first
     const task = InteractionManager.runAfterInteractions(async () => {
       try {
-        const already = await AsyncStorage.getItem(AUTO_SYNC_SETUP_KEY);
-        if (already === 'true') return;  // already set up — don't ask again
+        const already = await isAutoSyncDone();
+        if (already) return;  // already set up — don't ask again
 
         // First time — show the guide and request permissions automatically
         const result = await autoSetupRecordingSync();
 
         if (result.success) {
-          await AsyncStorage.setItem(AUTO_SYNC_SETUP_KEY, 'true');
+          await markAutoSyncDone();
           Alert.alert(
             '✅ Auto Sync Enabled',
             `All permissions granted!\n\nCall recordings will now sync automatically to your CRM after each call.\n\nSave recordings to:\n${result.folderPath}`,
@@ -182,10 +197,20 @@ export default function DashboardScreen() {
     return () => task.cancel();
   }, []);
 
-  // ── Leads fetch
-  useEffect(() => {
-    dispatch(fetchLeads());
-  }, [dispatch]);
+  // ── Leads fetch — PERF FIX ─────────────────────────────────────────────────
+  // Replaced bare useEffect (fired on every mount) with useFocusEffect + 2-min
+  // stale threshold. This matches the pattern already used in LeadsScreen and
+  // prevents a full network round-trip every time the user switches tabs.
+  const STALE_MS = 2 * 60 * 1000;
+  useFocusEffect(
+    useCallback(() => {
+      const task = InteractionManager.runAfterInteractions(() => {
+        const isStale = !lastFetchedAt || (Date.now() - lastFetchedAt > STALE_MS);
+        if (isStale) dispatch(fetchLeads());
+      });
+      return () => task.cancel();
+    }, [lastFetchedAt, dispatch]),
+  );
 
   const onRefresh = useCallback(() => {
     dispatch(fetchLeads());
@@ -197,8 +222,9 @@ export default function DashboardScreen() {
   // ── Manual "Set Up Auto Sync" handler (for the dashboard button)
   const handleAutoSyncSetup = useCallback(async () => {
     try {
-      const already = await AsyncStorage.getItem(AUTO_SYNC_SETUP_KEY);
-      if (already === 'true') {
+      // PERF FIX: use cached isAutoSyncDone() instead of raw AsyncStorage.getItem
+      const already = await isAutoSyncDone();
+      if (already) {
         // Already set up — show current status
         const perms = await checkAllPermissions();
         const allOk = perms.callPhone && perms.readCallLog && perms.readStorage;
@@ -229,7 +255,8 @@ export default function DashboardScreen() {
   const runSetup = useCallback(async () => {
     const result = await autoSetupRecordingSync();
     if (result.success) {
-      await AsyncStorage.setItem(AUTO_SYNC_SETUP_KEY, 'true');
+      // PERF FIX: use cached markAutoSyncDone() — updates memory + AsyncStorage
+      await markAutoSyncDone();
       Alert.alert(
         '✅ Auto Sync Enabled',
         `Recordings will sync automatically after each call.\n\nSave recordings to:\n${result.folderPath}`,

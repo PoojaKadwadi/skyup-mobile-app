@@ -59,6 +59,16 @@ function callTypeIcon(type) {
 }
 function capitalize(s) { return s ? s[0].toUpperCase() + s.slice(1) : ''; }
 
+// EMAIL MASKING: show only the first 2 chars + last char of the local part.
+// e.g. "john.doe@example.com" → "jo••••e@example.com"
+// Protects PII visible on-screen while keeping the domain for verification.
+function maskEmail(email) {
+  if (!email || !email.includes('@')) return email || '—';
+  const [local, domain] = email.split('@');
+  if (local.length <= 2) return `${'•'.repeat(local.length)}@${domain}`;
+  return `${local.slice(0, 2)}${'•'.repeat(Math.max(2, local.length - 3))}${local.slice(-1)}@${domain}`;
+}
+
 function InfoItem({ icon, label, value, full }) {
   return (
     <View style={[styles.infoItem, full && { flex: 1, width: '100%' }]}>
@@ -112,6 +122,9 @@ export default function LeadDetailScreen() {
   const callListenerRef  = React.useRef(null);
   const wentToBackground = React.useRef(false);
   const callPending      = React.useRef(false);
+  // PERF FIX: track mount state so AppState listener never updates unmounted
+  // component state or leaves a stale listener if user navigates away mid-call.
+  const isMountedRef     = React.useRef(true);
 
   const handleCall = async () => {
     try {
@@ -130,6 +143,13 @@ export default function LeadDetailScreen() {
 
       callListenerRef.current = AppState.addEventListener('change', async (nextState) => {
         if (!callPending.current) return;
+        // PERF FIX: abort immediately if component unmounted to prevent
+        // state updates on an unmounted component and stale listener actions.
+        if (!isMountedRef.current) {
+          callListenerRef.current?.remove();
+          callListenerRef.current = null;
+          return;
+        }
 
         if (nextState === 'background' || nextState === 'inactive') {
           if (!wentToBackground.current) {
@@ -179,9 +199,17 @@ export default function LeadDetailScreen() {
   };
 
   React.useEffect(() => {
+    isMountedRef.current = true;
     return () => {
-      callPending.current = false;
-      callListenerRef.current?.remove();
+      // PERF FIX: set isMountedRef false first so any in-flight AppState
+      // callback aborts before touching state. Then ensure the listener is
+      // always removed — even if the component unmounts before the call completes.
+      isMountedRef.current = false;
+      callPending.current  = false;
+      if (callListenerRef.current) {
+        callListenerRef.current.remove();
+        callListenerRef.current = null;
+      }
     };
   }, []);
 
@@ -296,7 +324,7 @@ export default function LeadDetailScreen() {
               </View>
               <Text style={styles.infoValue}>{maskedPhone}</Text>
             </View>
-            <InfoItem icon="email-outline" label="Email" value={lead.email || '—'} />
+            <InfoItem icon="email-outline" label="Email" value={maskEmail(lead.email)} />
           </View>
           <View style={styles.divider} />
           <View style={styles.infoRow}>

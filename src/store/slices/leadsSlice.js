@@ -50,6 +50,11 @@ export const submitCallRemark = createAsyncThunk(
   },
 );
 
+// PERF FIX: module-level throttle so checkAndNotifyFollowUps runs at most
+// once per 5 minutes regardless of how many fetchLeads calls fire.
+const FOLLOWUP_CHECK_THROTTLE_MS = 5 * 60 * 1000;
+let _lastFollowUpCheckAt = 0;
+
 const leadsSlice = createSlice({
   name: 'leads',
   initialState: {
@@ -64,6 +69,16 @@ const leadsSlice = createSlice({
     setSearchQuery:  (state, action) => { state.searchQuery  = action.payload; },
     setFilterStatus: (state, action) => { state.filterStatus = action.payload; },
     clearLeadsError: (state)         => { state.error        = null; },
+    // PERF FIX: optimistic single-lead upsert used by socketService.js on
+    // new_lead_assigned events — avoids re-downloading all leads.
+    upsertLead: (state, action) => {
+      const idx = state.items.findIndex(l => l.id === action.payload.id);
+      if (idx !== -1) {
+        state.items[idx] = { ...state.items[idx], ...action.payload };
+      } else {
+        state.items.unshift(action.payload); // new lead → prepend
+      }
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -77,12 +92,16 @@ const leadsSlice = createSlice({
         state.lastFetchedAt = Date.now();
 
         // ── NEW LEAD + REASSIGNMENT NOTIFICATIONS ────────────────────────────
-        // Non-blocking fire-and-forget. Errors are caught inside each service
-        // so they never affect the Redux state update above.
         checkAndNotifyNewLeads(action.payload).catch(() => {});
         checkAndNotifyReassignedLeads(action.payload).catch(() => {});
-        // FIX: also check follow-ups on every fetch — not just the 5-min timer
-        checkAndNotifyFollowUps(action.payload).catch(() => {});
+        // PERF FIX: throttle follow-up check to once per 5 min — previously it
+        // fired on every fetchLeads (socket events, tab focus, pull-to-refresh),
+        // causing up to 20+ redundant full-array scans per hour.
+        const now = Date.now();
+        if (now - _lastFollowUpCheckAt > FOLLOWUP_CHECK_THROTTLE_MS) {
+          _lastFollowUpCheckAt = now;
+          checkAndNotifyFollowUps(action.payload).catch(() => {});
+        }
       })
       .addCase(fetchLeads.rejected, (state, action) => {
         state.loading = false;
@@ -120,7 +139,7 @@ const leadsSlice = createSlice({
   },
 });
 
-export const { setSearchQuery, setFilterStatus, clearLeadsError } = leadsSlice.actions;
+export const { setSearchQuery, setFilterStatus, clearLeadsError, upsertLead } = leadsSlice.actions;
 
 export const selectFilteredLeads = createSelector(
   (state) => state.leads.items,

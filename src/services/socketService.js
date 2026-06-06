@@ -15,7 +15,8 @@
 
 import { io }       from 'socket.io-client';
 import { BASE_URL } from '../config/config';
-import { fetchLeads } from '../store/slices/leadsSlice';
+import { fetchLeads, upsertLead } from '../store/slices/leadsSlice';
+import { getLeadById }            from '../api/leadsApi';
 import { showNewLeadNotification, showReassignedLeadNotification } from './notificationService';
 
 // Strip /api suffix — Socket.IO connects to root, not /api
@@ -84,7 +85,21 @@ export function connectSocket(userId, dispatch) {
   socket.on('new_lead_assigned', async (payload) => {
     console.log('[Socket] 🆕 new_lead_assigned:', payload);
     try {
-      if (_dispatch) {
+      if (_dispatch && payload?.leadId) {
+        // PERF FIX: fetch only the single new/updated lead and upsert it into
+        // Redux instead of re-downloading all leads. Falls back to full refresh
+        // only if the single-lead fetch fails (e.g. 404 or network error).
+        try {
+          const lead = await getLeadById(payload.leadId);
+          if (lead) {
+            _dispatch(upsertLead(lead));
+          }
+        } catch (fetchErr) {
+          console.warn('[Socket] single-lead fetch failed, falling back to full refresh:', fetchErr.message);
+          await _dispatch(fetchLeads());
+        }
+      } else if (_dispatch) {
+        // No leadId in payload — fall back to full refresh
         await _dispatch(fetchLeads());
       }
       if (payload?.leadName) {

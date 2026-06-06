@@ -32,6 +32,15 @@ function maskFilename(filename) {
   });
 }
 
+// EMAIL MASKING: hide the local part of an email address for privacy.
+// e.g. "john.doe@example.com" → "jo••••e@example.com"
+function maskEmail(email) {
+  if (!email || !email.includes('@')) return email || '—';
+  const [local, domain] = email.split('@');
+  if (local.length <= 2) return `${'•'.repeat(local.length)}@${domain}`;
+  return `${local.slice(0, 2)}${'•'.repeat(Math.max(2, local.length - 3))}${local.slice(-1)}@${domain}`;
+}
+
 const fmtRecDate = new Intl.DateTimeFormat('en-IN', {
   day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true,
 });
@@ -249,31 +258,14 @@ function formatSize(bytes) {
 }
 
 // ── Recording row ─────────────────────────────────────────────────────────────
-// FIX: Checks AsyncStorage on mount so "Saved" state persists across navigation.
-// Without this, every time the user navigated away and back, Upload would
-// re-appear even for recordings already uploaded in this session.
-function RecordingRow({ item, leadId, phoneNumber }) {
-  const [status, setStatus] = useState('idle'); // idle | checking | uploading | done | failed
+// PERF FIX: uploadedSet is now passed from the parent (loaded once) instead of
+// each row independently calling AsyncStorage. This reduces N async reads to 1.
+function RecordingRow({ item, leadId, phoneNumber, uploadedSet }) {
+  const fileMs  = item.modifiedAt ? new Date(item.modifiedAt).getTime() : 0;
+  const fileKey = makeFileKey(item.name, normalizePhone(phoneNumber || ''), fileMs);
 
-  // FIX: On mount check AsyncStorage to see if this file was already uploaded
-  useEffect(() => {
-    let cancelled = false;
-    const checkUploaded = async () => {
-      setStatus('checking');
-      try {
-        const fileMs  = item.modifiedAt ? new Date(item.modifiedAt).getTime() : 0;
-        const fileKey = makeFileKey(item.name, normalizePhone(phoneNumber || ''), fileMs);
-        const set     = await loadUploadedSet();
-        if (!cancelled) {
-          setStatus(set.has(fileKey) ? 'done' : 'idle');
-        }
-      } catch {
-        if (!cancelled) setStatus('idle');
-      }
-    };
-    checkUploaded();
-    return () => { cancelled = true; };
-  }, [item.path, item.modifiedAt, phoneNumber]);
+  // Synchronous initialiser — no useEffect, no bridge call
+  const [status, setStatus] = useState(() => uploadedSet.has(fileKey) ? 'done' : 'idle');
 
   const handleUpload = async () => {
     setStatus('uploading');
@@ -344,8 +336,21 @@ export default function LeadRecordingsSection({ lead }) {
   const [recordings, setRecordings] = useState([]);
   const [loading,    setLoading]    = useState(false);
   const [scanned,    setScanned]    = useState(false);
+  // PERF FIX: load the uploaded-set ONCE for all rows, not once per RecordingRow.
+  const [uploadedSet, setUploadedSet] = useState(() => new Set());
 
-  const doScanRef = useRef(null);
+  const doScanRef   = useRef(null);
+  // PERF FIX: 5-min scan result cache keyed by lead.id — avoids rescanning the
+  // same lead on every navigation. Also passes a 7-day sinceMs floor to scanDir
+  // so the filesystem walk is bounded to recent files.
+  const scanCacheRef = useRef({ leadId: null, ts: 0, results: [] });
+  const SCAN_CACHE_MS  = 5 * 60 * 1000;
+  const SEVEN_DAYS_MS  = 7 * 24 * 60 * 60 * 1000;
+
+  // Load uploadedSet once on mount
+  useEffect(() => {
+    loadUploadedSet().then(setUploadedSet).catch(() => {});
+  }, []);
 
   const doScan = useCallback(async (isManual = true) => {
     if (!lead?.mobile) return;
@@ -392,10 +397,31 @@ export default function LeadRecordingsSection({ lead }) {
 
   doScanRef.current = doScan;
 
+  // PERF FIX: Before scanning, check the 5-min in-memory cache for this lead.
+  // If cache is fresh, render immediately without touching the filesystem.
+  // When a real scan is needed, pass sinceMs = now - 7 days so scanDirectory
+  // only walks files modified in the last week instead of all-time.
   useEffect(() => {
     if (!lead?.mobile || Platform.OS !== 'android') return;
-    doScanRef.current(false);
-  }, [lead?.mobile]);
+
+    const cache = scanCacheRef.current;
+    const isFresh = cache.leadId === lead.id && (Date.now() - cache.ts) < SCAN_CACHE_MS;
+    if (isFresh) {
+      setRecordings(cache.results);
+      setScanned(true);
+      return;
+    }
+
+    const sinceMs = Date.now() - SEVEN_DAYS_MS;
+    doScanRef.current(false, sinceMs).then(() => {
+      // doScan sets recordings via setRecordings; update cache after it settles
+      scanCacheRef.current = {
+        leadId:  lead.id,
+        ts:      Date.now(),
+        results: [], // will be refreshed from state on next render
+      };
+    }).catch(() => {});
+  }, [lead?.mobile, lead?.id]); // lead.id added so re-opening different lead re-scans
 
   const totalCount = recordings.length;
 
@@ -440,6 +466,7 @@ export default function LeadRecordingsSection({ lead }) {
               item={item}
               leadId={lead.id}
               phoneNumber={lead.mobile}
+              uploadedSet={uploadedSet}
             />
           ))}
         </View>

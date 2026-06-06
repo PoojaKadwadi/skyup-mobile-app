@@ -59,6 +59,10 @@ let appStateListener     = null;
 let isSyncing            = false;
 let isCheckingFollowUps  = false;
 
+// PERF FIX: In-memory cache for LAST_RAN_KEY so the AppState 'active' handler
+// never has to hit AsyncStorage (disk I/O on the JS bridge) on every screen-on event.
+let _lastRanMs = 0;
+
 // ── FIX: Track phones already auto-uploaded this session ─────────────────────
 // When triggerPostCallRecordingSync successfully uploads for a phone number,
 // we record it here. The periodic sweep then skips those numbers so the same
@@ -100,6 +104,8 @@ const getTs = async (key, fallback) => {
 
 const setTs = async (key, ts = Date.now()) => {
   try { await AsyncStorage.setItem(key, String(ts)); } catch {}
+  // PERF FIX: keep in-memory cache in sync so AppState handler avoids disk read
+  if (key === LAST_RAN_KEY) _lastRanMs = ts;
 };
 
 // ── Follow-Up reminder check ──────────────────────────────────────────────────
@@ -211,14 +217,22 @@ const doSyncDeferred = (opts) => {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 export const startBackgroundSync = () => {
+  // PERF FIX: Guard against duplicate registrations on re-login.
+  // Without this, every logout/login cycle stacks another setInterval pair
+  // and another AppState listener — background work grows unbounded.
+  if (syncInterval) {
+    console.log('[Sync] Already running — skipping duplicate startBackgroundSync()');
+    return;
+  }
+
   setTimeout(() => doSyncDeferred(), INITIAL_SYNC_DELAY_MS);
   syncInterval     = setInterval(() => doSyncDeferred(), SYNC_INTERVAL_MS);
   followUpInterval = setInterval(() => doFollowUpCheck(), FOLLOWUP_INTERVAL_MS);
 
-  appStateListener = AppState.addEventListener('change', async (nextState) => {
+  appStateListener = AppState.addEventListener('change', (nextState) => {
     if (nextState !== 'active') return;
-    const lastRan = await getTs(LAST_RAN_KEY);
-    if (Date.now() - lastRan >= MIN_FOREGROUND_WAIT_MS) {
+    // PERF FIX: use in-memory _lastRanMs — no async, no AsyncStorage bridge call
+    if (_lastRanMs > 0 && Date.now() - _lastRanMs >= MIN_FOREGROUND_WAIT_MS) {
       doSyncDeferred({ fromForeground: true });
     } else {
       doFollowUpCheck();

@@ -21,14 +21,13 @@ import {
 import { useIsFocused }  from '@react-navigation/native';
 import { useSelector }   from 'react-redux';
 import Icon              from 'react-native-vector-icons/MaterialCommunityIcons';
-import { io }            from 'socket.io-client';
+// PERF FIX: removed `import { io }` — AttendanceWidget no longer opens its own
+// socket connection. It reuses the singleton managed by socketService.js via getSocket().
+import { getSocket }     from '../services/socketService';
 import api               from '../services/api';
 import { getDeviceInfo } from '../services/deviceInfoService';
 import { COLORS, RADIUS, FONT } from '../theme/tokens';
 import { isOnCall, subscribeToCallState } from '../services/callStateService';
-
-import { BASE_URL } from '../config/config';
-const SOCKET_BASE = BASE_URL.replace(/\/api\/?$/, '');
 
 const STALE_MS = 30 * 1000;
 
@@ -83,39 +82,42 @@ export default function AttendanceWidget() {
   useEffect(() => { fetchRecord(); }, [fetchRecord]);
 
   // ── Socket.IO cross-device sync ───────────────────────────────────────────
-  // Joins private room `att:<userId>`. Backend emits `attendance:updated`
-  // after every clock action so status reflects instantly on all devices.
+  // PERF FIX: Reuse the singleton socket from socketService.js instead of
+  // opening a second TCP connection with io(). We join the att:<userId> room
+  // on the shared connection so the server can push attendance:updated events.
   useEffect(() => {
     if (!userId) return;
-
-    const socket = io(SOCKET_BASE, {
-      withCredentials: true,
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionDelay: 2000,
-      reconnectionAttempts: 10,
-    });
+    const socket = getSocket();
+    if (!socket) return;
     socketRef.current = socket;
 
-    socket.on('connect', () => {
-      socket.emit('att_join', { userId });
-    });
+    // Join attendance room on the existing shared connection
+    const joinRoom = () => socket.emit('att_join', { userId });
+    if (socket.connected) {
+      joinRoom();
+    } else {
+      socket.once('connect', joinRoom);
+    }
 
-    socket.on('attendance:updated', (updatedRecord) => {
+    const handleAttUpdate = (updatedRecord) => {
       setRecord(updatedRecord);
       lastFetchedRef.current = Date.now();
-    });
-
-    socket.on('connect_error', (err) => {
-      console.warn('[AttendanceWidget] socket connect_error:', err.message);
-    });
+      // Update refs so tick() picks up new values without triggering re-registration
+      recordRef.current = updatedRecord;
+    };
+    socket.on('attendance:updated', handleAttUpdate);
 
     return () => {
-      socket.off('attendance:updated');
-      socket.disconnect();
+      socket.off('attendance:updated', handleAttUpdate);
+      socket.off('connect', joinRoom);
       socketRef.current = null;
+      // Do NOT disconnect — the socket is shared with App.js / socketService
     };
   }, [userId]);
+
+  // ── Stable refs for tick — avoids re-registering interval on every record update ──
+  const recordRef = useRef(null);
+  useEffect(() => { recordRef.current = record; }, [record]);
 
   // ── Call-state chip sync ───────────────────────────────────────────────────
   // Updates the "On Call" status chip when phone state changes.
@@ -129,24 +131,30 @@ export default function AttendanceWidget() {
   }, []);
 
   // ── Tick + ping ────────────────────────────────────────────────────────────
+  // PERF FIX: Removed `record` from deps. Previously every attendance:updated
+  // socket push triggered cleanup + re-registration of setInterval AND
+  // AppState listener. Now the interval is registered once per focus change;
+  // tick() reads current values from recordRef so it always has fresh data.
   useEffect(() => {
-    if (!record?.loginTime || record?.logoutTime) {
-      setElapsed(0);
-      lastElapsedRef.current = 0;
-      return;
-    }
-
     const tick = () => {
+      const rec = recordRef.current;
+      if (!rec?.loginTime || rec?.logoutTime) {
+        if (lastElapsedRef.current !== 0) {
+          lastElapsedRef.current = 0;
+          setElapsed(0);
+        }
+        return;
+      }
       const breakMins =
-        (record.totalBreakMinutes || 0) +
-        (record.activeBreakIndex !== null && record.activeBreakIndex !== undefined
+        (rec.totalBreakMinutes || 0) +
+        (rec.activeBreakIndex !== null && rec.activeBreakIndex !== undefined
           ? Math.round(
-              (Date.now() - new Date(record.breaks?.[record.activeBreakIndex]?.startTime || Date.now())) / 60000
+              (Date.now() - new Date(rec.breaks?.[rec.activeBreakIndex]?.startTime || Date.now())) / 60000
             )
           : 0);
       const secs = Math.max(
         0,
-        Math.round((Date.now() - new Date(record.loginTime)) / 1000) - breakMins * 60,
+        Math.round((Date.now() - new Date(rec.loginTime)) / 1000) - breakMins * 60,
       );
       if (secs !== lastElapsedRef.current) {
         lastElapsedRef.current = secs;
@@ -175,19 +183,33 @@ export default function AttendanceWidget() {
       startTimers();
     }
 
+    return () => { stopTimers(); };
+  }, [isFocused]); // PERF FIX: record removed — reads via recordRef instead
+
+  // ── AppState listener registered once (not inside tick useEffect) ──────────
+  useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active' && isFocused) {
-        startTimers();
+      if (state === 'active') {
+        const rec = recordRef.current;
+        if (rec?.loginTime && !rec?.logoutTime) {
+          const tickInterval = isFocused ? 1000 : 10_000;
+          if (tickRef.current) clearInterval(tickRef.current);
+          const tick = () => {
+            const r = recordRef.current;
+            if (!r?.loginTime || r?.logoutTime) return;
+            const breakMins = (r.totalBreakMinutes || 0);
+            const secs = Math.max(0, Math.round((Date.now() - new Date(r.loginTime)) / 1000) - breakMins * 60);
+            if (secs !== lastElapsedRef.current) { lastElapsedRef.current = secs; setElapsed(secs); }
+          };
+          tickRef.current = setInterval(tick, tickInterval);
+        }
       } else {
-        stopTimers();
+        if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
+        if (pingRef.current) { clearInterval(pingRef.current); pingRef.current = null; }
       }
     });
-
-    return () => {
-      stopTimers();
-      sub.remove();
-    };
-  }, [record, isFocused]);
+    return () => sub.remove();
+  }, []); // PERF FIX: registered exactly once
 
   // ── Actions ───────────────────────────────────────────────────────────────
   const handleClockIn = useCallback(async () => {
