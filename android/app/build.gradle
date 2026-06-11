@@ -1,6 +1,10 @@
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
+
+project.ext {
+    hermesEnabled = true
+}
 apply plugin: "com.google.gms.google-services"
 
 def enableProguardInReleaseBuilds = true

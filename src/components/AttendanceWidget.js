@@ -215,10 +215,69 @@ export default function AttendanceWidget() {
   const handleClockIn = useCallback(async () => {
     try {
       const deviceInfo = await getDeviceInfo();
-      const r = await api.post('/attendance/clock-in', { ...deviceInfo });
+
+      // ── Attempt to get device location for location-restricted companies ──
+      // We always try to get location — the backend decides whether to enforce it.
+      // If location permission is denied, we send the request without coordinates
+      // and let the backend decide (it will return 400 if location is required).
+      let locationPayload = {};
+      try {
+        const { check, request, PERMISSIONS, RESULTS } = require('react-native-permissions');
+        const { Platform } = require('react-native');
+
+        const locPerm = Platform.OS === 'android'
+          ? PERMISSIONS.ANDROID.ACCESS_FINE_LOCATION
+          : PERMISSIONS.IOS.LOCATION_WHEN_IN_USE;
+
+        let status = await check(locPerm);
+        if (status === RESULTS.DENIED) {
+          status = await request(locPerm);
+        }
+
+        if (status === RESULTS.GRANTED) {
+          const position = await new Promise((resolve, reject) => {
+            const { Geolocation } = require('react-native');
+            // Fallback: try @react-native-community/geolocation
+            const Geo = Geolocation || require('@react-native-community/geolocation');
+            Geo.getCurrentPosition(resolve, reject, {
+              enableHighAccuracy: true,
+              timeout:            10000,
+              maximumAge:         5000,
+            });
+          });
+          locationPayload = {
+            latitude:  position.coords.latitude,
+            longitude: position.coords.longitude,
+          };
+        }
+      } catch (locErr) {
+        // Non-fatal — send without location; backend will gate if needed
+        console.warn('[AttendanceWidget] Could not get location:', locErr.message);
+      }
+
+      const r = await api.post('/attendance/clock-in', { ...deviceInfo, ...locationPayload });
       setRecord(r.data);
     } catch (e) {
-      Alert.alert('Clock-in failed', e?.response?.data?.message || e.message);
+      const code    = e?.response?.data?.code;
+      const message = e?.response?.data?.message || e.message;
+
+      if (code === 'location_required') {
+        Alert.alert(
+          '📍 Location Required',
+          'Your company requires location for clock-in. Please enable Location permission and try again.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => require('react-native').Linking.openSettings() },
+          ],
+        );
+      } else if (code === 'outside_radius') {
+        Alert.alert(
+          '📍 Too Far from Office',
+          message + '\n\nAsk your admin to grant you a client meeting permission if you are visiting a client.',
+        );
+      } else {
+        Alert.alert('Clock-in failed', message);
+      }
     }
   }, []);
 

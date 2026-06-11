@@ -296,6 +296,69 @@ export default function LeadDetailScreen() {
     );
   }
 
+  // ── Save to Contacts ──────────────────────────────────────────────────────
+  // Saves the lead as a phone contact with name = "LeadName XXXX"
+  // where XXXX = last 4 digits of their phone number.
+  const handleSaveToContacts = async () => {
+    try {
+      const { PermissionsAndroid, Platform } = require('react-native');
+
+      // Request WRITE_CONTACTS permission on Android
+      if (Platform.OS === 'android') {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.WRITE_CONTACTS,
+          {
+            title:   'Save Contact',
+            message: 'SkyUp CRM needs permission to save this lead to your contacts.',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Cancel',
+          },
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          Alert.alert('Permission Denied', 'Cannot save contact without permission.');
+          return;
+        }
+      }
+
+      // Build contact name: "LeadName 4567" (last 4 digits)
+      const rawPhone = lead.mobile || lead.phone || '';
+      const digits   = rawPhone.replace(/\D/g, '');
+      const last4    = digits.slice(-4) || '0000';
+      const contactName = `${lead.name || 'Lead'} ${last4}`;
+
+      // Use Contacts API (react-native-contacts)
+      // Fallback to Linking openURL with tel intent if Contacts not installed
+      try {
+        const Contacts = require('react-native-contacts').default || require('react-native-contacts');
+        const contact = {
+          displayName:  contactName,
+          givenName:    lead.name || 'Lead',
+          familyName:   last4,
+          phoneNumbers: [{ label: 'mobile', number: rawPhone }],
+          emailAddresses: lead.email ? [{ label: 'work', email: lead.email }] : [],
+          note: `CRM Lead | Source: ${lead.source || '—'} | Status: ${lead.status || '—'}`,
+        };
+        await Contacts.addContact(contact);
+        Alert.alert('✓ Saved', `"${contactName}" added to your contacts.`);
+      } catch (contactErr) {
+        // react-native-contacts not installed — open system contact creator via Intent
+        const { Linking } = require('react-native');
+        const encoded = encodeURIComponent(contactName);
+        const uri = Platform.OS === 'android'
+          ? `intent:#Intent;action=android.contacts.action.INSERT;S.name=${encoded};S.phone=${encodeURIComponent(rawPhone)};end`
+          : `addressbook://card/new?firstname=${encodeURIComponent(lead.name || '')}&phone=${encodeURIComponent(rawPhone)}`;
+        const canOpen = await Linking.canOpenURL(uri);
+        if (canOpen) {
+          await Linking.openURL(uri);
+        } else {
+          Alert.alert('Not Supported', 'Could not open contacts app on this device.');
+        }
+      }
+    } catch (e) {
+      Alert.alert('Error', e.message || 'Failed to save contact.');
+    }
+  };
+
   const maskedPhone = maskPhone(lead.mobile);
 
   return (
@@ -356,6 +419,15 @@ export default function LeadDetailScreen() {
           <View style={styles.lockBadge}>
             <Icon name="lock" size={10} color="#93C5FD" />
           </View>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.saveContactBtn}
+          onPress={handleSaveToContacts}
+          activeOpacity={0.8}
+        >
+          <Icon name="account-plus-outline" size={18} color="#059669" style={{ marginRight: 8 }} />
+          <Text style={styles.saveContactBtnText}>Save to Contacts</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -582,6 +654,8 @@ const styles = StyleSheet.create({
 
   remarkBtn:          { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#1A1D27', marginHorizontal: 16, marginBottom: 16, borderRadius: 14, paddingVertical: 12, borderWidth: 1, borderColor: '#7C3AED40' },
   remarkBtnText:      { color: '#A78BFA', fontSize: 14, fontWeight: '700' },
+  saveContactBtn:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#1A1D27', marginHorizontal: 16, marginBottom: 8, borderRadius: 14, paddingVertical: 12, borderWidth: 1, borderColor: '#05966940' },
+  saveContactBtnText: { color: '#34D399', fontSize: 14, fontWeight: '700' },
 
   section:            { paddingHorizontal: 16, marginTop: 8 },
   sectionTitle:       { fontSize: 11, fontWeight: '700', color: '#64748B', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 },
