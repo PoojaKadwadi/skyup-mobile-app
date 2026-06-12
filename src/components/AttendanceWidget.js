@@ -16,7 +16,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
-  ActivityIndicator, Alert, AppState,
+  ActivityIndicator, Alert, AppState, Modal, TextInput, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { useIsFocused }  from '@react-navigation/native';
 import { useSelector }   from 'react-redux';
@@ -26,8 +26,11 @@ import Icon              from 'react-native-vector-icons/MaterialCommunityIcons'
 import { getSocket }     from '../services/socketService';
 import api               from '../services/api';
 import { getDeviceInfo } from '../services/deviceInfoService';
+import { cancelClockInReminder } from '../services/notificationService';
+import { syncRecordings }        from '../services/recordingService';
 import { COLORS, RADIUS, FONT } from '../theme/tokens';
 import { isOnCall, subscribeToCallState } from '../services/callStateService';
+import moment from 'moment';
 
 const STALE_MS = 30 * 1000;
 
@@ -39,7 +42,9 @@ function fmtMins(mins) {
 }
 function fmtTime(d) {
   if (!d) return '—';
-  return new Date(d).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+  // toLocaleTimeString relies on Hermes ICU data which may be incomplete
+  // and can throw on real devices — use moment instead.
+  return moment(d).format('hh:mm A');
 }
 
 // ── Status display config ─────────────────────────────────────────────────────
@@ -58,6 +63,22 @@ export default function AttendanceWidget() {
   const [elapsed, setElapsed] = useState(0);
   // onCall drives the visible "On Call" status chip only.
   const [onCall,  setOnCall]  = useState(isOnCall());
+
+  // ── Meeting permission request state ────────────────────────────────────
+  const [showMeetingModal, setShowMeetingModal] = useState(false);
+
+  // ── Live location tracking state ──────────────────────────────────────────
+  // Active when: clientMeetingPermission granted + company tracking enabled.
+  // locationTrackingRef holds the setInterval handle so we can clear it.
+  // trackingConfigRef holds { enabled, intervalMinutes } fetched after clock-in.
+  const locationTrackingRef  = useRef(null);
+  const trackingConfigRef    = useRef({ enabled: false, intervalMinutes: 15 });
+  const [isTracking, setIsTracking] = useState(false);
+
+  const [meetingReason,    setMeetingReason]    = useState('');
+  const [meetingLocation,  setMeetingLocation]  = useState('');
+  const [requestSending,   setRequestSending]   = useState(false);
+  const [requestStatus,    setRequestStatus]    = useState('idle'); // idle|pending|approved|denied
 
   const isFocused = useIsFocused();
   const userId    = useSelector(state => state.auth?.user?._id || null);
@@ -88,6 +109,20 @@ export default function AttendanceWidget() {
   useEffect(() => {
     if (!userId) return;
     const socket = getSocket();
+    // Listen for admin's response to meeting permission request
+    const handleMeetingResponse = ({ approved, grantedAt, adminName }) => {
+      setRequestStatus(approved ? 'approved' : 'denied');
+      Alert.alert(
+        approved ? '✅ Permission Granted' : '❌ Request Denied',
+        approved
+          ? `${adminName || 'Admin'} approved your remote clock-in. You can now clock in from your current location.`
+          : `${adminName || 'Admin'} denied your request. Please return to the office to clock in.`,
+      );
+      if (approved) setRequestStatus('approved');
+    };
+    const sock = getSocket();
+    if (sock) sock.on('meeting_permission_response', handleMeetingResponse);
+
     if (!socket) return;
     socketRef.current = socket;
 
@@ -257,6 +292,13 @@ export default function AttendanceWidget() {
 
       const r = await api.post('/attendance/clock-in', { ...deviceInfo, ...locationPayload });
       setRecord(r.data);
+      // Auto-sync any pending recordings after clock-in (runs silently in background).
+      // Scans all recording folders for files from today and uploads any not yet synced.
+      setTimeout(() => {
+        syncRecordings(null, 0).catch(e =>
+          console.warn('[AttendanceWidget] post-clock-in recording sync:', e.message)
+        );
+      }, 2000);
     } catch (e) {
       const code    = e?.response?.data?.code;
       const message = e?.response?.data?.message || e.message;
@@ -273,13 +315,158 @@ export default function AttendanceWidget() {
       } else if (code === 'outside_radius') {
         Alert.alert(
           '📍 Too Far from Office',
-          message + '\n\nAsk your admin to grant you a client meeting permission if you are visiting a client.',
+          message + '\n\nYou can request remote clock-in permission from your admin.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Request Permission',
+              onPress: () => setShowMeetingModal(true),
+            },
+          ],
         );
       } else {
         Alert.alert('Clock-in failed', message);
       }
     }
   }, []);
+
+  // ── Live location tracking helpers ──────────────────────────────────────
+  const stopLocationTracking = useCallback(() => {
+    if (locationTrackingRef.current) {
+      clearInterval(locationTrackingRef.current);
+      locationTrackingRef.current = null;
+      setIsTracking(false);
+      console.log('[AttendanceWidget] Location tracking stopped');
+    }
+  }, []);
+
+  const sendLocationPing = useCallback(async () => {
+    try {
+      const { check, PERMISSIONS, RESULTS } = require('react-native-permissions');
+      const { Platform } = require('react-native');
+      const locPerm = Platform.OS === 'android'
+        ? PERMISSIONS.ANDROID.ACCESS_FINE_LOCATION
+        : PERMISSIONS.IOS.LOCATION_WHEN_IN_USE;
+      const status = await check(locPerm);
+      if (status !== RESULTS.GRANTED) {
+        // Permission was revoked — stop tracking
+        stopLocationTracking();
+        return;
+      }
+      const Geo = require('@react-native-community/geolocation');
+      Geo.getCurrentPosition(
+        async (pos) => {
+          try {
+            await api.post('/attendance/location-ping', {
+              latitude:  pos.coords.latitude,
+              longitude: pos.coords.longitude,
+              accuracy:  pos.coords.accuracy,
+            });
+            console.log('[AttendanceWidget] Location ping sent', pos.coords.latitude, pos.coords.longitude);
+          } catch (e) {
+            console.warn('[AttendanceWidget] Location ping failed:', e.message);
+          }
+        },
+        (err) => console.warn('[AttendanceWidget] Geolocation error:', err.message),
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }
+      );
+    } catch (e) {
+      console.warn('[AttendanceWidget] sendLocationPing error:', e.message);
+    }
+  }, [stopLocationTracking]);
+
+  const startLocationTracking = useCallback(async (intervalMinutes = 15) => {
+    stopLocationTracking(); // clear any existing interval first
+    const ms = Math.max(5, intervalMinutes) * 60 * 1000;
+
+    // Send first ping immediately, then on interval
+    sendLocationPing();
+    locationTrackingRef.current = setInterval(sendLocationPing, ms);
+    setIsTracking(true);
+    console.log(`[AttendanceWidget] Location tracking started — ping every ${intervalMinutes} min`);
+  }, [sendLocationPing, stopLocationTracking]);
+
+  // Fetch tracking config + start/stop based on meeting permission
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const res = await api.get('/attendance/meeting-permission-status');
+        const { hasPermission, isPending, status } = res.data || {};
+
+        // Reconcile the badge with the SERVER's truth. This is the key fix for
+        // "approved in admin but still shows pending": the socket event can be
+        // missed (app backgrounded / socket dropped during approval), so we
+        // must derive the status from this poll rather than relying solely on
+        // the live event.
+        if (!cancelled) {
+          if (hasPermission || status === 'approved') {
+            setRequestStatus('approved');
+          } else if (isPending || status === 'pending') {
+            setRequestStatus('pending');
+          } else if (status === 'denied') {
+            setRequestStatus('denied');
+          } else {
+            setRequestStatus('idle');
+          }
+        }
+
+        if (!hasPermission) { stopLocationTracking(); return; }
+
+        const cfgRes = await api.get('/attendance/meeting-tracking-config');
+        trackingConfigRef.current = cfgRes.data;
+        if (!cancelled && cfgRes.data.enabled) {
+          startLocationTracking(cfgRes.data.intervalMinutes);
+        } else {
+          stopLocationTracking();
+        }
+      } catch { /* silent */ }
+    };
+    check();
+
+    // Re-check when the app returns to the foreground (covers the case where
+    // the admin approved while the app was backgrounded and the socket missed it).
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') check();
+    });
+    // And poll periodically while pending so the badge clears promptly.
+    const poll = setInterval(check, 30000);
+
+    return () => {
+      cancelled = true;
+      sub.remove();
+      clearInterval(poll);
+      stopLocationTracking();
+    };
+  }, [startLocationTracking, stopLocationTracking]);
+
+  // ── Request meeting permission ──────────────────────────────────────────
+  const handleSendMeetingRequest = useCallback(async () => {
+    if (!meetingReason.trim()) {
+      Alert.alert('Reason Required', 'Please explain why you need remote clock-in.');
+      return;
+    }
+    setRequestSending(true);
+    try {
+      await api.post('/attendance/request-meeting-permission', {
+        reason:   meetingReason.trim(),
+        location: meetingLocation.trim(),
+      });
+      setRequestStatus('pending');
+      setShowMeetingModal(false);
+      setMeetingReason('');
+      setMeetingLocation('');
+      Alert.alert(
+        '✅ Request Sent',
+        'Your admin has been notified. You will be able to clock in once they approve.',
+      );
+    } catch (e) {
+      Alert.alert('Failed', e?.response?.data?.message || e.message);
+    } finally {
+      setRequestSending(false);
+    }
+  }, [meetingReason, meetingLocation]);
+
 
   const handleClockOut = useCallback(async () => {
     Alert.alert('Clock Out', 'Are you sure you want to clock out?', [
@@ -343,10 +530,78 @@ export default function AttendanceWidget() {
     return (
       <View style={w.card}>
         <Text style={w.notClocked}>You haven't clocked in today.</Text>
-        <TouchableOpacity style={w.clockInBtn} onPress={handleClockIn}>
-          <Icon name="login" size={16} color="#fff" />
-          <Text style={w.clockInTxt}>Clock In</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <TouchableOpacity style={w.clockInBtn} onPress={handleClockIn}>
+            <Icon name="login" size={16} color="#fff" />
+            <Text style={w.clockInTxt}>Clock In</Text>
+          </TouchableOpacity>
+          {requestStatus === 'pending' ? (
+            <View style={w.pendingBadge}>
+              <Icon name="clock-outline" size={13} color="#FCD34D" />
+              <Text style={w.pendingBadgeTxt}>Awaiting approval…</Text>
+            </View>
+          ) : requestStatus === 'approved' ? (
+            <View style={[w.pendingBadge, { borderColor: '#34D399' }]}>
+              <Icon name="check-circle-outline" size={13} color="#34D399" />
+              <Text style={[w.pendingBadgeTxt, { color: '#34D399' }]}>Remote approved!</Text>
+            </View>
+          ) : (
+            <TouchableOpacity
+              style={w.requestBtn}
+              onPress={() => setShowMeetingModal(true)}
+            >
+              <Icon name="map-marker-question-outline" size={15} color="#93C5FD" />
+              <Text style={w.requestBtnTxt}>Request Remote</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* Meeting permission request modal */}
+        <Modal visible={showMeetingModal} transparent animationType="slide" onRequestClose={() => setShowMeetingModal(false)}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={w.modalOverlay}>
+            <View style={w.meetingModal}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <Text style={w.meetingModalTitle}>📍 Request Remote Clock-In</Text>
+                <TouchableOpacity onPress={() => setShowMeetingModal(false)}>
+                  <Icon name="close" size={20} color="#64748B" />
+                </TouchableOpacity>
+              </View>
+              <Text style={w.meetingModalLabel}>Reason for being away from office *</Text>
+              <TextInput
+                style={w.meetingInput}
+                placeholder="e.g. Client meeting at ABC Corp"
+                placeholderTextColor="#475569"
+                value={meetingReason}
+                onChangeText={setMeetingReason}
+                multiline
+              />
+              <Text style={w.meetingModalLabel}>Your current location (optional)</Text>
+              <TextInput
+                style={w.meetingInput}
+                placeholder="e.g. Bandra, Mumbai"
+                placeholderTextColor="#475569"
+                value={meetingLocation}
+                onChangeText={setMeetingLocation}
+              />
+              <Text style={w.meetingModalHint}>
+                Your admin will be notified and can approve your request with one tap.
+              </Text>
+              <TouchableOpacity
+                style={[w.meetingSubmitBtn, requestSending && { opacity: 0.6 }]}
+                onPress={handleSendMeetingRequest}
+                disabled={requestSending}
+              >
+                {requestSending
+                  ? <ActivityIndicator color="#fff" size="small" />
+                  : <>
+                    <Icon name="send-outline" size={16} color="#fff" style={{ marginRight: 6 }} />
+                    <Text style={w.meetingSubmitTxt}>Send Request to Admin</Text>
+                  </>
+                }
+              </TouchableOpacity>
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
       </View>
     );
   }
@@ -355,6 +610,12 @@ export default function AttendanceWidget() {
 
   return (
     <View style={w.card}>
+      {isTracking && (
+        <View style={w.trackingBanner}>
+          <View style={w.trackingDot} />
+          <Text style={w.trackingTxt}>📍 Location sharing active</Text>
+        </View>
+      )}
       <View style={w.topRow}>
         <View>
           <Text style={w.elapsedLabel}>Time Worked</Text>
@@ -405,6 +666,22 @@ const w = StyleSheet.create({
   notClocked:   { fontSize: FONT.sm, color: COLORS.textMuted, marginBottom: 12 },
   clockInBtn:   { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: COLORS.blue, borderRadius: RADIUS.md, paddingVertical: 10, paddingHorizontal: 16, alignSelf: 'flex-start' },
   clockInTxt:   { color: '#fff', fontWeight: '700', fontSize: FONT.sm },
+
+  // Request remote button
+  requestBtn:     { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#1E2236', borderRadius: RADIUS.md, paddingVertical: 10, paddingHorizontal: 12, borderWidth: 1, borderColor: '#2563EB40' },
+  requestBtnTxt:  { color: '#93C5FD', fontWeight: '700', fontSize: FONT.sm },
+  pendingBadge:   { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 8, borderRadius: RADIUS.md, borderWidth: 1, borderColor: '#CA8A04' },
+  pendingBadgeTxt:{ color: '#FCD34D', fontSize: FONT.xs, fontWeight: '700' },
+
+  // Meeting request modal
+  modalOverlay:      { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.55)' },
+  meetingModal:      { backgroundColor: '#1A1D27', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, paddingBottom: 36, borderTopWidth: 1, borderColor: '#262A38' },
+  meetingModalTitle: { fontSize: 16, fontWeight: '800', color: '#F0F2FA' },
+  meetingModalLabel: { fontSize: 11, color: '#94A3B8', fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8, marginTop: 12 },
+  meetingInput:      { backgroundColor: '#0F172A', borderRadius: 10, padding: 12, color: '#F0F2FA', borderWidth: 1, borderColor: '#262A38', minHeight: 72, textAlignVertical: 'top', marginBottom: 4 },
+  meetingModalHint:  { fontSize: 11, color: '#64748B', marginTop: 8, marginBottom: 16, lineHeight: 16 },
+  meetingSubmitBtn:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#2563EB', borderRadius: 12, paddingVertical: 13 },
+  meetingSubmitTxt:  { color: '#fff', fontSize: 14, fontWeight: '700' },
   topRow:       { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 10 },
   elapsedLabel: { fontSize: FONT.xs, color: COLORS.textMuted, marginBottom: 2 },
   elapsed:      { fontSize: 26, fontWeight: '800', color: COLORS.textPrimary, fontVariant: ['tabular-nums'] },
@@ -418,6 +695,9 @@ const w = StyleSheet.create({
   btn:          { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, borderRadius: RADIUS.md, paddingVertical: 9 },
   btnTxt:       { color: '#fff', fontSize: FONT.sm, fontWeight: '700' },
   btnGreen:     { backgroundColor: COLORS.green },
+  trackingBanner: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 7, marginBottom: 10, borderRadius: 8, backgroundColor: '#1C2A1A', borderWidth: 1, borderColor: '#34D39940' },
+  trackingDot:    { width: 7, height: 7, borderRadius: 4, backgroundColor: '#34D399' },
+  trackingTxt:    { fontSize: 11, color: '#34D399', fontWeight: '700' },
   btnAmber:     { backgroundColor: COLORS.amber },
   btnRed:       { backgroundColor: COLORS.red },
 });

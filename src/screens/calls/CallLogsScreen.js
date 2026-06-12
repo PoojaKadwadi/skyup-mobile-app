@@ -8,11 +8,21 @@ import { useDispatch, useSelector }   from 'react-redux';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import Icon                            from 'react-native-vector-icons/MaterialCommunityIcons';
 import { ScrollView as HScrollView }   from 'react-native';
+import moment                          from 'moment';
 
-// Formatters created once at module scope
-const fmtTime = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
-const fmtDate = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short' });
-const fmtFull = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true });
+// CRASH FIX: Replaced Intl.DateTimeFormat('en-IN', ...) with moment.
+// Hermes (the Android JS engine) ships without full ICU locale data, so
+// new Intl.DateTimeFormat('en-IN', ...) throws "Incomplete locale data" and
+// crashes the ENTIRE screen at module load time — before any component mounts.
+// Because this file is imported by the navigator, the crash propagates up and
+// makes unrelated screens (like the Follow-Up button on LeadDetail) appear broken.
+// moment formats dates without relying on Intl, so it works on all Android versions.
+function fmtTime(ms) { return moment(ms).format('hh:mm A'); }
+function fmtDate(ms) { return moment(ms).format('DD MMM'); }
+// fmtFull kept for reference but currently unused — removing Intl dependency anyway
+// function fmtFull(ms) { return moment(ms).format('DD MMM, hh:mm A'); }
+
+const todayLabel = moment().format('DD MMM YYYY');
 
 import { fetchTodayServerLogs, matchPhoneToLead } from '../../api/callLogsApi';
 import apiClient from '../../api/apiClient';
@@ -46,6 +56,7 @@ function formatDuration(secs) {
 }
 
 // FIX 1: Relative time for today, absolute for older — and guard bad timestamps
+// Uses moment instead of Intl.DateTimeFormat to avoid Hermes ICU crash.
 function formatTimestamp(tsRaw) {
   // Backend returns ISO date strings ("2026-05-21T06:30:00.000Z")
   // parseInt() on those yields just the year (2026) which is < 1_000_000_000_000
@@ -64,10 +75,10 @@ function formatTimestamp(tsRaw) {
     let rel = 'just now';
     if (mins >= 60) rel = `${Math.floor(mins / 60)}h ago`;
     else if (mins >= 1) rel = `${mins}m ago`;
-    return { time: fmtTime.format(ts), date: rel };
+    return { time: fmtTime(ts), date: rel };
   }
   // Older: show time + date
-  return { time: fmtTime.format(ts), date: fmtDate.format(ts) };
+  return { time: fmtTime(ts), date: fmtDate(ts) };
 }
 
 function timeAgo(ms) {
@@ -78,10 +89,6 @@ function timeAgo(ms) {
   const hrs = Math.floor(mins / 60);
   return hrs < 24 ? `${hrs}h ago` : `${Math.floor(hrs / 24)}d ago`;
 }
-
-const todayLabel = new Intl.DateTimeFormat('en-IN', {
-  day: '2-digit', month: 'short', year: 'numeric',
-}).format(new Date());
 
 const LogRow = memo(function LogRow({ item, onPress, isLoading, disabled }) {
   const cfg = CALL_TYPE_CONFIG[item.callType] || CALL_TYPE_CONFIG.incoming;

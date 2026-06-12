@@ -1,14 +1,3 @@
-// android/build.gradle
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX: Updated SDK versions:
-//   compileSdkVersion 34 → 35  (required by several AndroidX libs in 2025)
-//   targetSdkVersion  34 → 35  (Google Play enforcement deadline: Aug 2025)
-//   minSdkVersion kept at 24   (Android 7.0 — covers 99%+ of active devices)
-//   buildToolsVersion updated to 35.0.0
-//
-// AGP kept at 8.3.2 (stable; 8.6.0 has AAPT2 daemon issues on Windows).
-// ─────────────────────────────────────────────────────────────────────────────
-
 buildscript {
     ext {
         buildToolsVersion = "35.0.0"
@@ -26,16 +15,9 @@ buildscript {
         maven { url "https://maven.aliyun.com/repository/central" }
     }
     dependencies {
-        // FIX: Kept at 8.3.2 — avoids AAPT2 daemon startup crash on Windows
-        // that appears in AGP 8.6.0. Switch to 8.5+ only after
-        // https://issuetracker.google.com/issues/294408081 is resolved.
         classpath("com.android.tools.build:gradle:8.3.2")
         classpath("com.facebook.react:react-native-gradle-plugin:0.73.4")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${kotlinVersion}")
-        // ✅ FIX BUG 2 — Required for @react-native-firebase/messaging (FCM push)
-        // Download google-services.json from Firebase Console →
-        // Project Settings → Your Apps → Android → Download
-        // and place it at android/app/google-services.json
         classpath("com.google.gms:google-services:4.4.0")
     }
 }

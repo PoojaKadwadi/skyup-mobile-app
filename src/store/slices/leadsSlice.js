@@ -4,7 +4,7 @@
 //         local notification. All previous optimistic-update fixes retained.
 
 import { createSelector, createSlice, createAsyncThunk } from '@reduxjs/toolkit';
-import { getMyLeads, updateLead, addCallRemark } from '../../api/leadsApi';
+import { getMyLeads, updateLead, addCallRemark, addCallRemarkWithAttachments } from '../../api/leadsApi';
 import { checkAndNotifyNewLeads, checkAndNotifyReassignedLeads, checkAndNotifyFollowUps } from '../../services/notificationService';
 
 export const fetchLeads = createAsyncThunk(
@@ -38,13 +38,17 @@ export const patchLead = createAsyncThunk(
 // Optimistic remark — adds entry to callHistory locally, no refetch
 export const submitCallRemark = createAsyncThunk(
   'leads/submitCallRemark',
-  async ({ leadId, remark, outcome, followUpDate }, { rejectWithValue }) => {
+  async ({ leadId, remark, outcome, followUpDate, document, recording }, { rejectWithValue }) => {
     try {
-      await addCallRemark(leadId, { remark, outcome, followUpDate });
-      return { leadId, remark, outcome, followUpDate };
+      await addCallRemarkWithAttachments(leadId, { remark, outcome, followUpDate, document, recording });
+      return {
+        leadId, remark, outcome, followUpDate,
+        hasDocument:  !!document,
+        hasRecording: !!recording,
+      };
     } catch (error) {
       return rejectWithValue(
-        error.userMessage || error.response?.data?.message || 'Remark failed',
+        error.userMessage || error.message || 'Remark failed',
       );
     }
   },
@@ -117,15 +121,17 @@ const leadsSlice = createSlice({
 
     // Optimistic remark — add to callHistory locally so count updates instantly
     builder.addCase(submitCallRemark.fulfilled, (state, action) => {
-      const { leadId, remark, outcome, followUpDate } = action.payload;
+      const { leadId, remark, outcome, followUpDate, hasDocument, hasRecording } = action.payload;
       const idx = state.items.findIndex(l => l.id === leadId);
       if (idx !== -1) {
         const lead     = state.items[idx];
         const newEntry = {
           remark,
           outcome,
-          calledAt: new Date().toISOString(),
-          userName: 'Agent',
+          calledAt:    new Date().toISOString(),
+          userName:    'Agent',
+          hasDocument:  hasDocument  || false,
+          hasRecording: hasRecording || false,
         };
         state.items[idx] = {
           ...lead,

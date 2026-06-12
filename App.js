@@ -54,6 +54,12 @@ import {
 import { drainOfflineQueue } from './src/services/callSyncService';
 
 import {
+  requestContactsPermission,
+  requestWriteContactsPermission,
+  requestLocationPermission,
+} from './src/services/permissionsService';
+
+import {
   startCallDetector,
   stopCallDetector,
 } from './src/services/callDetector';
@@ -167,6 +173,11 @@ function AppManager() {
 
         // ✅ Start background sync after notifications
         startBackgroundSync();
+
+        // ✅ Request Contacts & Location permissions
+        requestContactsPermission().catch(() => {});
+        requestWriteContactsPermission().catch(() => {});
+        requestLocationPermission().catch(() => {});
 
         // ✅ NEW — Connect socket for real-time lead updates
         const userId =

@@ -25,6 +25,7 @@ import Icon                             from 'react-native-vector-icons/Material
 import { fetchLeads }                   from '../../store/slices/leadsSlice';
 import { triggerManualSync }            from '../../services/backgroundSyncService';
 import { checkAllPermissions }          from '../../services/permissionsService';
+import { checkAndNotifyNewLeads, checkAndNotifyFollowUps, checkAndScheduleClockInReminder } from '../../services/notificationService';
 import { autoSetupRecordingSync }       from '../../services/recordingService';
 import { COLORS, RADIUS, FONT }         from '../../theme/tokens';
 import AttendanceWidget                 from '../../components/AttendanceWidget';
@@ -207,6 +208,19 @@ export default function DashboardScreen() {
       const task = InteractionManager.runAfterInteractions(() => {
         const isStale = !lastFetchedAt || (Date.now() - lastFetchedAt > STALE_MS);
         if (isStale) dispatch(fetchLeads());
+
+        // Schedule (or cancel) clock-in reminder based on today's attendance.
+        // Wrapped in an async IIFE because runAfterInteractions callback cannot be async.
+        (async () => {
+          try {
+            const apiModule = require('../../services/api').default;
+            const res = await apiModule.get('/attendance/my-today');
+            checkAndScheduleClockInReminder(res.data).catch(() => {});
+          } catch {
+            // If attendance fetch fails, still schedule reminder (no record = not clocked in)
+            checkAndScheduleClockInReminder(null).catch(() => {});
+          }
+        })();
       });
       return () => task.cancel();
     }, [lastFetchedAt, dispatch]),

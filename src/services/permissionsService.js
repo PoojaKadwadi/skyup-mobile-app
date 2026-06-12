@@ -117,7 +117,69 @@ export const requestStorageWritePermission = async () => {
   return result === RESULTS.GRANTED;
 };
 
-// ── Request POST_NOTIFICATIONS (Android 13+) ──────────────────────────────────
+// ── Request READ_CONTACTS ─────────────────────────────────────────────────────
+export const requestContactsPermission = async () => {
+  const current = await check(PERMISSIONS.ANDROID.READ_CONTACTS);
+  if (current === RESULTS.GRANTED) return true;
+  if (current === RESULTS.BLOCKED) {
+    Alert.alert(
+      'Contacts Permission Required',
+      'Contacts access was denied. Please enable "Contacts" permission in your device Settings to use the Save to Contacts feature.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Open Settings', onPress: () => Linking.openSettings() },
+      ],
+    );
+    return false;
+  }
+  const result = await request(PERMISSIONS.ANDROID.READ_CONTACTS);
+  return result === RESULTS.GRANTED;
+};
+
+// ── Request WRITE_CONTACTS ────────────────────────────────────────────────────
+export const requestWriteContactsPermission = async () => {
+  const current = await check(PERMISSIONS.ANDROID.WRITE_CONTACTS);
+  if (current === RESULTS.GRANTED) return true;
+  if (current === RESULTS.BLOCKED) {
+    Alert.alert(
+      'Contacts Permission Required',
+      'Write Contacts access was denied. Please enable "Contacts" permission in your device Settings.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Open Settings', onPress: () => Linking.openSettings() },
+      ],
+    );
+    return false;
+  }
+  const result = await request(PERMISSIONS.ANDROID.WRITE_CONTACTS);
+  return result === RESULTS.GRANTED;
+};
+
+// ── Request location (fine + coarse) ─────────────────────────────────────────
+export const requestLocationPermission = async () => {
+  const results = await requestMultiple([
+    PERMISSIONS.ANDROID.ACCESS_FINE_LOCATION,
+    PERMISSIONS.ANDROID.ACCESS_COARSE_LOCATION,
+  ]);
+  const fine   = results[PERMISSIONS.ANDROID.ACCESS_FINE_LOCATION];
+  const coarse = results[PERMISSIONS.ANDROID.ACCESS_COARSE_LOCATION];
+
+  if (fine === RESULTS.GRANTED || coarse === RESULTS.GRANTED) return true;
+
+  if (fine === RESULTS.BLOCKED || coarse === RESULTS.BLOCKED) {
+    Alert.alert(
+      'Location Permission Required',
+      'Location access was denied. Please enable "Location" permission in your device Settings to use check-in and geo-tagging features.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Open Settings', onPress: () => Linking.openSettings() },
+      ],
+    );
+  }
+  return false;
+};
+
+
 export const requestNotificationPermission = async () => {
   if (Platform.Version < 33) return true;
   const result = await request(PERMISSIONS.ANDROID.POST_NOTIFICATIONS);
@@ -219,11 +281,15 @@ export const checkAllPermissions = async () => {
     check(PERMISSIONS.ANDROID.CALL_PHONE),
     check(PERMISSIONS.ANDROID.READ_CALL_LOG),
     check(readPerm),
+    check(PERMISSIONS.ANDROID.READ_CONTACTS),
+    check(PERMISSIONS.ANDROID.ACCESS_FINE_LOCATION),
   ]);
   return {
     callPhone:    checks[0] === RESULTS.GRANTED,
     readCallLog:  checks[1] === RESULTS.GRANTED,
     readStorage:  checks[2] === RESULTS.GRANTED,
+    readContacts: checks[3] === RESULTS.GRANTED,
+    location:     checks[4] === RESULTS.GRANTED,
   };
 };
 

@@ -1,26 +1,13 @@
 // src/navigation/AppNavigator.js
+// CHANGE: Replaced RecordingsScreen → ClientMeetingScreen.
+// The "Recordings" tab is gone; the new "Meeting" tab in the bottom nav
+// points to ClientMeetingScreen where agents log client meeting remarks,
+// attach documents/recordings, and set follow-up dates from the field.
 //
-// PERFORMANCE FIXES:
-//  1. Switched from @react-navigation/stack (JS-based) to
-//     @react-navigation/native-stack (fully native on both iOS & Android).
-//     JS stack runs animations in JS thread → jank when JS is busy.
-//     Native stack runs on the UI thread → always 60fps regardless of JS load.
-//
-//  2. Removed React.lazy() + Suspense. React.lazy causes a waterfall:
-//     navigate → render Suspense boundary → dynamic import → re-render.
-//     This adds 200-800ms perceived latency per navigation. Native stack
-//     with static imports is faster because modules are already in memory.
-//
-//  3. gestureEnabled: true on native stack = iOS swipe-back AND Android
-//     predictive back gesture both work out of the box. The JS stack's
-//     CardStyleInterpolators.forHorizontalIOS only works on iOS.
-//
-//  4. Animation set to 'slide_from_right' on native stack — this is the
-//     exact same animation other apps use. On Android it uses the native
-//     SharedElementTransition / Fragment animation, not a JS-driven one.
-//
-//  5. Tab navigator: lazy={true} retained so tab screens aren't mounted
-//     until first visited.
+// All perf fixes from the previous revision are retained:
+//  • native-stack (UI-thread animations)
+//  • static imports (no lazy/Suspense waterfall)
+//  • gestureEnabled + slide_from_right animation
 
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -28,23 +15,22 @@ import { createBottomTabNavigator }   from '@react-navigation/bottom-tabs';
 import { useSelector }                from 'react-redux';
 import Icon                           from 'react-native-vector-icons/MaterialCommunityIcons';
 
-// ✅ Static imports — no lazy/Suspense waterfall
-import LoginScreen      from '../screens/auth/LoginScreen';
-import DashboardScreen  from '../screens/dashboard/DashboardScreen';
-import LeadsScreen      from '../screens/leads/LeadsScreen';
-import LeadDetailScreen from '../screens/leads/LeadDetailScreen';
-import CallLogsScreen   from '../screens/calls/CallLogsScreen';
-import RecordingsScreen from '../screens/calls/RecordingsScreen';
-import ProfileScreen    from '../screens/dashboard/ProfileScreen';
+import LoginScreen         from '../screens/auth/LoginScreen';
+import DashboardScreen     from '../screens/dashboard/DashboardScreen';
+import LeadsScreen         from '../screens/leads/LeadsScreen';
+import LeadDetailScreen    from '../screens/leads/LeadDetailScreen';
+import CallLogsScreen      from '../screens/calls/CallLogsScreen';
+import ClientMeetingScreen from '../screens/calls/ClientMeetingScreen'; // ← replaces RecordingsScreen
+import ProfileScreen       from '../screens/dashboard/ProfileScreen';
+import ClockInGate         from '../components/ClockInGate';
 
 const Stack = createNativeStackNavigator();
 const Tab   = createBottomTabNavigator();
 
-// ✅ Native stack options — animations run on UI thread, not JS thread
 const SCREEN_OPTIONS = {
-  headerShown:    false,
-  gestureEnabled: true,          // swipe-back on iOS + predictive back on Android
-  animation:      'slide_from_right', // same as every other Android/iOS app
+  headerShown:       false,
+  gestureEnabled:    true,
+  animation:         'slide_from_right',
   animationDuration: 250,
 };
 
@@ -53,7 +39,7 @@ function MainTabs() {
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
-        lazy: true,              // don't mount tabs until first visited
+        lazy: true,
         tabBarActiveTintColor:   '#2563EB',
         tabBarInactiveTintColor: '#94A3B8',
         tabBarStyle: {
@@ -71,20 +57,31 @@ function MainTabs() {
         },
         tabBarIcon: ({ color, size, focused }) => {
           const icons = {
-            Dashboard:   focused ? 'view-dashboard'       : 'view-dashboard-outline',
-            Leads:       focused ? 'account-group'         : 'account-group-outline',
-            'Call Logs': focused ? 'phone-log'             : 'phone-log',
-            Profile:     focused ? 'account-circle'        : 'account-circle-outline',
+            Dashboard:   focused ? 'view-dashboard'      : 'view-dashboard-outline',
+            Leads:       focused ? 'account-group'       : 'account-group-outline',
+            'Call Logs': focused ? 'phone-log'           : 'phone-log',
+            Meeting:     focused ? 'calendar-account'    : 'calendar-account-outline', // ← new
+            Profile:     focused ? 'account-circle'      : 'account-circle-outline',
           };
           return <Icon name={icons[route.name] || 'circle'} size={size} color={color} />;
         },
       })}
     >
-      <Tab.Screen name="Dashboard"  component={DashboardScreen}  />
-      <Tab.Screen name="Leads"      component={LeadsScreen}       />
-      <Tab.Screen name="Call Logs"  component={CallLogsScreen}    />
-      <Tab.Screen name="Profile"    component={ProfileScreen}     />
+      <Tab.Screen name="Dashboard"  component={DashboardScreen}     />
+      <Tab.Screen name="Leads"      component={LeadsScreen}         />
+      <Tab.Screen name="Call Logs"  component={CallLogsScreen}      />
+      <Tab.Screen name="Meeting"    component={ClientMeetingScreen} />
+      <Tab.Screen name="Profile"    component={ProfileScreen}       />
     </Tab.Navigator>
+  );
+}
+
+// Gated tabs — employee must clock in before the bottom-tab app is shown.
+function GatedMainTabs() {
+  return (
+    <ClockInGate>
+      <MainTabs />
+    </ClockInGate>
   );
 }
 
@@ -97,9 +94,9 @@ export default function AppNavigator() {
         <Stack.Screen name="Login"      component={LoginScreen}      />
       ) : (
         <>
-          <Stack.Screen name="Main"       component={MainTabs}         />
+          <Stack.Screen name="Main"       component={GatedMainTabs}    />
           <Stack.Screen name="LeadDetail" component={LeadDetailScreen} />
-          <Stack.Screen name="Recordings" component={RecordingsScreen} />
+          {/* "Recordings" stack screen removed — ClientMeeting is now a tab */}
         </>
       )}
     </Stack.Navigator>

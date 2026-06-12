@@ -8,10 +8,12 @@ import { useDispatch, useSelector } from 'react-redux';
 import Icon                         from 'react-native-vector-icons/MaterialCommunityIcons';
 import { logout }                   from '../../store/slices/authSlice';
 import { checkAllPermissions, requestCallPermission,
-         requestCallLogPermission, requestStoragePermission }
+         requestCallLogPermission, requestStoragePermission,
+         requestLocationPermission }
   from '../../services/permissionsService';
 import { triggerManualSync }        from '../../services/backgroundSyncService';
 import { getCustomRecordingPath, setCustomRecordingPath } from '../../services/recordingPathService';
+import moment from 'moment';
 
 let RNFS;
 try { RNFS = require('react-native-fs'); } catch {}
@@ -22,7 +24,7 @@ export default function ProfileScreen() {
   const { lastSyncedAt } = useSelector((s) => s.calls);
   const { pendingQueue }  = useSelector((s) => s.sync);
 
-  const [perms, setPerms] = React.useState({ callPhone: false, readCallLog: false, readStorage: false });
+  const [perms, setPerms] = React.useState({ callPhone: false, readCallLog: false, readStorage: false, readContacts: false, location: false });
   const [customPath,     setCustomPath]     = React.useState(null);   // saved folder
   const [browsedPath,    setBrowsedPath]    = React.useState(null);   // currently browsing
   const [browseEntries,  setBrowseEntries]  = React.useState([]);     // folder contents
@@ -114,9 +116,19 @@ export default function ProfileScreen() {
   };
 
   const requestPerm = async (type) => {
-    if (type === 'call')    await requestCallPermission();
-    if (type === 'callLog') await requestCallLogPermission();
-    if (type === 'storage') await requestStoragePermission();
+    if (type === 'call')     await requestCallPermission();
+    if (type === 'callLog')  await requestCallLogPermission();
+    if (type === 'storage')  await requestStoragePermission();
+    if (type === 'contacts') {
+      // FIX: Use PermissionsAndroid (built-in) — react-native-permissions
+      // is not in the compiled bundle so require() throws silently.
+      const { PermissionsAndroid } = require('react-native');
+      await PermissionsAndroid.requestMultiple([
+        PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
+        PermissionsAndroid.PERMISSIONS.WRITE_CONTACTS,
+      ]);
+    }
+    if (type === 'location')  await requestLocationPermission();
     const updated = await checkAllPermissions();
     setPerms(updated);
   };
@@ -145,7 +157,7 @@ export default function ProfileScreen() {
           <Text style={styles.sectionTitle}>Sync Status</Text>
           <View style={styles.infoCard}>
             <Row icon="cloud-check" label="Last Synced"
-              value={lastSyncedAt ? new Date(lastSyncedAt).toLocaleString() : 'Never'} />
+              value={lastSyncedAt ? moment(lastSyncedAt).format('DD MMM, hh:mm A') : 'Never'} />
             <Row icon="clock-outline" label="Pending Items"
               value={pendingQueue.length > 0 ? `${pendingQueue.length} queued` : 'None'} />
             <TouchableOpacity style={styles.syncBtn} onPress={triggerManualSync}>
@@ -173,6 +185,16 @@ export default function ProfileScreen() {
               label="Read Storage (Recordings)"
               granted={perms.readStorage}
               onRequest={() => requestPerm('storage')}
+            />
+            <PermRow
+              label="Contacts (Save to Contacts)"
+              granted={perms.readContacts}
+              onRequest={() => requestPerm('contacts')}
+            />
+            <PermRow
+              label="Location (Client Check-in)"
+              granted={perms.location}
+              onRequest={() => requestPerm('location')}
             />
           </View>
         </View>

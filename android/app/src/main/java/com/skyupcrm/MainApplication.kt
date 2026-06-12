@@ -12,6 +12,7 @@ import com.facebook.soloader.SoLoader
 // PIECE 1 ADDITION: import the custom telephony package so we can register it
 // alongside the autolinked packages from PackageList.
 import com.skyupcrm.calldetect.CallStatePackage
+import com.skyupcrm.contacts.ContactsPackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -26,6 +27,7 @@ class MainApplication : Application(), ReactApplication {
         override fun getPackages(): List<ReactPackage> {
           val packages = PackageList(this@MainApplication).packages
           packages.add(CallStatePackage())
+          packages.add(ContactsPackage())
           return packages
         }
 

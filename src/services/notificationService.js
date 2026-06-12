@@ -745,6 +745,121 @@ export async function checkAndNotifyReassignedLeads(
 // ─────────────────────────────────────────────────────────────────────────────
 // clearNotificationState()
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// scheduleClockInReminder()
+// ─────────────────────────────────────────────────────────────────────────────
+// Schedules a local notification to fire at the given time if the employee
+// hasn't clocked in yet. Called from DashboardScreen after the attendance
+// record is loaded and the employee is still not clocked in.
+//
+// We use notifee.createTriggerNotification() with a TimestampTrigger so the
+// notification fires even if the app is in the background.
+//
+// If the employee has already clocked in, cancelClockInReminder() is called
+// to cancel any pending reminder so they don't get a spurious alert.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CHANNEL_CLOCK_IN    = 'clock_in_reminder_v1';
+const CLOCK_IN_NOTIF_ID   = 'clock_in_reminder';
+let   _clockInChannelReady = false;
+
+async function _ensureClockInChannel() {
+  if (!notifee || _clockInChannelReady) return;
+  try {
+    await notifee.createChannel({
+      id:          CHANNEL_CLOCK_IN,
+      name:        'Clock-In Reminder',
+      importance:  IMPORTANCE_HIGH,
+      sound:       'default',
+      vibration:   true,
+      badge:       true,
+    });
+    _clockInChannelReady = true;
+  } catch {}
+}
+
+export async function scheduleClockInReminder(triggerDate) {
+  if (!notifee) return;
+  try {
+    await _ensureClockInChannel();
+    // Cancel any existing reminder before scheduling a new one
+    await cancelClockInReminder();
+
+    const TriggerType = notifee.TriggerType ?? require('@notifee/react-native').TriggerType;
+    const trigger = {
+      type:      TriggerType?.TIMESTAMP ?? 0,
+      timestamp: triggerDate instanceof Date ? triggerDate.getTime() : triggerDate,
+    };
+
+    await notifee.createTriggerNotification(
+      {
+        id:    CLOCK_IN_NOTIF_ID,
+        title: '⏰ You haven\'t clocked in yet',
+        body:  'Your shift may have started. Please clock in to start tracking your attendance.',
+        android: {
+          channelId: CHANNEL_CLOCK_IN,
+          importance: IMPORTANCE_HIGH,
+          smallIcon: 'ic_notification',
+          pressAction: { id: 'open_app', launchActivity: 'default' },
+          actions: [
+            {
+              title:       'Open App',
+              pressAction: { id: 'open_app', launchActivity: 'default' },
+            },
+          ],
+        },
+        ios: {
+          sound:    'default',
+          critical: false,
+        },
+      },
+      trigger,
+    );
+    console.log('[Notifications] ⏰ Clock-in reminder scheduled for', triggerDate);
+  } catch (e) {
+    console.warn('[Notifications] scheduleClockInReminder error:', e.message);
+  }
+}
+
+export async function cancelClockInReminder() {
+  if (!notifee) return;
+  try {
+    await notifee.cancelNotification(CLOCK_IN_NOTIF_ID);
+    await notifee.cancelTriggerNotification(CLOCK_IN_NOTIF_ID);
+  } catch {}
+}
+
+// checkAndScheduleClockInReminder(attendanceRecord)
+// Call this whenever attendance data is refreshed:
+//   - If record is null / no loginTime → schedule a reminder at 9:30 AM today
+//     (or +5 min from now if already past 9:30, for immediate reminder)
+//   - If loginTime exists → cancel any pending reminder
+export async function checkAndScheduleClockInReminder(record) {
+  if (record?.loginTime) {
+    // Already clocked in — cancel any pending reminder
+    await cancelClockInReminder();
+    return;
+  }
+
+  // Not clocked in — schedule a reminder
+  const now     = new Date();
+  const trigger = new Date();
+
+  // Target: 9:30 AM today
+  trigger.setHours(9, 30, 0, 0);
+
+  if (trigger <= now) {
+    // Already past 9:30 AM — fire in 5 minutes as an immediate nudge
+    trigger.setTime(now.getTime() + 5 * 60 * 1000);
+  }
+
+  // Don't schedule if it's already evening (after 8 PM — shift likely not needed)
+  if (now.getHours() >= 20) return;
+
+  await scheduleClockInReminder(trigger);
+}
+
 export async function clearNotificationState() {
   try {
     await AsyncStorage.multiRemove([

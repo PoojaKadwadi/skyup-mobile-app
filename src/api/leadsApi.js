@@ -62,6 +62,105 @@ export const addCallRemark = async (leadId, { remark, outcome, followUpDate }) =
   return response.data;
 };
 
+// ── Add remark with optional file attachments (doc + recording) ───────────────
+// Uses native fetch() — NOT the shared axios instance — because axios bleeds
+// its 'Content-Type: application/json' default into multipart requests,
+// breaking the boundary string and causing a server-side parse failure.
+// fetch() derives Content-Type + boundary from the FormData automatically.
+export const addCallRemarkWithAttachments = async (
+  leadId,
+  { remark, outcome, followUpDate, document, recording },
+) => {
+  // If neither attachment is provided, fall back to the plain JSON patch
+  if (!document && !recording) {
+    return addCallRemark(leadId, { remark, outcome, followUpDate });
+  }
+
+  const { BASE_URL } = require('../config/config');
+  const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+
+  const MIME_MAP = {
+    // Documents
+    pdf: 'application/pdf',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    txt: 'text/plain',
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+    // Audio
+    mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac',
+    wav: 'audio/wav',  amr: 'audio/amr', '3gp': 'audio/3gpp',
+    ogg: 'audio/ogg',  opus: 'audio/ogg',
+  };
+
+  const toUri = (path) =>
+    path.startsWith('content://') || path.startsWith('file://') ? path : `file://${path}`;
+
+  const mimeFor = (path) => {
+    const ext = (path.split('.').pop() || '').toLowerCase();
+    return MIME_MAP[ext] || 'application/octet-stream';
+  };
+
+  const form = new FormData();
+  form.append('remark',  remark);
+  form.append('outcome', outcome);
+  if (followUpDate) form.append('followUpDate', followUpDate);
+
+  if (document) {
+    const name = document.name || document.uri.split('/').pop();
+    form.append('document', {
+      uri:  toUri(document.uri),
+      name,
+      type: document.type || mimeFor(document.uri),
+    });
+  }
+
+  if (recording) {
+    const name = recording.name || recording.uri.split('/').pop();
+    form.append('recording', {
+      uri:  toUri(recording.uri),
+      name,
+      type: recording.type || mimeFor(recording.uri),
+    });
+  }
+
+  let token = null;
+  try { token = await AsyncStorage.getItem('auth_token'); } catch {}
+
+  const headers = { Accept: 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 120_000);
+
+  let response;
+  try {
+    response = await fetch(`${BASE_URL}/lead/${leadId}/remark`, {
+      method:  'POST',
+      headers,
+      body:    form,
+      signal:  controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError')
+      throw new Error('Upload timed out. Please try on a faster connection.');
+    throw new Error(`Network error — check your connection.\n(${err.message})`);
+  }
+  clearTimeout(timeoutId);
+
+  let body;
+  try { body = await response.json(); } catch { body = {}; }
+
+  if (!response.ok) {
+    const msg = body?.message || body?.error || '';
+    throw new Error(msg || `Upload failed (HTTP ${response.status}). Please try again.`);
+  }
+
+  return body;
+};
+
 // ─── Format helper ────────────────────────────────────────────────────────────
 function formatLead(lead) {
   const callHistory = Array.isArray(lead.callHistory) ? lead.callHistory : [];
@@ -77,7 +176,11 @@ function formatLead(lead) {
   return {
     id:             String(lead._id),
     name:           lead.name           || 'Unknown',
-    mobile:         lead.mobile         || lead.phone || '',
+    // `mobile` stays the canonical/primary number for backward compatibility.
+    // Prefer the explicit primaryPhone when present, else fall back to mobile/phone.
+    mobile:         lead.primaryPhone   || lead.mobile || lead.phone || '',
+    primaryPhone:   lead.primaryPhone   || lead.mobile || lead.phone || '',
+    secondaryPhone: lead.secondaryPhone || '',
     email:          lead.email          || '',
     source:         lead.source         || 'Web Form',
     campaign:       lead.campaign       || '—',
