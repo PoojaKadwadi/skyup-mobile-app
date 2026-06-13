@@ -252,12 +252,17 @@ export default function ClockInGate({ children }) {
             </Text>
           </View>
         ) : requestStatus === 'approved' ? (
-          <View style={[s.statusBadge, { borderColor: '#34D39960' }]}>
+          <TouchableOpacity
+            style={[s.statusBadge, { borderColor: '#34D39960' }, clocking && { opacity: 0.6 }]}
+            onPress={handleClockIn}
+            disabled={clocking}
+            activeOpacity={0.8}
+          >
             <Icon name="check-circle-outline" size={14} color="#34D399" />
             <Text style={[s.statusBadgeText, { color: '#34D399' }]}>
               Remote approved — tap Clock In
             </Text>
-          </View>
+          </TouchableOpacity>
         ) : requestStatus === 'denied' ? (
           <View style={[s.statusBadge, { borderColor: COLORS.red + '60' }]}>
             <Icon name="close-circle-outline" size={14} color={COLORS.redLight} />
