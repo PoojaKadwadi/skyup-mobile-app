@@ -60,6 +60,7 @@ const STATUS_STYLES = {
 export default function AttendanceWidget() {
   const [record,  setRecord]  = useState(null);
   const [loading, setLoading] = useState(true);
+  const [clockingIn, setClockingIn] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   // onCall drives the visible "On Call" status chip only.
   const [onCall,  setOnCall]  = useState(isOnCall());
@@ -75,10 +76,28 @@ export default function AttendanceWidget() {
   const trackingConfigRef    = useRef({ enabled: false, intervalMinutes: 15 });
   const [isTracking, setIsTracking] = useState(false);
 
+  // Office geofence (fetched after clock-in). When the employee is clocked in
+  // and moves OUTSIDE this radius, field-work location tracking auto-starts —
+  // no button, no admin permission needed. Stops when back inside / clocked out.
+  const geofenceRef        = useRef({ enabled: false, latitude: null, longitude: null, radiusMeters: 100, intervalMinutes: 15 });
+  const geofenceWatchRef   = useRef(null);
+  const [onFieldWork, setOnFieldWork] = useState(false);
+
   const [meetingReason,    setMeetingReason]    = useState('');
   const [meetingLocation,  setMeetingLocation]  = useState('');
   const [requestSending,   setRequestSending]   = useState(false);
   const [requestStatus,    setRequestStatus]    = useState('idle'); // idle|pending|approved|denied
+
+  // ── Ideal time + remark ───────────────────────────────────────────────────
+  // Lets the employee record their planned/ideal working time for the day and
+  // a reason/remark explaining it (e.g. "Client visit, will start at 11"). The
+  // value is shown on the attendance card and persisted to the backend.
+  const [idealTime,       setIdealTime]       = useState('');   // free text e.g. "10:00 AM - 6:00 PM"
+  const [idealRemark,     setIdealRemark]     = useState('');   // reason for the ideal time
+  const [showIdealModal,  setShowIdealModal]  = useState(false);
+  const [idealDraftTime,  setIdealDraftTime]  = useState('');
+  const [idealDraftRemark,setIdealDraftRemark]= useState('');
+  const [idealSaving,     setIdealSaving]     = useState(false);
 
   const isFocused = useIsFocused();
   const userId    = useSelector(state => state.auth?.user?._id || null);
@@ -109,8 +128,15 @@ export default function AttendanceWidget() {
   useEffect(() => {
     if (!userId) return;
     const socket = getSocket();
-    // Listen for admin's response to meeting permission request
-    const handleMeetingResponse = ({ approved, grantedAt, adminName }) => {
+    if (!socket) return;
+    socketRef.current = socket;
+
+    // FIX: one handler, one registration, properly cleaned up.
+    // The old code called getSocket() TWICE — once as 'socket' and once as 'sock' —
+    // and registered meeting_permission_response on the second reference without
+    // ever removing it in the cleanup. Every userId change stacked another listener,
+    // causing the alert to fire multiple times per response.
+    const handleMeetingResponse = ({ approved, adminName }) => {
       setRequestStatus(approved ? 'approved' : 'denied');
       Alert.alert(
         approved ? '✅ Permission Granted' : '❌ Request Denied',
@@ -118,13 +144,8 @@ export default function AttendanceWidget() {
           ? `${adminName || 'Admin'} approved your remote clock-in. You can now clock in from your current location.`
           : `${adminName || 'Admin'} denied your request. Please return to the office to clock in.`,
       );
-      if (approved) setRequestStatus('approved');
     };
-    const sock = getSocket();
-    if (sock) sock.on('meeting_permission_response', handleMeetingResponse);
-
-    if (!socket) return;
-    socketRef.current = socket;
+    socket.on('meeting_permission_response', handleMeetingResponse);
 
     // Join attendance room on the existing shared connection
     const joinRoom = () => socket.emit('att_join', { userId });
@@ -143,6 +164,8 @@ export default function AttendanceWidget() {
     socket.on('attendance:updated', handleAttUpdate);
 
     return () => {
+      // FIX: clean up ALL listeners including meeting_permission_response
+      socket.off('meeting_permission_response', handleMeetingResponse);
       socket.off('attendance:updated', handleAttUpdate);
       socket.off('connect', joinRoom);
       socketRef.current = null;
@@ -153,6 +176,41 @@ export default function AttendanceWidget() {
   // ── Stable refs for tick — avoids re-registering interval on every record update ──
   const recordRef = useRef(null);
   useEffect(() => { recordRef.current = record; }, [record]);
+
+  // ── Hydrate ideal time / remark from the attendance record ────────────────
+  useEffect(() => {
+    if (record) {
+      setIdealTime(record.idealTime || '');
+      setIdealRemark(record.idealRemark || record.idealTimeRemark || '');
+    }
+  }, [record?.idealTime, record?.idealRemark, record?.idealTimeRemark]);
+
+  // ── Save ideal time + remark ──────────────────────────────────────────────
+  const handleSaveIdeal = useCallback(async () => {
+    setIdealSaving(true);
+    try {
+      // Backend endpoint: persists the user's planned working time + reason for
+      // today's attendance record. Returns the updated record.
+      const r = await api.post('/attendance/ideal-time', {
+        idealTime:   idealDraftTime.trim(),
+        idealRemark: idealDraftRemark.trim(),
+      });
+      if (r?.data) setRecord(r.data);
+      setIdealTime(idealDraftTime.trim());
+      setIdealRemark(idealDraftRemark.trim());
+      setShowIdealModal(false);
+    } catch (e) {
+      Alert.alert('Could not save', e?.response?.data?.message || e.message);
+    } finally {
+      setIdealSaving(false);
+    }
+  }, [idealDraftTime, idealDraftRemark]);
+
+  const openIdealModal = useCallback(() => {
+    setIdealDraftTime(idealTime);
+    setIdealDraftRemark(idealRemark);
+    setShowIdealModal(true);
+  }, [idealTime, idealRemark]);
 
   // ── Call-state chip sync ───────────────────────────────────────────────────
   // Updates the "On Call" status chip when phone state changes.
@@ -247,14 +305,84 @@ export default function AttendanceWidget() {
   }, []); // PERF FIX: registered exactly once
 
   // ── Actions ───────────────────────────────────────────────────────────────
+  // Guards against double-taps / overlapping clock-in attempts. Without this,
+  // tapping the button repeatedly (which users do when GPS is slow) queues
+  // several clock-in calls and makes the app feel frozen ("not responding").
+  const clockingInRef = useRef(false);
+
+  // Get a device location WITHOUT hanging the UI.
+  // The old code did a single high-accuracy fix (timeout 10s, maximumAge 5s):
+  // indoors that often runs the full 10s, frequently fails, and rejects good
+  // recent fixes — so users retried and the app appeared stuck. This tries a
+  // quick cached/coarse fix first, then a high-accuracy fix, and ALWAYS resolves
+  // (never rejects) so clock-in proceeds even if GPS is slow — the backend
+  // decides whether the location is good enough.
+  const getLocationSafe = useCallback(() => {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (payload) => { if (!settled) { settled = true; resolve(payload); } };
+
+      // Hard ceiling: never let location hold up clock-in more than 12s total.
+      const hardStop = setTimeout(() => done({}), 12000);
+
+      let Geo;
+      try {
+        const RN = require('react-native');
+        Geo = RN.Geolocation || require('@react-native-community/geolocation');
+      } catch (e) {
+        clearTimeout(hardStop);
+        return done({});
+      }
+      if (!Geo || typeof Geo.getCurrentPosition !== 'function') {
+        clearTimeout(hardStop);
+        return done({});
+      }
+
+      const toPayload = (position) => ({
+        latitude:  position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy:  position.coords.accuracy,
+      });
+
+      // Phase 2: high-accuracy fix (better for the 100m office radius).
+      const tryHighAccuracy = () => {
+        Geo.getCurrentPosition(
+          (pos)  => { clearTimeout(hardStop); done(toPayload(pos)); },
+          ()     => { clearTimeout(hardStop); done({}); }, // give up gracefully
+          // FIX: timeout 9s → 5s, maximumAge 0 → 30000.
+          // maximumAge:0 forced a fresh satellite fix every clock-in (slow).
+          // A 30s cached fix is perfectly fine for a 100m office geofence.
+          { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 },
+        );
+      };
+
+      // Phase 1: fast coarse/cached fix (accepts a recent fix up to 60s old).
+      // If it returns a precise-enough fix we use it immediately; otherwise we
+      // escalate to high accuracy.
+      Geo.getCurrentPosition(
+        (pos) => {
+          const acc = pos?.coords?.accuracy ?? 9999;
+          if (acc <= 50) { clearTimeout(hardStop); done(toPayload(pos)); }
+          else tryHighAccuracy(); // coarse fix — try to refine
+        },
+        ()    => tryHighAccuracy(), // no cached fix — go straight to high accuracy
+        { enableHighAccuracy: false, timeout: 4000, maximumAge: 60000 },
+      );
+    });
+  }, []);
+
   const handleClockIn = useCallback(async () => {
+    // Block overlapping attempts.
+    if (clockingInRef.current) return;
+    clockingInRef.current = true;
+    setClockingIn(true);
     try {
       const deviceInfo = await getDeviceInfo();
 
       // ── Attempt to get device location for location-restricted companies ──
       // We always try to get location — the backend decides whether to enforce it.
-      // If location permission is denied, we send the request without coordinates
-      // and let the backend decide (it will return 400 if location is required).
+      // If permission is denied, we send without coordinates and let the backend
+      // gate (it returns 400 if location is required).
       let locationPayload = {};
       try {
         const { check, request, PERMISSIONS, RESULTS } = require('react-native-permissions');
@@ -270,20 +398,7 @@ export default function AttendanceWidget() {
         }
 
         if (status === RESULTS.GRANTED) {
-          const position = await new Promise((resolve, reject) => {
-            const { Geolocation } = require('react-native');
-            // Fallback: try @react-native-community/geolocation
-            const Geo = Geolocation || require('@react-native-community/geolocation');
-            Geo.getCurrentPosition(resolve, reject, {
-              enableHighAccuracy: true,
-              timeout:            10000,
-              maximumAge:         5000,
-            });
-          });
-          locationPayload = {
-            latitude:  position.coords.latitude,
-            longitude: position.coords.longitude,
-          };
+          locationPayload = await getLocationSafe();
         }
       } catch (locErr) {
         // Non-fatal — send without location; backend will gate if needed
@@ -293,7 +408,6 @@ export default function AttendanceWidget() {
       const r = await api.post('/attendance/clock-in', { ...deviceInfo, ...locationPayload });
       setRecord(r.data);
       // Auto-sync any pending recordings after clock-in (runs silently in background).
-      // Scans all recording folders for files from today and uploads any not yet synced.
       setTimeout(() => {
         syncRecordings(null, 0).catch(e =>
           console.warn('[AttendanceWidget] post-clock-in recording sync:', e.message)
@@ -327,8 +441,11 @@ export default function AttendanceWidget() {
       } else {
         Alert.alert('Clock-in failed', message);
       }
+    } finally {
+      clockingInRef.current = false;
+      setClockingIn(false);
     }
-  }, []);
+  }, [getLocationSafe]);
 
   // ── Live location tracking helpers ──────────────────────────────────────
   const stopLocationTracking = useCallback(() => {
@@ -386,9 +503,107 @@ export default function AttendanceWidget() {
     console.log(`[AttendanceWidget] Location tracking started — ping every ${intervalMinutes} min`);
   }, [sendLocationPing, stopLocationTracking]);
 
-  // Fetch tracking config + start/stop based on meeting permission
+  // Haversine distance in metres (mirror of the backend geofence check).
+  const distanceMetres = useCallback((lat1, lon1, lat2, lon2) => {
+    const R = 6371000, toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }, []);
+
+  // ── Field-work auto-tracking: detect leaving the office geofence ─────────────
+  // While clocked in (and the company has a geofence), poll GPS. When the
+  // employee moves OUTSIDE the office radius, auto-start location breadcrumbs
+  // (the same lat/lng the admin/super-admin attendance page shows). When back
+  // inside, stop. Fully automatic — no button, no permission request.
+  // NOTE: reliable background capture needs "Allow all the time" location; with
+  // only "while using app", breadcrumbs pause when the app is backgrounded.
+  const isClockedIn = !!(record && record.loginTime && !record.logoutTime);
   useEffect(() => {
     let cancelled = false;
+
+    const clearWatch = () => {
+      if (geofenceWatchRef.current) { clearInterval(geofenceWatchRef.current); geofenceWatchRef.current = null; }
+    };
+
+    if (!isClockedIn) {
+      clearWatch();
+      // Only stop tracking if it was started by field-work (not meeting-permission).
+      if (onFieldWork) { stopLocationTracking(); setOnFieldWork(false); }
+      return;
+    }
+
+    const startWatch = async () => {
+      // Fetch the office geofence once per clock-in.
+      try {
+        const res = await api.get('/attendance/geofence-config');
+        geofenceRef.current = res.data || geofenceRef.current;
+      } catch { /* if it fails, no geofence → no auto-tracking */ }
+      const gf = geofenceRef.current;
+      if (!gf.enabled || gf.latitude == null || gf.longitude == null) return; // no geofence configured
+
+      const checkPosition = () => {
+        const Geo = require('@react-native-community/geolocation');
+        Geo.getCurrentPosition(
+          (pos) => {
+            if (cancelled) return;
+            const dist = distanceMetres(pos.coords.latitude, pos.coords.longitude, gf.latitude, gf.longitude);
+            const outside = dist > (gf.radiusMeters || 100);
+            if (outside && !onFieldWork) {
+              // Left the premises → begin field-work breadcrumbs.
+              setOnFieldWork(true);
+              startLocationTracking(gf.intervalMinutes || 15);
+              console.log('[AttendanceWidget] Left office geofence → field-work tracking ON');
+            } else if (!outside && onFieldWork) {
+              // Returned to the office → stop breadcrumbs.
+              setOnFieldWork(false);
+              stopLocationTracking();
+              console.log('[AttendanceWidget] Back inside office geofence → field-work tracking OFF');
+            }
+          },
+          (err) => console.warn('[AttendanceWidget] geofence check error:', err.message),
+          { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }
+        );
+      };
+
+      checkPosition(); // immediate
+      // Re-check position every 2 minutes (lighter than the breadcrumb interval).
+      geofenceWatchRef.current = setInterval(checkPosition, 2 * 60 * 1000);
+    };
+
+    startWatch();
+    return () => { cancelled = true; clearWatch(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isClockedIn, onFieldWork, startLocationTracking, stopLocationTracking, distanceMetres]);
+
+  // Bumped whenever a fresh meeting-permission request is sent, so the
+  // polling effect below can restart even if it had already settled+stopped
+  // from a previous request (e.g. a prior request was denied, polling
+  // stopped, then the employee sends a brand new request).
+  const [pollEpoch, setPollEpoch] = useState(0);
+
+  // Fetch tracking config + start/stop based on meeting permission.
+  //
+  // PERF FIX: this previously polled every 30s for the ENTIRE app session,
+  // for every employee, regardless of whether they were clocked in or had
+  // ever requested meeting permission — each tick costing a `protect` +
+  // `requireFeature("attendance")` round-trip (and a second call to
+  // meeting-tracking-config whenever hasPermission was true). Now:
+  //   1. The poll only runs while the employee is clocked in (isClockedIn) —
+  //      there's nothing to reconcile while logged out.
+  //   2. Once status settles to 'pending' (still needs polling to catch the
+  //      admin's decision) it keeps going, but once it settles to 'approved'
+  //      or 'denied' with no new request in flight, we stop the interval —
+  //      a fresh request later re-arms it via pollEpoch.
+  useEffect(() => {
+    if (!isClockedIn) {
+      // Logged out — nothing to reconcile. Don't poll.
+      return;
+    }
+
+    let cancelled = false;
+    let poll = null;
+
     const check = async () => {
       try {
         const res = await api.get('/attendance/meeting-permission-status');
@@ -399,26 +614,39 @@ export default function AttendanceWidget() {
         // missed (app backgrounded / socket dropped during approval), so we
         // must derive the status from this poll rather than relying solely on
         // the live event.
+        let settled = 'idle';
         if (!cancelled) {
           if (hasPermission || status === 'approved') {
-            setRequestStatus('approved');
+            settled = 'approved';
           } else if (isPending || status === 'pending') {
-            setRequestStatus('pending');
+            settled = 'pending';
           } else if (status === 'denied') {
-            setRequestStatus('denied');
+            settled = 'denied';
+          }
+          setRequestStatus(settled);
+        }
+
+        if (!hasPermission) {
+          // No remote-meeting permission. Only stop tracking if it ISN'T being
+          // driven by field-work geofence-exit detection (which manages its own
+          // start/stop). Otherwise we'd kill field-work breadcrumbs.
+          if (!onFieldWork) stopLocationTracking();
+        } else {
+          const cfgRes = await api.get('/attendance/meeting-tracking-config');
+          trackingConfigRef.current = cfgRes.data;
+          if (!cancelled && cfgRes.data.enabled) {
+            startLocationTracking(cfgRes.data.intervalMinutes);
           } else {
-            setRequestStatus('idle');
+            stopLocationTracking();
           }
         }
 
-        if (!hasPermission) { stopLocationTracking(); return; }
-
-        const cfgRes = await api.get('/attendance/meeting-tracking-config');
-        trackingConfigRef.current = cfgRes.data;
-        if (!cancelled && cfgRes.data.enabled) {
-          startLocationTracking(cfgRes.data.intervalMinutes);
-        } else {
-          stopLocationTracking();
+        // Stop polling once we've reached a settled, non-pending state —
+        // nothing left to reconcile until the employee sends a new request
+        // (which bumps pollEpoch and restarts this effect).
+        if (settled !== 'pending' && poll) {
+          clearInterval(poll);
+          poll = null;
         }
       } catch { /* silent */ }
     };
@@ -429,16 +657,19 @@ export default function AttendanceWidget() {
     const sub = AppState.addEventListener('change', (s) => {
       if (s === 'active') check();
     });
-    // And poll periodically while pending so the badge clears promptly.
-    const poll = setInterval(check, 30000);
+    // Poll periodically while pending so the badge clears promptly; cleared
+    // early by check() itself once status settles to approved/denied.
+    poll = setInterval(check, 30000);
 
     return () => {
       cancelled = true;
       sub.remove();
-      clearInterval(poll);
-      stopLocationTracking();
+      if (poll) clearInterval(poll);
+      // Don't tear down field-work breadcrumbs here; the geofence effect owns them.
+      if (!onFieldWork) stopLocationTracking();
     };
-  }, [startLocationTracking, stopLocationTracking]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isClockedIn, pollEpoch, startLocationTracking, stopLocationTracking]);
 
   // ── Request meeting permission ──────────────────────────────────────────
   const handleSendMeetingRequest = useCallback(async () => {
@@ -453,6 +684,7 @@ export default function AttendanceWidget() {
         location: meetingLocation.trim(),
       });
       setRequestStatus('pending');
+      setPollEpoch((e) => e + 1); // re-arm polling in case it had settled+stopped
       setShowMeetingModal(false);
       setMeetingReason('');
       setMeetingLocation('');
@@ -531,9 +763,14 @@ export default function AttendanceWidget() {
       <View style={w.card}>
         <Text style={w.notClocked}>You haven't clocked in today.</Text>
         <View style={{ flexDirection: 'row', gap: 8 }}>
-          <TouchableOpacity style={w.clockInBtn} onPress={handleClockIn}>
+          <TouchableOpacity
+            style={[w.clockInBtn, clockingIn && { opacity: 0.6 }]}
+            onPress={handleClockIn}
+            disabled={clockingIn}
+            activeOpacity={0.8}
+          >
             <Icon name="login" size={16} color="#fff" />
-            <Text style={w.clockInTxt}>Clock In</Text>
+            <Text style={w.clockInTxt}>{clockingIn ? 'Clocking in…' : 'Clock In'}</Text>
           </TouchableOpacity>
           {requestStatus === 'pending' ? (
             <View style={w.pendingBadge}>
@@ -638,6 +875,31 @@ export default function AttendanceWidget() {
         </View>
       </View>
 
+      {/* ── Ideal Time & Remark ── */}
+      <View style={w.idealBox}>
+        <View style={w.idealHeader}>
+          <View style={w.idealHeaderLeft}>
+            <Icon name="clock-time-four-outline" size={13} color={COLORS.blueLight} />
+            <Text style={w.idealTitle}>Ideal Working Time</Text>
+          </View>
+          <TouchableOpacity onPress={openIdealModal} style={w.idealEditBtn}>
+            <Icon name={idealTime || idealRemark ? 'pencil-outline' : 'plus'} size={13} color={COLORS.blueLight} />
+            <Text style={w.idealEditTxt}>{idealTime || idealRemark ? 'Edit' : 'Add'}</Text>
+          </TouchableOpacity>
+        </View>
+        {idealTime ? (
+          <Text style={w.idealTimeTxt}>{idealTime}</Text>
+        ) : (
+          <Text style={w.idealEmptyTxt}>No ideal time set for today</Text>
+        )}
+        {idealRemark ? (
+          <View style={w.idealRemarkRow}>
+            <Icon name="message-reply-text-outline" size={12} color={COLORS.textMuted} style={{ marginTop: 1 }} />
+            <Text style={w.idealRemarkTxt}>{idealRemark}</Text>
+          </View>
+        ) : null}
+      </View>
+
       <View style={w.btnRow}>
         {isOnBreak ? (
           <TouchableOpacity style={[w.btn, w.btnGreen]} onPress={handleBreakEnd}>
@@ -655,6 +917,53 @@ export default function AttendanceWidget() {
           <Text style={w.btnTxt}>Clock Out</Text>
         </TouchableOpacity>
       </View>
+
+      {/* ── Ideal Time / Remark editor modal ── */}
+      <Modal visible={showIdealModal} transparent animationType="slide" onRequestClose={() => setShowIdealModal(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={w.modalOverlay}>
+          <View style={w.meetingModal}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <Text style={w.meetingModalTitle}>🕐 Ideal Working Time</Text>
+              <TouchableOpacity onPress={() => setShowIdealModal(false)}>
+                <Icon name="close" size={20} color="#64748B" />
+              </TouchableOpacity>
+            </View>
+            <Text style={w.meetingModalLabel}>Ideal time (e.g. 10:00 AM - 6:00 PM)</Text>
+            <TextInput
+              style={[w.meetingInput, { minHeight: 44 }]}
+              placeholder="e.g. 11:00 AM - 7:00 PM"
+              placeholderTextColor="#475569"
+              value={idealDraftTime}
+              onChangeText={setIdealDraftTime}
+            />
+            <Text style={w.meetingModalLabel}>Reason / Remark</Text>
+            <TextInput
+              style={w.meetingInput}
+              placeholder="e.g. Client visit in the morning, starting late"
+              placeholderTextColor="#475569"
+              value={idealDraftRemark}
+              onChangeText={setIdealDraftRemark}
+              multiline
+            />
+            <Text style={w.meetingModalHint}>
+              Your ideal time and reason are saved to today's attendance and visible to your admin.
+            </Text>
+            <TouchableOpacity
+              style={[w.meetingSubmitBtn, idealSaving && { opacity: 0.6 }]}
+              onPress={handleSaveIdeal}
+              disabled={idealSaving}
+            >
+              {idealSaving
+                ? <ActivityIndicator color="#fff" size="small" />
+                : <>
+                  <Icon name="content-save-outline" size={16} color="#fff" style={{ marginRight: 6 }} />
+                  <Text style={w.meetingSubmitTxt}>Save</Text>
+                </>
+              }
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -700,4 +1009,16 @@ const w = StyleSheet.create({
   trackingTxt:    { fontSize: 11, color: '#34D399', fontWeight: '700' },
   btnAmber:     { backgroundColor: COLORS.amber },
   btnRed:       { backgroundColor: COLORS.red },
+
+  // Ideal time + remark
+  idealBox:        { backgroundColor: COLORS.surfaceAlt, borderRadius: RADIUS.md, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: COLORS.border },
+  idealHeader:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
+  idealHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  idealTitle:      { fontSize: FONT.xs, color: COLORS.textMuted, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.4 },
+  idealEditBtn:    { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 8, paddingVertical: 3, borderRadius: RADIUS.full, backgroundColor: COLORS.blueBg },
+  idealEditTxt:    { fontSize: FONT.xs, color: COLORS.blueLight, fontWeight: '700' },
+  idealTimeTxt:    { fontSize: FONT.md, color: COLORS.textPrimary, fontWeight: '700' },
+  idealEmptyTxt:   { fontSize: FONT.sm, color: COLORS.textMuted, fontStyle: 'italic' },
+  idealRemarkRow:  { flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginTop: 6 },
+  idealRemarkTxt:  { flex: 1, fontSize: FONT.sm, color: COLORS.textSecondary || COLORS.textMuted, lineHeight: 18 },
 });

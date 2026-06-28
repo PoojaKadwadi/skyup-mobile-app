@@ -10,6 +10,13 @@ apply plugin: "com.google.gms.google-services"
 def enableProguardInReleaseBuilds = true
 
 android {
+
+configurations.all {
+        resolutionStrategy {
+            force "androidx.core:core:1.13.1"
+            force "androidx.core:core-ktx:1.13.1"
+        }
+    }
     buildToolsVersion "34.0.0"
     compileSdk 35
     namespace "com.skyupcrm"

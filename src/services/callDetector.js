@@ -61,29 +61,45 @@ async function clearCache() {
 // The native CallStateModule never gives us the phone number — only the state.
 // After a call ends, we wait 1.5s for the OS to write the call log entry, then
 // find the entry whose timestamp is closest to callStartedAt (within 10 min).
-// Falls back to 'Unknown' if the log isn't readable or nothing matches.
+// Returns { number, name } — name is the cached contact name (may be ''), used
+// by the recording sync to match name-saved recording files.
+// Falls back to { number: 'Unknown', name: '' } if nothing matches.
 async function resolvePhoneNumber(callStartedAt) {
   try {
     await new Promise(r => setTimeout(r, 1500)); // wait for OS to write call log
-    const logs = await getDeviceCallLogs(10);    // last 10 calls is plenty
+    let logs = await getDeviceCallLogs(25);       // FIX: 10 → 25 for better coverage
+
     const TEN_MIN = 10 * 60 * 1000;
-    let best = null;
-    let minDiff = Infinity;
-    for (const log of logs) {
-      const diff = Math.abs(parseInt(log.timestamp) - callStartedAt);
-      if (diff < TEN_MIN && diff < minDiff) {
-        minDiff = diff;
-        best = log;
+    const pick = (entries) => {
+      let best = null, minDiff = Infinity;
+      for (const log of entries) {
+        if (!log?.phoneNumber) continue;
+        const diff = Math.abs(parseInt(log.timestamp) - callStartedAt);
+        if (diff < TEN_MIN && diff < minDiff) { minDiff = diff; best = log; }
       }
+      return best;
+    };
+
+    let best = pick(logs);
+
+    // FIX: the call-log row can lag the call end by a few seconds, especially
+    // for saved contacts. If nothing matched on the first read, wait once more
+    // and retry rather than returning 'Unknown' (which makes the downstream
+    // recording sync skip the file).
+    if (!best) {
+      await new Promise(r => setTimeout(r, 2000));
+      logs = await getDeviceCallLogs(25);
+      best = pick(logs);
     }
+
     if (best?.phoneNumber) {
-      console.log(`[callDetector] ✅ Resolved phone number from call log: ${best.phoneNumber}`);
-      return best.phoneNumber;
+      console.log(`[callDetector] ✅ Resolved phone number from call log: ${best.phoneNumber} (name: ${best.name || '—'})`);
+      return { number: best.phoneNumber, name: best.name || '' };
     }
   } catch (e) {
     console.warn('[callDetector] Could not resolve phone from call log:', e.message);
   }
-  return 'Unknown';
+  return { number: 'Unknown', name: '' };
 }
 
 // ── Core state-change handler ─────────────────────────────────────────────────
@@ -129,9 +145,9 @@ async function onCallStateChange({ state }) {
     if (prevState === 'ringing') {
       // ringing → idle without going through offhook = missed/rejected
       // FIX: resolve real number from call log before syncing
-      const resolvedNumber = await resolvePhoneNumber(cached.startedAt);
+      const resolved = await resolvePhoneNumber(cached.startedAt);
       syncSingleCall({
-        phoneNumber: resolvedNumber,
+        phoneNumber: resolved.number,
         callType:    'missed',
         duration:    0,
         timestamp:   cached.startedAt,
@@ -143,21 +159,23 @@ async function onCallStateChange({ state }) {
       // triggerPostCallRecordingSync to skip every recording file because
       // the cross-check in syncRecordings never matched 'Unknown' to any
       // real phone number extracted from the filename or call log.
-      const resolvedNumber = await resolvePhoneNumber(cached.startedAt);
+      const resolved = await resolvePhoneNumber(cached.startedAt);
 
       // 1. Sync call log to CRM
       syncSingleCall({
-        phoneNumber: resolvedNumber,
+        phoneNumber: resolved.number,
         callType:    cached.type,
         duration,
         timestamp:   cached.startedAt,
       }).catch(() => {});
 
       // 2. Auto-sync the recording file — triggerPostCallRecordingSync
-      //    adds its own delays (3s, 8s, 20s, 45s) internally so we pass
-      //    the resolved number straight through.
-      triggerPostCallRecordingSync(resolvedNumber, cached.startedAt);
-      console.log(`[callDetector] ✅ Call ended (${resolvedNumber}), recording sync scheduled`);
+      //    adds its own delays (3s, 10s, 25s, 45s) internally so we pass
+      //    the resolved number AND contact name straight through. The name
+      //    lets syncRecordings match name-saved files like "pooja 1057.mp3"
+      //    (the exact files that only uploaded manually before).
+      triggerPostCallRecordingSync(resolved.number, cached.startedAt, resolved.name);
+      console.log(`[callDetector] ✅ Call ended (${resolved.number}), recording sync scheduled`);
     }
   }
 
@@ -180,17 +198,17 @@ async function recoverInterruptedCall() {
   await clearCache();
 
   // FIX: resolve real number from call log on recovery too
-  const resolvedNumber = await resolvePhoneNumber(cached.startedAt);
+  const resolved = await resolvePhoneNumber(cached.startedAt);
 
   syncSingleCall({
-    phoneNumber: resolvedNumber,
+    phoneNumber: resolved.number,
     callType:    cached.type,
     duration,
     timestamp:   cached.startedAt,
   }).catch(() => {});
 
   // Also try to sync recording — file may still be on disk
-  triggerPostCallRecordingSync(resolvedNumber, cached.startedAt);
+  triggerPostCallRecordingSync(resolved.number, cached.startedAt, resolved.name);
   console.log('[callDetector] 🔄 Recovered interrupted call');
 }
 

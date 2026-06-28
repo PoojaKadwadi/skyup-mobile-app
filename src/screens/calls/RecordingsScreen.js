@@ -7,9 +7,9 @@
 //   3. DUPLICATE UPLOAD GUARD — uploadedSet (AsyncStorage v4) checked before
 //      every upload. Same fileKey cannot be uploaded twice even across restarts.
 //   4. AUTO-SCAN on mount — scans automatically when screen opens.
-//   5. moment.js removed — replaced with native Intl.DateTimeFormat.
+//   5. CRASH FIX — replaced Intl.DateTimeFormat with moment (Hermes has no en-IN locale data).
 
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, memo } from 'react';
 import {
   View, Text, FlatList, StyleSheet, TouchableOpacity,
   Alert, ActivityIndicator, StatusBar, InteractionManager,
@@ -17,8 +17,10 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import Icon              from 'react-native-vector-icons/MaterialCommunityIcons';
 import AsyncStorage      from '@react-native-async-storage/async-storage';
+import moment            from 'moment';
 
 import { normalizePhone } from '../../services/phoneService';
+import { store }          from '../../store';
 
 // Mask phone for display only — full number is still used for upload/matching
 function maskPhone(phone) {
@@ -48,10 +50,8 @@ function maskFilename(filename) {
   });
 }
 
-const fmtRecDate = new Intl.DateTimeFormat('en-IN', {
-  day: '2-digit', month: 'short',
-  hour: '2-digit', minute: '2-digit', hour12: true,
-});
+// FIX: moment instead of Intl.DateTimeFormat — Hermes has no full ICU data
+function fmtRecDate(date) { return moment(date).format('DD MMM, hh:mm A'); }
 
 let RNFS;
 try { RNFS = require('react-native-fs'); } catch {}
@@ -142,15 +142,87 @@ async function scanForRecordings() {
   return found.sort((a, b) => new Date(b.modifiedAt) - new Date(a.modifiedAt));
 }
 
-// Samsung Recorder format: "{phone_or_name}-{DDMMYYHHMM}.ext"
+// ── Phone resolution — mirrors recordingService so the manual screen and the
+// auto-sync agree on which lead a file belongs to. Handles BOTH supported
+// filename formats:
+//   • Full number:  "Call 919876543210 2024-...m4a"   → extract directly
+//   • Last-4 only:   "Pooja Kadwadi 3210.m4a"          → resolve via lead list
+// Returns a normalized full number, or null if it genuinely can't be resolved
+// (only those files get treated as "needs manual handling").
+
+function isDateOrTimePattern(digits) {
+  if (digits.length === 8) {
+    const y = parseInt(digits.slice(0, 4));
+    const m = parseInt(digits.slice(4, 6));
+    const d = parseInt(digits.slice(6, 8));
+    if (y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31) return true;
+    const d2 = parseInt(digits.slice(0, 2));
+    const m2 = parseInt(digits.slice(2, 4));
+    const y2 = parseInt(digits.slice(4, 8));
+    if (d2 >= 1 && d2 <= 31 && m2 >= 1 && m2 <= 12 && y2 >= 1900 && y2 <= 2100) return true;
+  }
+  if (digits.length === 6) {
+    const h = parseInt(digits.slice(0, 2));
+    const m = parseInt(digits.slice(2, 4));
+    const s = parseInt(digits.slice(4, 6));
+    if (h >= 0 && h <= 23 && m >= 0 && m <= 59 && s >= 0 && s <= 59) return true;
+  }
+  return false;
+}
+
+// Full 7-15 digit number anywhere in the filename (skips date/time runs).
+function extractFullNumber(filename) {
+  const matches = filename.replace(/[_\-\.]/g, ' ').match(/\+?\d{7,15}/g);
+  if (!matches) return null;
+  for (const m of matches) {
+    const digits = m.replace(/\D/g, '');
+    if (digits.length < 7 || digits.length > 15) continue;
+    if (isDateOrTimePattern(digits)) continue;
+    return digits;
+  }
+  return null;
+}
+
+// Trailing last-4 group ("Name 3210"), only when there's no full number.
+function extractLast4(filename) {
+  if (extractFullNumber(filename)) return null;
+  const base   = filename.replace(/\.[^.]+$/, '');
+  const groups = base.replace(/[_\-\.]/g, ' ').match(/\d{3,6}/g);
+  if (!groups) return null;
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const g = groups[i];
+    if (g.length >= 3 && g.length <= 6) {
+      const last4 = g.slice(-4);
+      if (last4.length === 4) return last4;
+    }
+  }
+  return null;
+}
+
+// Resolve a last-4 against the agent's lead list (unambiguous matches only).
+function resolveLast4FromLeads(last4) {
+  if (!last4 || last4.length !== 4) return null;
+  try {
+    const items = store.getState()?.leads?.items || [];
+    const hits = [];
+    for (const lead of items) {
+      const norm = normalizePhone(lead.primaryPhone || lead.mobile || lead.phone || '');
+      if (norm && norm.length >= 4 && norm.slice(-4) === last4 && !hits.includes(norm)) {
+        hits.push(norm);
+      }
+    }
+    if (hits.length === 1) return hits[0];
+  } catch {}
+  return null;
+}
+
+// Public resolver used throughout this screen.
 function extractPhone(filename) {
-  const nameNoExt = filename.replace(/\.[^.]+$/, '');
-  const prefix    = nameNoExt.replace(/-\d{10}$/, '');
-  const m = prefix.match(/(\+?\d[\d]{8,13})/);
-  if (!m) return null;
-  const digits = m[1].replace(/\D/g, '');
-  if (digits.length < 7 || digits.length > 13) return null;
-  return digits;
+  const full = extractFullNumber(filename);
+  if (full) return normalizePhone(full);
+  const last4 = extractLast4(filename);
+  if (last4) return resolveLast4FromLeads(last4);
+  return null;
 }
 
 function formatSize(bytes) {
@@ -159,6 +231,58 @@ function formatSize(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+// PERF: memoized row. Receives only its OWN isUploading/isDone booleans (not the
+// whole uploading/uploaded maps), so changing one file's status re-renders only
+// that row instead of the entire list.
+const RecordingRow = memo(function RecordingRow({ item, isUploading, isDone, onUpload }) {
+  const phone = extractPhone(item.name);
+  const handleUpload = useCallback(() => onUpload(item), [onUpload, item]);
+
+  return (
+    <View style={styles.card}>
+      <View style={styles.cardLeft}>
+        <View style={[styles.extBadge, isDone && styles.extBadgeDone]}>
+          <Text style={styles.extText}>{item.extension?.toUpperCase() || 'AUD'}</Text>
+        </View>
+      </View>
+      <View style={styles.cardMid}>
+        <Text style={styles.fileName} numberOfLines={1}>{maskFilename(item.name)}</Text>
+        <Text style={styles.fileMeta}>
+          {formatSize(item.size)} · {fmtRecDate(item.modifiedAt)}
+        </Text>
+        {phone ? (
+          <Text style={styles.phoneHint}>📞 {maskPhone(phone)}</Text>
+        ) : (
+          <Text style={styles.noPhone}>No phone number in filename</Text>
+        )}
+      </View>
+
+      {isUploading ? (
+        <ActivityIndicator size="small" color="#93C5FD" style={styles.statusBadge} />
+      ) : isDone ? (
+        <View style={[styles.statusBadge, styles.statusBadgeDone]}>
+          <Icon name="check-circle" size={18} color="#4ADE80" />
+        </View>
+      ) : phone ? (
+        <TouchableOpacity
+          style={[styles.statusBadge, styles.statusBadgeUpload]}
+          onPress={handleUpload}
+        >
+          <Icon name="cloud-upload-outline" size={18} color="#93C5FD" />
+        </TouchableOpacity>
+      ) : (
+        <View style={styles.statusBadge}>
+          <Icon name="cloud-clock-outline" size={18} color="#64748B" />
+        </View>
+      )}
+
+      <Text style={isDone ? styles.autoLabelDone : styles.autoLabelPending}>
+        {isUploading ? 'Uploading' : isDone ? 'Uploaded' : phone ? 'Upload' : 'Pending'}
+      </Text>
+    </View>
+  );
+});
 
 async function loadUploadedSet() {
   try {
@@ -278,62 +402,17 @@ export default function RecordingsScreen() {
 
   const keyExtractor = useCallback((item) => item.path, []);
 
-  const renderItem = useCallback(({ item }) => {
-    const isUploading = uploading[item.path] || false;
-    const isDone      = uploaded[item.path]  || false;
-    const phone       = extractPhone(item.name);
+  const renderItem = useCallback(({ item }) => (
+    <RecordingRow
+      item={item}
+      isUploading={uploading[item.path] || false}
+      isDone={uploaded[item.path] || false}
+      onUpload={handleUpload}
+    />
+  ), [uploading, uploaded, handleUpload]);
 
-    return (
-      <View style={styles.card}>
-        <View style={styles.cardLeft}>
-          <View style={[styles.extBadge, isDone && styles.extBadgeDone]}>
-            <Text style={styles.extText}>{item.extension?.toUpperCase() || 'AUD'}</Text>
-          </View>
-        </View>
-        <View style={styles.cardMid}>
-          <Text style={styles.fileName} numberOfLines={1}>{maskFilename(item.name)}</Text>
-          <Text style={styles.fileMeta}>
-            {formatSize(item.size)} · {fmtRecDate.format(new Date(item.modifiedAt))}
-          </Text>
-          {phone ? (
-            <Text style={styles.phoneHint}>📞 {maskPhone(phone)}</Text>
-          ) : (
-            <Text style={styles.noPhone}>No phone number in filename</Text>
-          )}
-        </View>
-
-        {/* FIX: render upload/status based on state — no undefined handleUpload reference */}
-        {isUploading ? (
-          <ActivityIndicator size="small" color="#93C5FD" style={styles.statusBadge} />
-        ) : isDone ? (
-          <View style={[styles.statusBadge, styles.statusBadgeDone]}>
-            <Icon name="check-circle" size={18} color="#4ADE80" />
-          </View>
-        ) : phone ? (
-          // Only show Upload button if we have a phone number to associate with
-          <TouchableOpacity
-            style={[styles.statusBadge, styles.statusBadgeUpload]}
-            onPress={() => handleUpload(item)}
-          >
-            <Icon name="cloud-upload-outline" size={18} color="#93C5FD" />
-          </TouchableOpacity>
-        ) : (
-          <View style={styles.statusBadge}>
-            <Icon name="cloud-clock-outline" size={18} color="#64748B" />
-          </View>
-        )}
-
-        <Text style={isDone ? styles.autoLabelDone : styles.autoLabelPending}>
-          {isUploading ? 'Uploading' : isDone ? 'Uploaded' : phone ? 'Upload' : 'Pending'}
-        </Text>
-      </View>
-    );
-  // FIX: handleUpload is now defined above, safe to include in deps
-  }, [uploading, uploaded, handleUpload]);
-
-  const todayLabel = new Intl.DateTimeFormat('en-IN', {
-    weekday: 'short', day: '2-digit', month: 'short',
-  }).format(new Date());
+  // FIX: moment instead of Intl
+  const todayLabel = moment().format('ddd, DD MMM');
 
   return (
     <View style={styles.container}>

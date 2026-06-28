@@ -16,7 +16,7 @@
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Alert, ActivityIndicator, StatusBar,
@@ -31,6 +31,10 @@ import Icon                       from 'react-native-vector-icons/MaterialCommun
 import AsyncStorage               from '@react-native-async-storage/async-storage';
 import { BASE_URL }               from '../../config/config';
 import { requestLocationPermission } from '../../services/permissionsService';
+import {
+  scheduleMeetingFollowUp,
+  checkAndScheduleMeetingFollowUps,
+} from '../../services/notificationService';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const VISIT_TYPES = [
@@ -58,6 +62,7 @@ const OUTCOMES = [
 // date is set. Use `moment` (already a project dependency) instead, which
 // formats dates without relying on Intl.
 import moment from 'moment';
+import CalendarDateTimePicker from '../../components/CalendarDateTimePicker';
 
 function formatDateTime(iso) {
   if (!iso) return '—';
@@ -208,14 +213,23 @@ export default function ClientMeetingScreen() {
   const [selectedLeadId, setSelectedLeadId] = useState('');
   const [showPicker,     setShowPicker]     = useState(false);
 
-  const filteredLeads = leads
-    .filter(l =>
-      l.name?.toLowerCase().includes(leadSearch.toLowerCase()) ||
-      (l.mobile || '').includes(leadSearch)
-    )
-    .slice(0, 20);
+  // PERF: memoize so the full leads array isn't re-filtered/re-searched on
+  // every render (every keystroke elsewhere, every state change). Recomputes
+  // only when the leads list or the search text actually changes.
+  const filteredLeads = useMemo(() => {
+    const q = leadSearch.toLowerCase();
+    return leads
+      .filter(l =>
+        l.name?.toLowerCase().includes(q) ||
+        (l.mobile || '').includes(leadSearch)
+      )
+      .slice(0, 20);
+  }, [leads, leadSearch]);
 
-  const selectedLead = leads.find(l => l.id === selectedLeadId);
+  const selectedLead = useMemo(
+    () => leads.find(l => l.id === selectedLeadId),
+    [leads, selectedLeadId]
+  );
 
   // ── Form state ──────────────────────────────────────────────────────────────
   const [visitType,      setVisitType]      = useState('In-Person');
@@ -240,7 +254,20 @@ export default function ClientMeetingScreen() {
     if (!selectedLeadId) { setPastMeetings([]); return; }
     setLoadingPast(true);
     fetchMeetingRemarks(selectedLeadId)
-      .then(setPastMeetings)
+      .then((list) => {
+        setPastMeetings(list);
+        // Ensure reminders exist for any upcoming follow-ups on this lead.
+        const lead = leads.find(l => l.id === selectedLeadId);
+        checkAndScheduleMeetingFollowUps(
+          (list || []).map(m => ({
+            id:           `${selectedLeadId}_${Date.parse(m.followUpDate || '')}`,
+            leadName:     lead?.name || 'Client',
+            followUpDate: m.followUpDate,
+            meetingType:  m.meetingType,
+            location:     m.location,
+          })),
+        ).catch(() => {});
+      })
       .catch(() => setPastMeetings([]))
       .finally(() => setLoadingPast(false));
   }, [selectedLeadId]);
@@ -426,6 +453,28 @@ export default function ClientMeetingScreen() {
       // Refresh history
       const updated = await fetchMeetingRemarks(selectedLeadId);
       setPastMeetings(updated);
+
+      // Schedule meeting follow-up notifications (reminder before + at time)
+      // for the just-saved visit, and reconcile any other upcoming follow-ups.
+      if (followUpDate) {
+        scheduleMeetingFollowUp({
+          id:           `${selectedLeadId}_${Date.parse(followUpDate)}`,
+          leadName:     selectedLead?.name || 'Client',
+          followUpDate,
+          meetingType:  visitType,
+          location:     location.trim() || null,
+        }).catch(() => {});
+      }
+      // Re-scan all this lead's meeting remarks so reminders survive app restarts.
+      checkAndScheduleMeetingFollowUps(
+        (updated || []).map(m => ({
+          id:          `${selectedLeadId}_${Date.parse(m.followUpDate || '')}`,
+          leadName:    selectedLead?.name || 'Client',
+          followUpDate: m.followUpDate,
+          meetingType: m.meetingType,
+          location:    m.location,
+        })),
+      ).catch(() => {});
 
       // Reset form (keep lead & visit type for quick follow-on entries)
       setOutcome('');
@@ -686,53 +735,17 @@ export default function ClientMeetingScreen() {
             </TouchableOpacity>
           )}
 
-          {/* Crash-safe pure-JS date/time picker (no native DateTimePicker). */}
+          {/* Calendar + 12-hour AM/PM picker (pure JS — no native DateTimePicker). */}
           {showDatePicker && (
-            <View style={styles.jsPickerWrapper}>
-              <Text style={styles.jsPickerTitle}>Set Follow-Up Date &amp; Time</Text>
-              <View style={styles.jsPickerRow}>
-                <View style={styles.jsPickerField}>
-                  <Text style={styles.jsPickerLabel}>Day</Text>
-                  <TextInput style={styles.jsPickerInput} keyboardType="number-pad" maxLength={2}
-                    placeholder="DD" placeholderTextColor="#475569" value={pickerFields.day}
-                    onChangeText={(v) => setPickerFields(p => ({ ...p, day: v.replace(/\D/g, '') }))} />
-                </View>
-                <View style={styles.jsPickerField}>
-                  <Text style={styles.jsPickerLabel}>Month</Text>
-                  <TextInput style={styles.jsPickerInput} keyboardType="number-pad" maxLength={2}
-                    placeholder="MM" placeholderTextColor="#475569" value={pickerFields.month}
-                    onChangeText={(v) => setPickerFields(p => ({ ...p, month: v.replace(/\D/g, '') }))} />
-                </View>
-                <View style={styles.jsPickerField}>
-                  <Text style={styles.jsPickerLabel}>Year</Text>
-                  <TextInput style={styles.jsPickerInput} keyboardType="number-pad" maxLength={4}
-                    placeholder="YYYY" placeholderTextColor="#475569" value={pickerFields.year}
-                    onChangeText={(v) => setPickerFields(p => ({ ...p, year: v.replace(/\D/g, '') }))} />
-                </View>
-              </View>
-              <View style={styles.jsPickerRow}>
-                <View style={styles.jsPickerField}>
-                  <Text style={styles.jsPickerLabel}>Hour (0-23)</Text>
-                  <TextInput style={styles.jsPickerInput} keyboardType="number-pad" maxLength={2}
-                    placeholder="HH" placeholderTextColor="#475569" value={pickerFields.hour}
-                    onChangeText={(v) => setPickerFields(p => ({ ...p, hour: v.replace(/\D/g, '') }))} />
-                </View>
-                <View style={styles.jsPickerField}>
-                  <Text style={styles.jsPickerLabel}>Minute</Text>
-                  <TextInput style={styles.jsPickerInput} keyboardType="number-pad" maxLength={2}
-                    placeholder="MM" placeholderTextColor="#475569" value={pickerFields.minute}
-                    onChangeText={(v) => setPickerFields(p => ({ ...p, minute: v.replace(/\D/g, '') }))} />
-                </View>
-              </View>
-              <View style={styles.jsPickerActions}>
-                <TouchableOpacity style={styles.jsPickerCancel} onPress={() => setShowDatePicker(false)}>
-                  <Text style={styles.jsPickerCancelText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.jsPickerConfirm} onPress={handleDateConfirm}>
-                  <Text style={styles.jsPickerConfirmText}>Confirm</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
+            <CalendarDateTimePicker
+              value={followUpDate}
+              minDate={new Date()}
+              onConfirm={(iso) => {
+                setFollowUpDate(iso);
+                setShowDatePicker(false);
+              }}
+              onCancel={() => setShowDatePicker(false)}
+            />
           )}
 
           {/* ── Save Button ────────────────────────────────────────────────── */}

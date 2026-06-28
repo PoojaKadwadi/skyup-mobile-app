@@ -37,7 +37,11 @@ export const login = createAsyncThunk(
         error?.message ||                        // JS Error.message
         'Login failed. Check your credentials and network.';
 
-      return rejectWithValue(message);
+      // Backend sends `field` ("email" | "password") for credential errors so
+      // the login screen can highlight the specific input inline.
+      const field = error?.response?.data?.field || null;
+
+      return rejectWithValue({ message, field });
     }
   },
 );
@@ -70,27 +74,36 @@ const authSlice = createSlice({
     user:    null,
     loading: false,
     error:   null,
+    errorField: null,   // "email" | "password" | null — for inline field highlight
   },
   reducers: {
-    clearError: (state) => { state.error = null; },
+    clearError: (state) => { state.error = null; state.errorField = null; },
   },
   extraReducers: (builder) => {
     builder
-      .addCase(login.pending,   (state) => { state.loading = true;  state.error = null; })
+      .addCase(login.pending,   (state) => { state.loading = true;  state.error = null; state.errorField = null; })
       .addCase(login.fulfilled, (state, action) => {
         state.loading = false;
         state.user    = action.payload;
       })
       .addCase(login.rejected, (state, action) => {
         state.loading = false;
-        // action.payload is always a string (set by rejectWithValue above)
-        state.error = action.payload ?? 'Something went wrong. Please try again.';
+        // payload is { message, field } from the thunk; tolerate a bare string too.
+        const p = action.payload;
+        if (p && typeof p === 'object') {
+          state.error      = p.message ?? 'Something went wrong. Please try again.';
+          state.errorField = p.field ?? null;
+        } else {
+          state.error      = p ?? 'Something went wrong. Please try again.';
+          state.errorField = null;
+        }
       });
 
     builder.addCase(logout.fulfilled,      (state) => { state.user = null; });
     builder.addCase(forceLogout.fulfilled, (state) => {
       state.user  = null;
       state.error = 'Session expired. Please log in again.';
+      state.errorField = null;
     });
     builder.addCase(restoreSession.fulfilled, (state, action) => {
       // action.payload may be null — that is valid (logged out state)

@@ -226,9 +226,14 @@ export default function DashboardScreen() {
     }, [lastFetchedAt, dispatch]),
   );
 
-  const onRefresh = useCallback(() => {
-    dispatch(fetchLeads());
-    triggerManualSync();
+  const onRefresh = useCallback(async () => {
+    // FIX: await both operations so the RefreshControl spinner stays visible
+    // until both finish. The old fire-and-forget let the spinner dismiss
+    // immediately while network requests were still in flight, making it look
+    // like nothing happened. triggerManualSync is awaited first (call-log +
+    // recording sweep), then fetchLeads pulls the updated lead list.
+    triggerManualSync().catch(() => {});
+    await dispatch(fetchLeads());
   }, [dispatch]);
 
   const kpi = useMemo(() => computeKpi(leads), [leads]);

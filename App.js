@@ -14,7 +14,7 @@
 //  5. Backend pushes new_lead_assigned events instantly
 
 import React, { useEffect, useRef } from 'react';
-import { StatusBar, View, ActivityIndicator, StyleSheet } from 'react-native';
+import { StatusBar, View, ActivityIndicator, StyleSheet, InteractionManager } from 'react-native';
 
 import { Provider, useSelector, useDispatch } from 'react-redux';
 
@@ -34,6 +34,8 @@ import { enableScreens } from 'react-native-screens';
 import { store, persistor } from './src/store';
 
 import AppNavigator from './src/navigation/AppNavigator';
+
+import ErrorBoundary from './src/components/ErrorBoundary';
 
 import {
   startBackgroundSync,
@@ -63,6 +65,9 @@ import {
   startCallDetector,
   stopCallDetector,
 } from './src/services/callDetector';
+
+// ✅ NEW — auto-upload foreground service (keeps app alive for post-call upload)
+import { initAutoUploadService, stopAutoUploadService } from './src/services/autoUploadService';
 
 // ✅ NEW — socket service
 import {
@@ -138,6 +143,12 @@ function AppManager() {
 
   useEffect(() => {
     if (user) {
+      // PERF: defer heavy startup work (notifications, FCM, background sync,
+      // socket, permission prompts) until AFTER the first screen has painted.
+      // Running it all synchronously on mount competed with the initial render
+      // and made the app feel slow to open. InteractionManager lets the UI show
+      // first, then these services spin up a tick later.
+      const startupTask = InteractionManager.runAfterInteractions(() => {
       (async () => {
         try {
           // ✅ Notifications MUST finish first
@@ -187,6 +198,7 @@ function AppManager() {
           connectSocket(userId, dispatch);
         }
       })();
+      });
 
       // ✅ Call state listener before detector
       startCallStateListener();
@@ -196,6 +208,13 @@ function AppManager() {
           '[App] callDetector start failed:',
           e?.message
         )
+      );
+
+      // ✅ Auto-upload foreground service — keeps the app alive so post-call
+      // recording upload runs reliably on aggressive OEMs (ColorOS etc.).
+      // Honors the user's in-app toggle (default ON); no-op if they turned it off.
+      initAutoUploadService().catch(e =>
+        console.warn('[App] autoUpload init failed:', e?.message)
       );
 
       // ✅ Drain queued offline calls
@@ -216,6 +235,9 @@ function AppManager() {
       stopCallStateListener();
 
       stopCallDetector();
+
+      // Stop the auto-upload foreground service (removes the ongoing notification)
+      stopAutoUploadService().catch(() => {});
 
       clearNotificationState().catch(() => {});
 
@@ -336,7 +358,9 @@ export default function App() {
 
               <AppManager />
 
-              <AppNavigator />
+              <ErrorBoundary>
+                <AppNavigator />
+              </ErrorBoundary>
             </NavigationContainer>
           </PersistGate>
         </Provider>

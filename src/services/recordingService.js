@@ -149,21 +149,159 @@ function extractPhoneFromFilename(filename) {
   return null;
 }
 
+// ── Extract a trailing LAST-4-DIGITS pattern from the filename ────────────────
+// Some dialers / manual saves name files as "<Lead Name> <last4>.m4a", e.g.
+//   "Pooja Kadwadi 3210.m4a"  → "3210"
+//   "Rahul-9988.amr"          → "9988"
+// A 4-digit group is NOT a full phone number, so extractPhoneFromFilename (which
+// needs 7-15 digits) returns null for these and they were previously skipped.
+//
+// We only return a 4-digit group when the filename has NO full (7-15 digit)
+// number — otherwise the full number wins. We also reject groups that look like
+// a time/date fragment (e.g. a 4-digit year "2024" or "1430" hour-min) by
+// preferring the LAST 4-digit run and letting the call-log cross-check confirm.
+function extractLast4FromFilename(filename) {
+  // If there's already a full number, don't bother with last-4.
+  if (extractPhoneFromFilename(filename)) return null;
+
+  const base = filename.replace(/\.[^.]+$/, '');           // strip extension
+  const groups = base.replace(/[_\-\.]/g, ' ').match(/\d{3,6}/g);
+  if (!groups) return null;
+
+  // Walk groups from the end — the contact-number suffix is almost always the
+  // LAST numeric run in these "Name 3210" filenames.
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const g = groups[i];
+    // Take the last 4 digits of a 4-6 digit run (handles "03210" etc.)
+    if (g.length >= 3 && g.length <= 6) {
+      const last4 = g.slice(-4);
+      if (last4.length === 4) return last4;
+    }
+  }
+  return null;
+}
+
+// ── Contact-name matching (mirrors LeadRecordingsSection manual path) ─────────
+// This is the signal that makes the MANUAL "Upload" button succeed on files
+// named after the contact (e.g. "pooja 1057-26....mp3"). The auto path was
+// missing it entirely, which is why files uploaded manually but never
+// automatically. We normalise the filename (strip dialer boilerplate, digits,
+// separators) and check whether the lead-name tokens appear inside it.
+const FILENAME_NOISE = /\b(call|calls|recording|recordings|rec|record|voice|audio|incoming|outgoing|outgoingcall|incomingcall|with|to|from)\b/gi;
+
+function normaliseForNameMatch(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[_\-.+()]+/g, ' ')
+    .replace(/\d+/g, ' ')
+    .replace(FILENAME_NOISE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function filenameMatchesName(filename, leadName) {
+  if (!leadName || String(leadName).trim().length < 2) return false;
+  const nameNoExt = filename.replace(/\.[^.]+$/, '');
+  const haystack  = normaliseForNameMatch(nameNoExt);
+  const needle    = normaliseForNameMatch(leadName);
+  if (haystack.length < 2 || needle.length < 2) return false;
+
+  if (haystack === needle) return true;
+  if (haystack.includes(needle) || needle.includes(haystack)) return true;
+
+  const hTokens = new Set(haystack.split(' ').filter(t => t.length >= 2));
+  const nTokens = needle.split(' ').filter(t => t.length >= 2);
+  if (nTokens.length === 0) return false;
+  const matched = nTokens.filter(t => hTokens.has(t));
+  if (matched.length === nTokens.length) return true;
+  // One distinctive (≥4 char) token in common is enough — handles
+  // "Ramesh Kumar" lead vs a "ramesh" recording.
+  if (matched.some(t => t.length >= 4)) return true;
+  return false;
+}
+
+// ── Resolve a 4-digit suffix to a full phone number ───────────────────────────
+// Given the last-4 digits from a filename, find the full number it belongs to:
+//   1. If a target number (preferPhone) is given and its last 4 match → use it
+//      directly. This is the per-call / per-lead case and is unambiguous.
+//   2. Otherwise look at the call log: collect entries whose number ends in the
+//      same 4 digits, then pick the one CLOSEST IN TIME to the file's mtime.
+//      The timestamp disambiguates when two different numbers share a suffix.
+// Returns a normalized full number, or null if nothing matches confidently.
+function resolveLast4ToPhone(last4, fileMs, callLogs, preferPhone = null) {
+  if (!last4 || last4.length !== 4) return null;
+
+  // 1. Direct match against the target number.
+  if (preferPhone) {
+    const want = normalizePhone(preferPhone);
+    if (want && want.slice(-4) === last4) return want;
+  }
+
+  // 2. Call-log match by suffix, disambiguated by time proximity.
+  const WINDOW = 20 * 60 * 1000;
+  let best = null, minDiff = Infinity;
+  for (const log of callLogs || []) {
+    const norm = normalizePhone(log.phoneNumber || '');
+    if (!norm || norm.length < 4) continue;
+    if (norm.slice(-4) !== last4) continue;
+    const diff = Math.abs(fileMs - parseInt(log.timestamp));
+    if (diff < WINDOW && diff < minDiff) { minDiff = diff; best = norm; }
+  }
+  return best;
+}
+
 // ── Timestamp match against device call log ───────────────────────────────────
 // Used when filename has no phone number (e.g. saved with contact name).
-// Finds the call log entry whose timestamp is closest to the file's mtime,
-// within a 20-minute window (was 10 min — increased because some dialers
-// write the recording file well after the call ends on slow/low-storage devices).
-function findCallLogByTimestamp(fileMs, callLogs) {
+//
+// FIX: previously this returned the TIME-CLOSEST call log entry regardless of
+// which number was called. During a per-lead post-call sync, that mis-attributed
+// recordings — a name-saved file for lead A would resolve to lead B simply
+// because B's call was a few seconds closer in time, then either upload under
+// the wrong lead or get discarded by the cross-check. When the call was placed
+// to a specific number, that number's call-log entry should win even if another
+// call sits slightly closer in time.
+//
+// New behaviour:
+//   - If preferPhone is given, first look ONLY at entries whose number matches
+//     preferPhone within the window, and return the closest of those.
+//   - Only if no number-matched entry exists (or no preferPhone given) do we
+//     fall back to the plain time-closest entry.
+function findCallLogByTimestamp(fileMs, callLogs, preferPhone = null) {
   const TWENTY_MIN = 20 * 60 * 1000;
-  let closest = null;
-  let minDiff = Infinity;
+  // Tight window for the NUMBER-MATCHED path. A recording file's mtime is
+  // written within a couple of minutes of its own call ending; using the full
+  // 20-min window here would let the target's call "claim" a nameless file that
+  // actually belongs to a different lead called a few minutes earlier/later.
+  const TIGHT_WIN  = 12 * 60 * 1000; // FIX: was 4 min — name-saved files drift past it
+  const wantNorm   = preferPhone ? normalizePhone(preferPhone) : null;
+
+  let closest = null,       minDiff = Infinity;
+  let closestMatch = null,  minDiffMatch = Infinity;
+
   for (const log of callLogs) {
     const diff = Math.abs(fileMs - parseInt(log.timestamp));
-    if (diff < TWENTY_MIN && diff < minDiff) {
-      minDiff = diff;
-      closest = log;
+    if (diff < TWENTY_MIN && diff < minDiff) { minDiff = diff; closest = log; }
+
+    if (wantNorm && diff < TIGHT_WIN) {
+      const logNorm = normalizePhone(log.phoneNumber || '');
+      if (logNorm && logNorm === wantNorm && diff < minDiffMatch) {
+        minDiffMatch = diff;
+        closestMatch = log;
+      }
     }
+  }
+
+  // When a target phone was given:
+  //   1. Prefer the number-matched entry (closestMatch).
+  //   2. FIX (saved-contact auto-fetch): if none matched but the time-closest
+  //      call within the generic 20-min window IS to the target number, use it.
+  //      This recovers recordings saved under a CONTACT NAME (no digits in the
+  //      filename) whose mtime drifted just past the matched window — they were
+  //      previously skipped entirely, so calls to saved contacts never synced.
+  if (wantNorm) {
+    if (closestMatch) return closestMatch;
+    if (closest && normalizePhone(closest.phoneNumber || '') === wantNorm) return closest;
+    return null;
   }
   return closest;
 }
@@ -255,29 +393,32 @@ const scanDirectory = async (dir, sinceMs = 0) => {
 // auto-upload within the current 10-min window (see backgroundSyncService).
 // recordingService's uploadedSet remains the hard dedup layer — this is just
 // an early-exit optimisation that avoids redundant file scanning.
-export const syncRecordings = async (phoneNumber = null, sinceMs = 0, skipPhones = new Set()) => {
+export const syncRecordings = async (phoneNumber = null, sinceMs = 0, skipPhones = new Set(), leadName = '') => {
   if (Platform.OS !== 'android') return { uploaded: 0, failed: 0, skipped: 0 };
 
   const granted = await requestStoragePermission();
   if (!granted) return { uploaded: 0, failed: 0, skipped: 0 };
 
-  // FIX: effectiveSince is now sinceMs as-is when > 0.
+  // FIX: effectiveSince now respects sinceMs as-is when > 0 (matches the file
+  // header comment, which the old code contradicted).
   //
   // Old behaviour: Math.max(sinceMs, todayMidnight)
-  //   Problem: when the periodic sweep passed sinceMs = lastRecSync (e.g.
-  //   10 minutes ago), Math.max reset it to todayMidnight, making the sweep
-  //   re-scan ALL files from midnight on every tick. This was slow and
-  //   produced unnecessary duplicate-check work even though the dedup set
-  //   would catch actual re-uploads.
+  //   Problem: when a post-call sync passed sinceMs = callStartedAt - 30s, OR
+  //   the periodic sweep passed sinceMs = lastRecSync, Math.max reset it to
+  //   todayMidnight, making every scan re-walk ALL of today's files. Slow, and
+  //   it widened the time window so unrelated files were considered.
   //
-  // New behaviour: use sinceMs exactly when > 0; fall back to todayMidnight
-  //   only when no timestamp is given (sinceMs === 0, e.g. a one-off manual
-  //   scan with no context). todayMidnight remains the absolute minimum floor
-  //   so we never scan files from previous days in any code path.
+  // New behaviour: use sinceMs exactly when > 0. Only fall back to todayMidnight
+  //   when no timestamp is given (sinceMs === 0). We do NOT clamp sinceMs up to
+  //   midnight — a post-call scan must be allowed to look at just the last few
+  //   minutes. (sinceMs is always "today" in practice, so we never regress to
+  //   scanning previous days.)
   const todayMidnight  = (() => { const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); })();
   const effectiveSince = sinceMs > 0
-    ? Math.max(sinceMs, todayMidnight)  // respect sinceMs but never go before midnight
-    : todayMidnight;                     // no timestamp given — scan from midnight
+    ? sinceMs            // respect the caller's window exactly
+    : todayMidnight;     // no timestamp given — scan from midnight
+
+  const wantName = String(leadName || '').trim();
 
   const uploadedSet   = await loadUploadedSet();
   const newlyUploaded = [];
@@ -288,38 +429,143 @@ export const syncRecordings = async (phoneNumber = null, sinceMs = 0, skipPhones
 
   const dirsToScan = await buildScanDirs(RECORDING_DIRS);
   for (const dir of dirsToScan) {
+    // PERF FIX (app freeze): yield to the event loop before each directory so a
+    // multi-folder sweep never holds the JS thread long enough to jank the UI.
+    // RNFS.readDir + per-file work across ~20 folders was running to completion
+    // in one synchronous burst; this lets touches/animations interleave.
+    await new Promise(r => setTimeout(r, 0));
+
     const files = await scanDirectory(dir, effectiveSince);
 
+    let processedInDir = 0;
     for (const file of files) {
+      // PERF FIX (ANR / "SkyUp CRM isn't responding"): the per-file matching
+      // (regex, name normalisation, nested call-log scans) is synchronous. With
+      // many recordings this inner loop ran to completion without releasing the
+      // single JS thread, freezing the UI — e.g. while the follow-up date/time
+      // picker was open. Yield every few files so touches and animations can
+      // interleave. setTimeout(0) hands control back to the event loop.
+      if (processedInDir > 0 && processedInDir % 5 === 0) {
+        await new Promise(r => setTimeout(r, 0));
+      }
+      processedInDir++;
+
       const filePath = file.path;
       const fileMs   = new Date(file.mtime).getTime();
 
       // ── Resolve phone number ───────────────────────────────────────────────
+      const normalizedArg = phoneNumber ? normalizePhone(phoneNumber) : null;
+
       // Source 1: filename digits (most reliable — dialer put it there)
       let phone = null;
       const fromFilename = extractPhoneFromFilename(file.name);
       if (fromFilename) phone = normalizePhone(fromFilename);
 
-      // Source 2: timestamp match against call log
+      // NAME MATCH: does this filename contain the lead's name?
+      // This is the signal the manual Upload button relies on. We compute it up
+      // front so it can both (a) rescue files the digit logic would skip, and
+      // (b) attribute the file to the target when a target number was given.
+      const nameMatched = !!wantName && filenameMatchesName(file.name, wantName);
+
+      // Source 1b: filename LAST-4-DIGITS pattern ("Lead Name 3210.m4a").
+      // Resolve the 4-digit suffix to a full number via the target number
+      // (per-call sync) or the call log (disambiguated by time). This is the
+      // common case for recordings saved as "<contact name> <last 4 digits>".
+      if (!phone) {
+        const last4 = extractLast4FromFilename(file.name);
+        if (last4) {
+          const resolved = resolveLast4ToPhone(last4, fileMs, callLogs, normalizedArg);
+          if (resolved) {
+            phone = resolved;
+          } else if (normalizedArg && !nameMatched) {
+            // A target was given, its last-4 didn't match, no call-log entry with
+            // this suffix sits in the window, AND the filename doesn't carry the
+            // lead's name — not this lead's file.
+            skipped++;
+            continue;
+          }
+          // If the name matched, fall through — the name carries the attribution.
+        }
+      }
+
+      // Source 1c: NAME → number, when a target was given.
+      // If the filename matches the lead's name and we have a target number,
+      // attribute the file to that number directly. This is exactly what makes
+      // "pooja 1057-26....mp3" upload manually; the auto path now does the same.
+      if (!phone && normalizedArg && nameMatched) {
+        phone = normalizedArg;
+      }
+
+      // Source 2: timestamp match against call log.
+      // FIX: pass normalizedArg so that during a per-lead sync we prefer the
+      // call-log entry whose NUMBER matches the target — not merely the entry
+      // that happens to be closest in time. This stops name-saved recordings
+      // from being mis-attributed to a different lead whose call was nearby.
       let fromLog = null;
-      if (callLogs.length > 0) {
-        const matched = findCallLogByTimestamp(fileMs, callLogs);
+      if (!phone && callLogs.length > 0) {
+        const matched = findCallLogByTimestamp(fileMs, callLogs, normalizedArg);
         if (matched) fromLog = normalizePhone(matched.phoneNumber);
+        // When a target number was given but NO call to that number sits in the
+        // window AND the name didn't match, this file isn't the target's — skip.
+        else if (normalizedArg && !nameMatched) { skipped++; continue; }
       }
       if (!phone && fromLog) phone = fromLog;
 
-      // Source 3: phoneNumber arg as last-resort fallback
-      const normalizedArg = phoneNumber ? normalizePhone(phoneNumber) : null;
-      if (!phone && normalizedArg) phone = normalizedArg;
+      // Source 2b: NAME match in a no-target sweep — recover the number from the
+      // call log's cached contact name. Lets the periodic sweep (phoneNumber=null)
+      // upload name-saved files instead of discarding them.
+      if (!phone && !normalizedArg && nameMatched && callLogs.length > 0) {
+        let best = null, minDiff = Infinity;
+        for (const log of callLogs) {
+          const logName = normaliseForNameMatch(log.name || '');
+          if (logName && filenameMatchesName(file.name, log.name)) {
+            const diff = Math.abs(fileMs - parseInt(log.timestamp));
+            if (diff < minDiff) { minDiff = diff; best = normalizePhone(log.phoneNumber || ''); }
+          }
+        }
+        if (best) phone = best;
+      }
 
-      // Cross-check: if arg was given but resolved to a different number,
-      // this file belongs to a different call — skip it.
+      // Source 3: phoneNumber arg as last-resort fallback (safe when the filename
+      // had no number AND either no call log was available, or the name matched).
+      if (!phone && normalizedArg && (callLogs.length === 0 || nameMatched)) phone = normalizedArg;
+
+      // Cross-check: if a target was given and we resolved to a number that
+      // isn't byte-identical, decide whether it's truly a DIFFERENT call or just
+      // a different REPRESENTATION of the same lead's number.
+      //
+      // WHY THIS IS LOOSER NOW (the "fetches for one lead, not others" bug):
+      // recordings are commonly saved as "<name> <last4>", so Source 1b resolves
+      // the last-4 to a full number that can legitimately differ from the stored
+      // number in the higher digits (SIM/routing prefix, a number stored with an
+      // extension, call-log number vs CRM number). normalizePhone already trims
+      // country code / leading zero and keeps the last 10, so a genuine match
+      // shares a long suffix. The OLD check rejected anything not exactly equal,
+      // which silently skipped real matches for those leads.
+      //
+      // Accept the file for the target when ANY hold:
+      //   • nameMatched — filename carries the lead's name (strongest signal);
+      //   • same last 4 digits — exactly the suffix the file was named with;
+      //   • one number is a suffix of the other (>=7 digits) — country-code /
+      //     prefix / leading-zero differences.
+      // Otherwise it's a different call → skip (prevents cross-lead bleed).
       if (normalizedArg && phone && phone !== normalizedArg) {
-        console.log(
-          `[recordingService] Skipping ${file.name}: resolved to ${phone} but expected ${normalizedArg}`,
-        );
-        skipped++;
-        continue;
+        const a = phone;
+        const b = normalizedArg;
+        const sameLast4   = a.length >= 4 && b.length >= 4 && a.slice(-4) === b.slice(-4);
+        const suffixMatch = (a.length >= 7 && b.endsWith(a)) || (b.length >= 7 && a.endsWith(b));
+
+        if (nameMatched || sameLast4 || suffixMatch) {
+          // Same lead, different representation — attribute to the target so the
+          // upload, dedup key and skipPhones check all use one canonical number.
+          phone = normalizedArg;
+        } else {
+          console.log(
+            `[recordingService] Skipping ${file.name}: resolved to ${phone} but expected ${normalizedArg}`,
+          );
+          skipped++;
+          continue;
+        }
       }
 
       if (!phone) { skipped++; continue; }

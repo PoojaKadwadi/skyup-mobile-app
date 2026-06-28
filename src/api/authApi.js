@@ -38,6 +38,7 @@ function parseLoginResponse(data) {
       email:   body.email,
       company: body.company,
       role:    body.role,
+      contactAccountEmail: body.contactAccountEmail ?? null,
     } : null);
 
   return { token, user };

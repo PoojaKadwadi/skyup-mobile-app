@@ -4,7 +4,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Alert, Platform,
+  ActivityIndicator, Alert, Platform, InteractionManager,
 } from 'react-native';
 import Icon         from 'react-native-vector-icons/MaterialCommunityIcons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -41,9 +41,13 @@ function maskEmail(email) {
   return `${local.slice(0, 2)}${'•'.repeat(Math.max(2, local.length - 3))}${local.slice(-1)}@${domain}`;
 }
 
-const fmtRecDate = new Intl.DateTimeFormat('en-IN', {
-  day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true,
-});
+// FIX: moment replaces Intl.DateTimeFormat — Hermes (Android) has no en-IN ICU data
+// Intl.DateTimeFormat('en-IN', ...) throws 'Incomplete locale data' at module load time,
+// crashing every screen that imports this component.
+function fmtRecDate(date) {
+  const m = typeof date === 'string' ? require('moment')(date) : require('moment')(date);
+  return m.format('DD MMM, hh:mm A');
+}
 
 let RNFS;
 try { RNFS = require('react-native-fs'); } catch {}
@@ -92,12 +96,20 @@ async function loadUploadedSet() {
   } catch { return new Set(); }
 }
 
+const TRACKER_TTL_MS = 24 * 60 * 60 * 1000; // 24h — mirrors recordingService
 async function addToUploadedSet(fileKey) {
   try {
     const set = await loadUploadedSet();
     set.add(fileKey);
-    const arr = Array.from(set);
-    if (arr.length > 2000) arr.splice(0, arr.length - 2000);
+    // FIX: prune entries older than 24h instead of capping at 2000.
+    // Each key ends with ::mtimeMs — extract and drop stale ones so the set
+    // stays small (today's uploads only) and has() checks remain fast.
+    const cutoff = Date.now() - TRACKER_TTL_MS;
+    const arr = Array.from(set).filter(k => {
+      const parts = k.split('::');
+      const ts = parseInt(parts[parts.length - 1]);
+      return !isNaN(ts) && ts > cutoff;
+    });
     await AsyncStorage.setItem(UPLOAD_TRACKER_KEY, JSON.stringify(arr));
   } catch {}
 }
@@ -135,17 +147,93 @@ function filenameMatchesPhone(filename, variants) {
   return variants.some(v => v.length >= 7 && prefixDigs.includes(v));
 }
 
-// ── Contact name match ────────────────────────────────────────────────────────
-function filenameMatchesName(filename, leadName) {
-  if (!leadName || leadName.trim().length < 3) return false;
+// ── Does the filename positively identify a DIFFERENT contact? ────────────────
+// A timestamp-only ("matched by call time") match must NOT accept a recording
+// whose filename clearly belongs to someone else. Some dialers save files like
+// "Chinni The Spiderman-26xxxxxxxx.mp3" — a different name AND a different
+// number — yet they were attributed to the current lead purely because the file
+// time was near the lead's call. This returns true when the filename carries an
+// identifying phone or name that does NOT match the current lead, so byTime can
+// reject it. It returns false for ambiguous filenames (no name/number), which
+// time-proximity is still allowed to rescue.
+function filenameNamesDifferentContact(filename, variants, leadName) {
   const nameNoExt = filename.replace(/\.[^.]+$/, '');
-  const prefix    = stripTimestampSuffix(nameNoExt).toLowerCase().trim();
-  const name      = leadName.toLowerCase().trim();
-  if (prefix.length < 3) return false;
+  const prefix    = stripTimestampSuffix(nameNoExt);
+  const digs      = prefix.replace(/\D/g, '');
 
-  return prefix === name
-    || (name.length >= 4 && name.startsWith(prefix))
-    || (prefix.length >= 4 && prefix.startsWith(name));
+  // 1. Filename contains a phone-like number that is NOT this lead's number.
+  if (digs.length >= 7) {
+    const matchesLead = variants.some(v => v.length >= 7 && digs.includes(v));
+    if (!matchesLead) return true; // a different number → different contact
+  }
+
+  // 2. Filename contains a name, and it isn't this lead's name.
+  const fileName = normaliseForNameMatch(prefix);
+  const wantName = normaliseForNameMatch(leadName || '');
+  if (fileName.length >= 2) {
+    if (!wantName) return true; // file is named for someone, lead has no name to match
+    const wantTokens = wantName.split(' ').filter(t => t.length >= 2);
+    const fileTokens = new Set(fileName.split(' ').filter(t => t.length >= 2));
+    const shares = wantTokens.some(t => fileTokens.has(t));
+    if (!shares) return true; // named for a different person
+  }
+
+  return false; // no conflicting identity → ambiguous, time match may rescue
+}
+
+// ── Contact name match ────────────────────────────────────────────────────────
+// The OLD matcher only compared the lead name against the START of the filename
+// prefix. Real dialers, however, wrap the contact name in boilerplate AND a
+// date/time, e.g.:
+//   "Call recording pooja 1057.m4a"        ← prefix "call recording", name in middle
+//   "Call_pooja_1057_20250525.m4a"         ← "Call" prefix + trailing date
+//   "Recording_Pooja_143000.m4a"           ← prefix + trailing time
+// Because the name sits in the MIDDLE, startsWith() never matched and the
+// recording was reported as "not found". This version normalises the filename
+// (strip dialer boilerplate + date/time + the user's "last 4 digits" suffix)
+// and checks whether the lead-name tokens appear ANYWHERE inside it.
+
+// Dialer/app boilerplate words that are never part of a contact name.
+const FILENAME_NOISE = /\b(call|calls|recording|recordings|rec|record|voice|audio|incoming|outgoing|outgoingcall|incomingcall|with|to|from)\b/gi;
+
+function normaliseForNameMatch(text) {
+  return String(text || '')
+    .toLowerCase()
+    // turn separators into spaces
+    .replace(/[_\-.+()]+/g, ' ')
+    // drop date/time digit clusters (YYYYMMDD, HHMMSS, epoch, "1057"-style etc.)
+    .replace(/\d+/g, ' ')
+    // remove dialer boilerplate words
+    .replace(FILENAME_NOISE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function filenameMatchesName(filename, leadName) {
+  if (!leadName || leadName.trim().length < 2) return false;
+
+  const nameNoExt = filename.replace(/\.[^.]+$/, '');
+  const haystack  = normaliseForNameMatch(nameNoExt);   // e.g. "pooja"
+  const needle    = normaliseForNameMatch(leadName);    // e.g. "pooja"
+  if (haystack.length < 2 || needle.length < 2) return false;
+
+  // Exact normalised equality (most common: "Call recording pooja 1057" → "pooja")
+  if (haystack === needle) return true;
+
+  // Whole-name substring either direction (handles extra tokens on either side)
+  if (haystack.includes(needle) || needle.includes(haystack)) return true;
+
+  // Token overlap: every word of the (shorter) lead name appears in the filename.
+  // Covers "Ramesh Kumar" lead vs a "ramesh" recording and vice-versa.
+  const hTokens = new Set(haystack.split(' ').filter(t => t.length >= 2));
+  const nTokens = needle.split(' ').filter(t => t.length >= 2);
+  if (nTokens.length === 0) return false;
+  const matched = nTokens.filter(t => hTokens.has(t));
+  // Require either all name tokens present, or at least one distinctive (≥4 char) token.
+  if (matched.length === nTokens.length) return true;
+  if (matched.some(t => t.length >= 4)) return true;
+
+  return false;
 }
 
 // ── Timestamp fallback match ──────────────────────────────────────────────────
@@ -168,7 +256,7 @@ function isFileEntry(entry) {
 }
 
 // ── Directory scanner (one level deep) ───────────────────────────────────────
-async function scanDir(dir) {
+async function scanDir(dir, sinceMs = 0) {
   if (!RNFS) return [];
   try {
     const exists = await RNFS.exists(dir);
@@ -177,17 +265,23 @@ async function scanDir(dir) {
 
     const audioFiles = [];
 
+    // FIX: apply the time filter here so we don't accumulate (and later
+    // name-match) every recording on the device. Without this the screen
+    // listed all 60+ old files and froze while walking every folder.
+    const passesTime = (entry) =>
+      sinceMs <= 0 || new Date(entry.mtime).getTime() >= sinceMs;
+
     for (const entry of entries) {
       if (isFileEntry(entry)) {
         const ext = entry.name.split('.').pop().toLowerCase();
-        if (AUDIO_EXTS.has(ext)) audioFiles.push(entry);
+        if (AUDIO_EXTS.has(ext) && passesTime(entry)) audioFiles.push(entry);
       } else {
         try {
           const subEntries = await RNFS.readDir(entry.path);
           for (const sub of subEntries) {
             if (!isFileEntry(sub)) continue;
             const ext = sub.name.split('.').pop().toLowerCase();
-            if (AUDIO_EXTS.has(ext)) audioFiles.push(sub);
+            if (AUDIO_EXTS.has(ext) && passesTime(sub)) audioFiles.push(sub);
           }
         } catch {}
       }
@@ -201,7 +295,7 @@ async function scanDir(dir) {
 }
 
 // ── Main scan ─────────────────────────────────────────────────────────────────
-async function findRecordingsForLead(phoneNumber, leadName = '', callLogs = []) {
+async function findRecordingsForLead(phoneNumber, leadName = '', callLogs = [], sinceMs = 0) {
   if (!RNFS) return [];
 
   const granted = await requestStoragePermission();
@@ -211,12 +305,12 @@ async function findRecordingsForLead(phoneNumber, leadName = '', callLogs = []) 
   const seen     = new Set();
   const results  = [];
 
-  console.log(`[Recordings] Scanning for phone="${phoneNumber}" name="${leadName}" variants=${JSON.stringify(variants)}`);
+  console.log(`[Recordings] Scanning for phone="${phoneNumber}" name="${leadName}" since=${sinceMs ? new Date(sinceMs).toISOString() : 'all'} variants=${JSON.stringify(variants)}`);
 
   const dirsToScan = await buildScanDirs(RECORDING_DIRS);
 
   for (const dir of dirsToScan) {
-    const files = await scanDir(dir);
+    const files = await scanDir(dir, sinceMs);
     if (files.length > 0) {
       console.log(`[Recordings] Dir "${dir}" → ${files.length} audio file(s):`, files.map(f => f.name));
     }
@@ -226,7 +320,13 @@ async function findRecordingsForLead(phoneNumber, leadName = '', callLogs = []) 
 
       const byPhone = filenameMatchesPhone(f.name, variants);
       const byName  = !byPhone && filenameMatchesName(f.name, leadName);
-      const byTime  = !byPhone && !byName && timestampMatchesCallLog(f.mtime, callLogs);
+      // Time-proximity is only allowed to rescue AMBIGUOUS filenames. If the
+      // filename clearly names a different person/number, do NOT accept it even
+      // when the timestamp is close (fixes other contacts' recordings showing
+      // up under this lead via "matched by call time").
+      const byTime  = !byPhone && !byName
+        && !filenameNamesDifferentContact(f.name, variants, leadName)
+        && timestampMatchesCallLog(f.mtime, callLogs);
 
       if (!byPhone && !byName && !byTime) {
         const prefix = stripTimestampSuffix(f.name.replace(/\.[^.]+$/, ''));
@@ -294,7 +394,7 @@ function RecordingRow({ item, leadId, phoneNumber, uploadedSet }) {
         <Text style={styles.recName} numberOfLines={2}>{maskFilename(item.name)}</Text>
         <Text style={styles.recMeta}>
           {formatSize(item.size)} · {item.ext}
-          {item.modifiedAt ? `  ·  ${fmtRecDate.format(new Date(item.modifiedAt))}` : ''}
+          {item.modifiedAt ? `  ·  ${fmtRecDate(new Date(item.modifiedAt))}` : ''}
         </Text>
         {item.matchMethod !== 'number' && (
           <Text style={styles.recMatchBadge}>
@@ -332,7 +432,7 @@ function RecordingRow({ item, leadId, phoneNumber, uploadedSet }) {
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
-export default function LeadRecordingsSection({ lead }) {
+function LeadRecordingsSection({ lead }) {
   const [recordings, setRecordings] = useState([]);
   const [loading,    setLoading]    = useState(false);
   const [scanned,    setScanned]    = useState(false);
@@ -352,7 +452,7 @@ export default function LeadRecordingsSection({ lead }) {
     loadUploadedSet().then(setUploadedSet).catch(() => {});
   }, []);
 
-  const doScan = useCallback(async (isManual = true) => {
+  const doScan = useCallback(async (isManual = true, sinceMs = 0) => {
     if (!lead?.mobile) return;
     if (!RNFS) {
       if (isManual) Alert.alert('Module Missing', 'react-native-fs not installed.\n\nRun: npm install react-native-fs');
@@ -366,13 +466,26 @@ export default function LeadRecordingsSection({ lead }) {
         if (lead?.id) callLogs = await getLeadCallLogs(lead.id) || [];
       } catch {}
 
+      // FIX: sinceMs is now actually passed through. A manual "Rescan" passes 0
+      // (scan everything for this lead); the automatic open passes a 7-day floor
+      // so the filesystem walk is bounded and the screen no longer freezes while
+      // listing every old recording on the device.
       const found = await findRecordingsForLead(
         lead.mobile,
         lead.name || '',
         callLogs,
+        sinceMs,
       );
       setRecordings(found);
       setScanned(true);
+
+      // FIX: cache the REAL results (the old code stored an empty array, so the
+      // 5-min cache never worked and every navigation triggered a full rescan).
+      scanCacheRef.current = {
+        leadId:  lead.id,
+        ts:      Date.now(),
+        results: found,
+      };
 
       if (isManual && found.length === 0) {
         const displayNumber = String(lead.mobile).replace(/\D/g, '').slice(-10);
@@ -399,8 +512,8 @@ export default function LeadRecordingsSection({ lead }) {
 
   // PERF FIX: Before scanning, check the 5-min in-memory cache for this lead.
   // If cache is fresh, render immediately without touching the filesystem.
-  // When a real scan is needed, pass sinceMs = now - 7 days so scanDirectory
-  // only walks files modified in the last week instead of all-time.
+  // When a real scan is needed, pass sinceMs = now - 7 days so scanDir only
+  // walks files modified in the last week instead of all-time.
   useEffect(() => {
     if (!lead?.mobile || Platform.OS !== 'android') return;
 
@@ -413,14 +526,14 @@ export default function LeadRecordingsSection({ lead }) {
     }
 
     const sinceMs = Date.now() - SEVEN_DAYS_MS;
-    doScanRef.current(false, sinceMs).then(() => {
-      // doScan sets recordings via setRecordings; update cache after it settles
-      scanCacheRef.current = {
-        leadId:  lead.id,
-        ts:      Date.now(),
-        results: [], // will be refreshed from state on next render
-      };
-    }).catch(() => {});
+    // PERF FIX (freeze on open): defer the heavy scan (RNFS.readDir across many
+    // folders + device call-log read) until AFTER the screen finishes animating
+    // in. Running it synchronously on mount blocked the JS thread and made
+    // opening a lead stick.
+    const task = InteractionManager.runAfterInteractions(() => {
+      doScanRef.current(false, sinceMs).catch(() => {});
+    });
+    return () => task.cancel();
   }, [lead?.mobile, lead?.id]); // lead.id added so re-opening different lead re-scans
 
   const totalCount = recordings.length;
@@ -510,3 +623,13 @@ const styles = StyleSheet.create({
   emptyText:       { color: '#475569', fontSize: 13, fontWeight: '600' },
   emptyHint:       { color: '#334155', fontSize: 12, textAlign: 'center', paddingHorizontal: 16, lineHeight: 18 },
 });
+
+// PERF FIX (typing lag): memoize so this section does NOT re-render — and does
+// not re-run its file scan — every time the parent LeadDetailScreen re-renders
+// (e.g. on every keystroke in the remark box). It only depends on the lead's
+// id / mobile / name, so re-render only when those actually change.
+export default React.memo(LeadRecordingsSection, (prev, next) =>
+  prev.lead?.id === next.lead?.id &&
+  prev.lead?.mobile === next.lead?.mobile &&
+  prev.lead?.name === next.lead?.name
+);

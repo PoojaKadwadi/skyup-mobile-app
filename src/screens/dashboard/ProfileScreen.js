@@ -2,7 +2,7 @@
 import React from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Alert, StatusBar,
-  ScrollView, Modal, ActivityIndicator,
+  ScrollView, Modal, ActivityIndicator, Switch,
 } from 'react-native';
 import { useDispatch, useSelector } from 'react-redux';
 import Icon                         from 'react-native-vector-icons/MaterialCommunityIcons';
@@ -13,6 +13,7 @@ import { checkAllPermissions, requestCallPermission,
   from '../../services/permissionsService';
 import { triggerManualSync }        from '../../services/backgroundSyncService';
 import { getCustomRecordingPath, setCustomRecordingPath } from '../../services/recordingPathService';
+import { isAutoUploadEnabled, setAutoUpload } from '../../services/autoUploadService';
 import moment from 'moment';
 
 let RNFS;
@@ -31,11 +32,34 @@ export default function ProfileScreen() {
   const [browseLoading,  setBrowseLoading]  = React.useState(false);
   const [showBrowser,    setShowBrowser]    = React.useState(false);
   const [browserStack,   setBrowserStack]   = React.useState([]);     // navigation history
+  const [autoUpload,     setAutoUploadState] = React.useState(true);  // in-app toggle
+  const [autoUploadBusy, setAutoUploadBusy]  = React.useState(false);
 
   React.useEffect(() => {
     checkAllPermissions().then(setPerms);
     getCustomRecordingPath().then(setCustomPath);
+    isAutoUploadEnabled().then(setAutoUploadState).catch(() => {});
   }, []);
+
+  // Toggle the auto-upload foreground service on/off and persist the choice.
+  const handleAutoUploadToggle = async (next) => {
+    setAutoUploadBusy(true);
+    setAutoUploadState(next); // optimistic
+    try {
+      await setAutoUpload(next);
+      if (next) {
+        Alert.alert(
+          'Auto-upload ON',
+          'A small ongoing notification keeps the app active so recordings upload automatically after each call. You can turn this off anytime.',
+        );
+      }
+    } catch (e) {
+      setAutoUploadState(!next); // revert on failure
+      Alert.alert('Could not change setting', e?.message || 'Please try again.');
+    } finally {
+      setAutoUploadBusy(false);
+    }
+  };
 
   // ── Folder browser logic ───────────────────────────────────────────────────
   const openBrowser = async () => {
@@ -149,6 +173,33 @@ export default function ProfileScreen() {
           <Text style={styles.userEmail}>{user?.email || ''}</Text>
           <View style={styles.roleBadge}>
             <Text style={styles.roleText}>{(user?.role || 'user').toUpperCase()}</Text>
+          </View>
+        </View>
+
+        {/* Auto-Upload Recordings */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Auto-Upload Recordings</Text>
+          <View style={styles.infoCard}>
+            <View style={styles.toggleRow}>
+              <View style={{ flex: 1, paddingRight: 12 }}>
+                <Text style={styles.toggleLabel}>Upload after every call</Text>
+                <Text style={styles.toggleHint}>
+                  Keeps the app active (shows a small ongoing notification) so call
+                  recordings upload automatically right after a call ends — even on
+                  phones that aggressively close background apps.
+                </Text>
+              </View>
+              {autoUploadBusy
+                ? <ActivityIndicator size="small" color="#2563EB" />
+                : (
+                  <Switch
+                    value={autoUpload}
+                    onValueChange={handleAutoUploadToggle}
+                    trackColor={{ false: '#334155', true: '#1D4ED8' }}
+                    thumbColor={autoUpload ? '#60A5FA' : '#94A3B8'}
+                  />
+                )}
+            </View>
           </View>
         </View>
 
@@ -359,6 +410,9 @@ const styles = StyleSheet.create({
                   textTransform: 'uppercase', letterSpacing: 1.5, marginBottom: 10 },
   infoCard:     { backgroundColor: '#1E293B', borderRadius: 18, overflow: 'hidden',
                   borderWidth: 1, borderColor: '#334155' },
+  toggleRow:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 14 },
+  toggleLabel:  { fontSize: 14, fontWeight: '700', color: '#E2E8F0', marginBottom: 4 },
+  toggleHint:   { fontSize: 11, color: '#64748B', lineHeight: 16 },
   row:          { flexDirection: 'row', alignItems: 'center', padding: 14,
                   borderBottomWidth: 1, borderBottomColor: '#334155' },
   rowLabel:     { flex: 1, color: '#94A3B8', fontSize: 14 },

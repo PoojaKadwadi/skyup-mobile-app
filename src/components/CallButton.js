@@ -10,7 +10,7 @@ import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 
 import { triggerPostCallRecordingSync } from '../services/backgroundSyncService';
 import { syncCallLogs }                 from '../api/callLogsApi';
-import { getCallLogsForNumber }         from '../services/phoneService';
+import { getCallLogsForNumber, sanitizeForDial } from '../services/phoneService';
 
 export default function CallButton({ phoneNumber, onCallStart, onCallEnd, size = 'normal' }) {
   const appStateRef = useRef(AppState.currentState);
@@ -32,10 +32,22 @@ export default function CallButton({ phoneNumber, onCallStart, onCallEnd, size =
     try {
       Vibration.vibrate(30);
 
-      const dialUri = `tel:${String(phoneNumber).replace(/[\s\-\(\)]/g, '')}`;
-      const canOpen = await Linking.canOpenURL(dialUri);
-      if (!canOpen) return;
+      // Use the shared dial sanitiser so CallButton, LeadDetailScreen, and
+      // phoneService all build the tel: URI identically (keeps a leading "+"
+      // and all digits; strips spaces, dashes, parens, dots, invisible unicode).
+      const dialNumber = sanitizeForDial(phoneNumber);
 
+      // Guard: nothing dialable → don't launch an empty dialer.
+      if (!dialNumber) {
+        console.warn('[CallButton] No valid number to dial:', JSON.stringify(phoneNumber));
+        return;
+      }
+
+      const dialUri = `tel:${dialNumber}`;
+
+      // NOTE: canOpenURL for tel: can falsely return false on Android 11+ when
+      // the dialer package isn't declared in <queries>. openURL handles tel:
+      // natively, so call it directly and catch any failure instead of bailing.
       await Linking.openURL(dialUri);
       onCallStart?.(phoneNumber);
 

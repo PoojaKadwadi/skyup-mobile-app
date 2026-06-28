@@ -57,15 +57,30 @@ function mapRawLogs(rawArray) {
   }));
 }
 
-// ── Make a phone call ─────────────────────────────────────────────────────────
-// FIX 2: Use normalizePhone so "919876543210" dials as "9876543210"
-export const makePhoneCall = async (phoneNumber) => {
-  const normalized = normalizePhone(phoneNumber);
-  if (!normalized) throw new Error('Invalid phone number');
-  const dialUri = `tel:${normalized}`;
+// ── Sanitise a number for DIALING (not for matching) ──────────────────────────
+// IMPORTANT: do NOT use normalizePhone() to build a tel: URI. normalizePhone
+// strips the country code and keeps only the last 10 digits — that is correct
+// for COMPARING numbers, but wrong for DIALING (it breaks international numbers,
+// landlines with long area codes, and short codes). For dialing we keep a single
+// leading "+" if present and every digit, and strip only true junk (spaces,
+// dashes, parens, dots, slashes, invisible unicode marks, stray "tel:" text).
+export function sanitizeForDial(phone) {
+  if (!phone) return '';
+  const raw     = String(phone);
+  const hasPlus = raw.trim().startsWith('+');
+  const digits  = raw.replace(/\D/g, '');
+  if (digits.length < 3) return '';
+  return (hasPlus ? '+' : '') + digits;
+}
 
-  const canOpen = await Linking.canOpenURL(dialUri);
-  if (!canOpen) throw new Error('This device cannot make phone calls');
+// ── Make a phone call ─────────────────────────────────────────────────────────
+// FIX: dial the real number via sanitizeForDial (was normalizePhone, which
+// stripped the country code and could yield a blank/wrong dialer). Also dropped
+// the canOpenURL("tel:") guard — it returns false spuriously on Android 11+
+// when the dialer package isn't in <queries>, which blocked legitimate calls.
+export const makePhoneCall = async (phoneNumber) => {
+  const dialNumber = sanitizeForDial(phoneNumber);
+  if (!dialNumber) throw new Error('Invalid phone number');
 
   const granted = await requestCallPermission();
   if (!granted) {
@@ -73,7 +88,7 @@ export const makePhoneCall = async (phoneNumber) => {
     return false;
   }
 
-  await Linking.openURL(dialUri);
+  await Linking.openURL(`tel:${dialNumber}`);
   return true;
 };
 

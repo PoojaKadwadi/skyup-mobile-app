@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Alert, Modal, ActivityIndicator, StatusBar,
@@ -10,17 +10,24 @@ import {
 import { useDispatch, useSelector }                from 'react-redux';
 import { useNavigation, useRoute }                 from '@react-navigation/native';
 import Icon                                        from 'react-native-vector-icons/MaterialCommunityIcons';
-import { submitCallRemark, patchLead }             from '../../store/slices/leadsSlice';
+import { submitCallRemark, patchLead, fetchLeads }             from '../../store/slices/leadsSlice';
 import { makePhoneCall, normalizePhone }           from '../../services/phoneService';
 import { getCallLogsForNumber }                    from '../../services/phoneService';
 import { getLeadCallLogs }                         from '../../api/callLogsApi';
+import { markLeadInvalid, getLeadActionSummary, getLeadById } from '../../api/leadsApi';
 import { triggerPostCallRecordingSync }            from '../../services/backgroundSyncService';
 import { syncCallLogs }                            from '../../api/callLogsApi';
 import CallButton                                  from '../../components/CallButton';
 import LeadRecordingsSection                       from '../../components/LeadRecordingsSection';
+import CalendarDateTimePicker                       from '../../components/CalendarDateTimePicker';
+import { postMeetingRemark }                        from '../../api/meetingsApi';
+import { scheduleMeetingFollowUp }                  from '../../services/notificationService';
 import moment                                      from 'moment';
 
-const OUTCOMES = ['Answered', 'Not Answered', 'Busy', 'Switch Off', 'Call Back Later', 'Interested', 'Not Interested'];
+// Visit types offered when the agent logs a Client Meeting from the remark modal.
+const MEETING_TYPES = ['In-Person', 'Site Visit', 'Demo', 'Video Call', 'Phone Call'];
+
+const OUTCOMES = ['Answered', 'Not Answered', 'Busy', 'Switch Off', 'Call Back Later', 'Interested', 'Not Interested', 'Invalid', 'Client Meeting'];
 
 function maskPhone(phone) {
   if (!phone) return '—';
@@ -83,25 +90,82 @@ function InfoItem({ icon, label, value, full }) {
   );
 }
 
+// Tracks lead ids whose contact has already been auto-saved this session, so
+// re-opening a lead doesn't write the contact again. Module-level so it
+// survives screen unmount/remount within the same app run.
+const _autoSavedContactIds = new Set();
+
+// Session-scoped flags so account-setup alerts show at most once per app run.
+const _contactsAlertShown = { noAccount: false, notOnDevice: false };
+
 export default function LeadDetailScreen() {
   const dispatch   = useDispatch();
   const navigation = useNavigation();
   const route      = useRoute();
   const { leadId, postCall = false } = route.params;
 
-  const lead = useSelector((s) => s.leads.items.find(l => l.id === leadId));
+  const storeLead = useSelector((s) => s.leads.items.find(l => l.id === leadId));
+  // Admin-configured Google account email that leads should auto-save into on
+  // this employee's device. Set per-employee in the CRM; null when unset.
+  const contactAccountEmail = useSelector((s) => s.auth?.user?.contactAccountEmail || '');
+
+  // FIX: the screen used to read the lead ONLY from the Redux store. If the
+  // lead wasn't cached (opened from a notification, after a post-call navigate,
+  // or after the list refreshed and dropped it) it showed "Lead not found"
+  // immediately with no way to recover. We now fall back to fetching the lead
+  // by id from the server, showing a loading state while it resolves.
+  const [fetchedLead,   setFetchedLead]   = useState(null);
+  const [leadLoading,   setLeadLoading]   = useState(false);
+  const [leadFetchFail, setLeadFetchFail] = useState(false);
+
+  const lead = storeLead || fetchedLead;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (storeLead || !leadId) return;            // store has it — nothing to do
+    setLeadLoading(true);
+    setLeadFetchFail(false);
+    getLeadById(leadId)
+      .then((data) => { if (!cancelled) setFetchedLead(data); })
+      .catch(() => { if (!cancelled) setLeadFetchFail(true); })
+      .finally(() => { if (!cancelled) setLeadLoading(false); });
+    return () => { cancelled = true; };
+  }, [leadId, storeLead]);
 
   // ── Has this lead already been marked "Interested"? ─────────────────────────
   // If yes, we hide the "Interested" outcome chip so the agent can't pick it
   // again — preventing duplicate "Interested" entries on the same lead.
   // Detected from either the lead's current status OR any past call-history entry.
-  const alreadyInterested = (() => {
+  // FIX: wrap in useMemo so this only recomputes when the lead changes,
+  // not on every render (every keystroke in the remark input triggered a full
+  // callHistory.some() scan under the old IIFE pattern).
+  const alreadyInterested = useMemo(() => {
     if (!lead) return false;
     const status = (lead.status || '').toLowerCase();
     if (status === 'interested' || status === 'in progress' || status === 'converted') return true;
     const history = Array.isArray(lead.callHistory) ? lead.callHistory : [];
     return history.some(h => (h.outcome || '').toLowerCase() === 'interested');
-  })();
+  }, [lead?.status, lead?.callHistory]);
+
+  // PERF FIX (typing lag): build the CRM call-history list once per data change,
+  // not on every keystroke in the remark box. Rendering this inline rebuilt the
+  // whole list on each setRemark, which lagged typing on leads with long history.
+  const callHistoryView = useMemo(() => {
+    const ch = Array.isArray(lead?.callHistory) ? lead.callHistory : [];
+    if (ch.length === 0) return null;
+    return ch.slice().reverse().map((h, i) => (
+      <View key={i} style={styles.historyCard}>
+        <View style={styles.historyHeader}>
+          <Text style={styles.historyAgent}>{h.userName || 'Agent'}</Text>
+          <Text style={styles.historyDate}>{formatDateTime(h.calledAt)}</Text>
+        </View>
+        {h.outcome && (
+          <Text style={styles.historyOutcome}>Outcome: {h.outcome}</Text>
+        )}
+        <Text style={styles.historyRemark}>{h.remark}</Text>
+      </View>
+    ));
+  }, [lead?.callHistory]);
 
   const [showRemarkModal, setShowRemarkModal] = useState(postCall);
   const [remark,          setRemark]          = useState('');
@@ -110,6 +174,31 @@ export default function LeadDetailScreen() {
   const [crmCallLogs,     setCrmCallLogs]     = useState([]);
   const [loadingLogs,     setLoadingLogs]     = useState(false);
   const [logsLoaded,      setLogsLoaded]      = useState(false);
+
+  // ── AI Action Summary ───────────────────────────────────────────────────────
+  const [aiSummary,        setAiSummary]        = useState(null);
+  const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
+  const [aiSummaryError,   setAiSummaryError]   = useState('');
+
+  const fetchActionSummary = async (refresh = false) => {
+    setAiSummaryLoading(true);
+    setAiSummaryError('');
+    try {
+      const data = await getLeadActionSummary(leadId, { refresh });
+      setAiSummary(data);
+    } catch (e) {
+      const code = e?.response?.data?.code;
+      const msg =
+        code === 'GROK_NOT_CONFIGURED'
+          ? 'AI summary is not configured on the server.'
+          : code === 'GROK_UNAVAILABLE'
+          ? 'AI summary service is busy. Please try again.'
+          : (e?.response?.data?.message || e?.message || 'Could not generate summary.');
+      setAiSummaryError(msg);
+    } finally {
+      setAiSummaryLoading(false);
+    }
+  };
 
   // ── Follow-up date state ────────────────────────────────────────────────────
   // FIX: followUpDate was hardcoded to null — the agent had no way to set it.
@@ -123,7 +212,20 @@ export default function LeadDetailScreen() {
   // impossible to edit. Validated + assembled into a Date only on Confirm.
   const [pickerFields, setPickerFields] = useState({ day: '', month: '', year: '', hour: '', minute: '' });
 
+  // ── Client Meeting state ────────────────────────────────────────────────────
+  // When the agent picks the "Client Meeting" outcome, the follow-up date is
+  // treated as the MEETING date/time (required) and they choose a visit type.
+  // On save we also create a meeting on the backend and schedule a reminder
+  // + at-time notification, exactly like the dedicated Client Meeting screen.
+  const [meetingType, setMeetingType] = useState('In-Person');
+  const isClientMeeting = outcome === 'Client Meeting';
+
   const [uploadProgress,  setUploadProgress]  = useState(null); // retained for API compat
+  // FIX: attachDoc and attachRec were used in pickDocument/pickRecording but
+  // never declared — calling setAttachDoc/setAttachRec threw
+  // 'setAttachDoc is not a function' and crashed the attachment picker.
+  const [attachDoc, setAttachDoc] = useState(null);
+  const [attachRec, setAttachRec] = useState(null);
 
   const loadCrmCallLogs = useCallback(async () => {
     setLoadingLogs(true);
@@ -147,9 +249,20 @@ export default function LeadDetailScreen() {
   const isMountedRef     = React.useRef(true);
 
   const handleCall = async (dialNumber) => {
+    // FIX: the big "Call" button is wired as onPress={handleCall}, so React
+    // Native passes a press EVENT object as the first arg — not a number. The
+    // old code did `if (!dialNumber)` to decide whether to open the dialer, but
+    // an event object is truthy, so the dialer was never opened and the button
+    // did nothing. <CallButton> passes a real string number. Distinguish the two:
+    // only treat the arg as a dialed number when it's actually a string/number.
+    const passedNumber =
+      (typeof dialNumber === 'string' || typeof dialNumber === 'number')
+        ? String(dialNumber)
+        : null;
+
     // CallButton passes the number it dialed; fall back to the lead's primary
     // (lead.mobile already prefers primaryPhone via the normalizer).
-    const numberToCall = dialNumber || lead.mobile || lead.primaryPhone || lead.phone;
+    const numberToCall = passedNumber || lead.mobile || lead.primaryPhone || lead.phone;
     try {
       const { requestCallPermission } = require('../../services/permissionsService');
       const granted = await requestCallPermission();
@@ -200,18 +313,24 @@ export default function LeadDetailScreen() {
             if (logs.length > 0) await syncCallLogs(logs.slice(0, 5));
           } catch {}
 
-          try { triggerPostCallRecordingSync(numberToCall, callStartedAt); } catch {}
+          try { triggerPostCallRecordingSync(numberToCall, callStartedAt, lead.name || ''); } catch {}
 
           setTimeout(() => setShowRemarkModal(true), 600);
         }
       });
 
       const { Linking } = require('react-native');
-      const { normalizePhone: norm } = require('../../services/phoneService');
-      const dialUri = `tel:${norm(numberToCall)}`;
-      const canOpen = await Linking.canOpenURL(dialUri);
-      if (!canOpen) throw new Error('This device cannot make phone calls');
-      await Linking.openURL(dialUri);
+      const { sanitizeForDial } = require('../../services/phoneService');
+
+      // FIX: open the dialer here whenever the number did NOT come from
+      // <CallButton> (i.e. the standalone "Call" button, where the arg is a
+      // press event). When CallButton supplied a real number, it already
+      // launched the dialer, so we must not open it a second time.
+      if (!passedNumber) {
+        const toDial = sanitizeForDial(numberToCall);
+        if (!toDial) throw new Error('Invalid phone number');
+        await Linking.openURL(`tel:${toDial}`);
+      }
 
     } catch (e) {
       callPending.current = false;
@@ -315,6 +434,7 @@ export default function LeadDetailScreen() {
     setPickerTempDate(new Date());
     setShowDatePicker(false);
     setUploadProgress(null);
+    setMeetingType('In-Person');
   };
 
   // ── Attachment pickers ──────────────────────────────────────────────────────
@@ -402,6 +522,53 @@ export default function LeadDetailScreen() {
     if (!remark.trim()) { Alert.alert('Required', 'Please enter a call remark'); return; }
     if (!outcome)       { Alert.alert('Required', 'Please select a call outcome'); return; }
 
+    // For a Client Meeting the follow-up date is the MEETING date and is required.
+    if (isClientMeeting && !followUpDate) {
+      Alert.alert('Meeting Date Required', 'Please set the date & time for the client meeting so we can remind you.');
+      return;
+    }
+
+    // ── Invalid outcome → dedicated two-step verification flow ────────────────
+    // First Invalid reassigns the lead to another agent for verification.
+    // If THIS lead is already in verification (a colleague marked it Invalid and
+    // it was sent to you), picking Invalid CONFIRMS it → the lead is closed and
+    // removed from all employee panels. The admin sees it under "Closed Leads".
+    if (outcome === 'Invalid') {
+      const isVerifying = lead?.invalidStage === 'verification';
+      const doSubmit = async (reject = false) => {
+        setSubmitting(true);
+        try {
+          const res = await markLeadInvalid(leadId, { remark: remark.trim(), reject });
+          closeModal();
+          // Refresh the list so the closed/returned lead drops out of view.
+          try { await dispatch(fetchLeads()).unwrap?.(); } catch {}
+          const msg = res?.message
+            || (res?.isClosed
+              ? 'Lead verified Invalid and closed.'
+              : 'Lead marked Invalid and sent for verification.');
+          Alert.alert('✓ Done', msg);
+          if (res?.isClosed) navigation.goBack();
+        } catch (e) {
+          Alert.alert('Failed', e?.message || String(e));
+        } finally { setSubmitting(false); }
+      };
+
+      if (isVerifying) {
+        Alert.alert(
+          'Verify Invalid',
+          'A colleague marked this lead Invalid. Do you confirm it is Invalid (this will CLOSE the lead) or reject it (send it back to the original employee)?',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Reject', onPress: () => doSubmit(true) },
+            { text: 'Confirm Invalid', style: 'destructive', onPress: () => doSubmit(false) },
+          ],
+        );
+      } else {
+        await doSubmit(false);
+      }
+      return;
+    }
+
     setSubmitting(true);
 
     try {
@@ -414,15 +581,49 @@ export default function LeadDetailScreen() {
         recording:   null,
       })).unwrap();
 
+      // ── Client Meeting: also create a meeting on the backend + remind ──────
+      // Mirrors ClientMeetingScreen: posts a meeting-remark and schedules a
+      // reminder-before + at-time notification for the chosen date/time.
+      if (isClientMeeting && followUpDate) {
+        try {
+          await postMeetingRemark(leadId, {
+            meetingType,
+            outcome:      'Follow-Up Required',
+            remark:       remark.trim(),
+            location:     null,
+            followUpDate,
+          }, null);
+
+          await scheduleMeetingFollowUp({
+            id:           `${leadId}_${Date.parse(followUpDate)}`,
+            leadName:     lead?.name || 'Client',
+            followUpDate,
+            meetingType,
+            location:     null,
+          });
+        } catch (meetErr) {
+          // The call remark already saved; surface the meeting issue but don't
+          // lose the remark. The agent can retry from the Client Meeting screen.
+          console.warn('[LeadDetail] Meeting create/notify failed:', meetErr.message);
+          Alert.alert(
+            'Remark saved — meeting not scheduled',
+            'Your remark was saved, but the meeting reminder could not be set up. Please add the meeting from the Client Meeting screen.',
+          );
+          closeModal();
+          return;
+        }
+      }
+
       closeModal();
       const extras = [
-        followUpDate && `Follow-up: ${formatDateTime(followUpDate)}`,
+        isClientMeeting && followUpDate && `Meeting: ${formatDateTime(followUpDate)} (${meetingType})`,
+        !isClientMeeting && followUpDate && `Follow-up: ${formatDateTime(followUpDate)}`,
       ].filter(Boolean);
 
       Alert.alert(
         '✓ Saved',
         extras.length
-          ? `Remark saved.\n${extras.join('\n')}`
+          ? `${isClientMeeting ? 'Meeting scheduled.' : 'Remark saved.'}\n${extras.join('\n')}\n\nYou'll be reminded before it starts.`
           : 'Call remark saved to CRM',
       );
     } catch (e) {
@@ -432,6 +633,15 @@ export default function LeadDetailScreen() {
   };
 
   if (!lead) {
+    // Still resolving from the server — show a spinner instead of "not found".
+    if (leadLoading || (!leadFetchFail && !storeLead)) {
+      return (
+        <View style={styles.notFound}>
+          <ActivityIndicator size="large" color="#2563EB" />
+          <Text style={[styles.notFoundText, { marginTop: 12 }]}>Loading lead…</Text>
+        </View>
+      );
+    }
     return (
       <View style={styles.notFound}>
         <Icon name="account-alert" size={48} color="#334155" />
@@ -443,93 +653,129 @@ export default function LeadDetailScreen() {
     );
   }
 
-  // ── Save to Contacts ──────────────────────────────────────────────────────
+  // ── Save to Contacts (auto) ─────────────────────────────────────────────────
   // Saves the lead as a phone contact with name = "LeadName XXXX"
   // where XXXX = last 4 digits of their phone number.
-  const handleSaveToContacts = async () => {
+  //
+  // CHANGE: the manual "Save to Contacts" button is removed. The contact is now
+  // written AUTOMATICALLY when the lead detail opens (see the effect below).
+  //
+  // The function takes a `silent` flag:
+  //   • silent = true  (automatic path): never shows alerts and never POPS a
+  //     permission dialog or fallback intent — those would be intrusive on a
+  //     screen that just opened. It only writes when Contacts permission is
+  //     ALREADY granted; otherwise it quietly no-ops and returns a status.
+  //   • silent = false (kept for any future manual trigger): full behaviour with
+  //     permission prompt, alerts, and the ACTION_INSERT fallback.
+  const saveLeadToContacts = async (silent = false) => {
     try {
-      // Use react-native-permissions (consistent with the rest of the app).
-      // PermissionsAndroid.request() was used before — it silently fails on Android 11+
-      // when the permission is in the BLOCKED state (previously denied) because it
-      // just returns DENIED without showing a dialog, leaving the user no way to fix it.
-      // react-native-permissions correctly distinguishes BLOCKED so we can send
-      // the user to Settings when needed.
-      //
-      // ALSO: WRITE_CONTACTS alone is insufficient on some Android versions —
-      // READ_CONTACTS must also be granted first, otherwise the OS rejects the write.
-      // Both permissions must be declared in AndroidManifest.xml (now fixed there too).
+      const rawPhone = lead?.primaryPhone || lead?.mobile || lead?.phone || '';
+      if (!rawPhone) return { ok: false, reason: 'no-phone' };
+
       if (Platform.OS === 'android') {
-        // FIX: Use PermissionsAndroid (built into RN bundle) instead of
-        // react-native-permissions which is NOT in the compiled bundle.
-        // require('react-native-permissions') was silently failing, so the
-        // Contacts permission dialog NEVER appeared — it jumped straight to
-        // showing "Permission Required → Open Settings" on every tap.
         const { PermissionsAndroid } = require('react-native');
         const READ  = PermissionsAndroid.PERMISSIONS.READ_CONTACTS;
         const WRITE = PermissionsAndroid.PERMISSIONS.WRITE_CONTACTS;
+        const ACCT  = PermissionsAndroid.PERMISSIONS.GET_ACCOUNTS;
 
-        const results = await PermissionsAndroid.requestMultiple([READ, WRITE]);
+        if (silent) {
+          // AUTO path: contacts perms must already be granted — don't prompt for
+          // them (would be intrusive on screen open). GET_ACCOUNTS is the one
+          // exception: it's required for the account lookup and low-friction, so
+          // request it once if missing rather than wrongly reporting the account
+          // as "not on device".
+          const [readOk, writeOk] = await Promise.all([
+            PermissionsAndroid.check(READ),
+            PermissionsAndroid.check(WRITE),
+          ]);
+          if (!readOk || !writeOk) return { ok: false, reason: 'no-permission' };
 
-        const readGranted  = results[READ]  === PermissionsAndroid.RESULTS.GRANTED;
-        const writeGranted = results[WRITE] === PermissionsAndroid.RESULTS.GRANTED;
-        const readBlocked  = results[READ]  === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN;
-        const writeBlocked = results[WRITE] === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN;
+          const acctOk = await PermissionsAndroid.check(ACCT);
+          if (!acctOk) {
+            const r = await PermissionsAndroid.request(ACCT);
+            if (r !== PermissionsAndroid.RESULTS.GRANTED) {
+              return { ok: false, reason: 'no-accounts-permission' };
+            }
+          }
+        } else {
+          // MANUAL path: prompt as before (now also asks for GET_ACCOUNTS).
+          const results = await PermissionsAndroid.requestMultiple([READ, WRITE, ACCT]);
+          const readGranted  = results[READ]  === PermissionsAndroid.RESULTS.GRANTED;
+          const writeGranted = results[WRITE] === PermissionsAndroid.RESULTS.GRANTED;
+          const readBlocked  = results[READ]  === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN;
+          const writeBlocked = results[WRITE] === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN;
 
-        if (readBlocked || writeBlocked) {
-          Alert.alert(
-            'Contacts Permission Required',
-            'SkyUp CRM needs Contacts permission to save this lead. Please enable it in Settings → Apps → SkyUp CRM → Permissions → Contacts.',
-            [
-              { text: 'Cancel', style: 'cancel' },
-              { text: 'Open Settings', onPress: () => Linking.openSettings() },
-            ],
-          );
-          return;
-        }
-
-        if (!readGranted || !writeGranted) {
-          Alert.alert('Permission Denied', 'Cannot save contact without Contacts permission.');
-          return;
+          if (readBlocked || writeBlocked) {
+            Alert.alert(
+              'Contacts Permission Required',
+              'SkyUp CRM needs Contacts permission to save this lead. Please enable it in Settings → Apps → SkyUp CRM → Permissions → Contacts.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Open Settings', onPress: () => Linking.openSettings() },
+              ],
+            );
+            return { ok: false, reason: 'blocked' };
+          }
+          if (!readGranted || !writeGranted) {
+            Alert.alert('Permission Denied', 'Cannot save contact without Contacts permission.');
+            return { ok: false, reason: 'denied' };
+          }
         }
       }
 
       // Build contact name: "LeadName 4567" (last 4 digits of the primary number)
-      const rawPhone = lead.primaryPhone || lead.mobile || lead.phone || '';
-      const digits   = rawPhone.replace(/\D/g, '');
-      const last4    = digits.slice(-4) || '0000';
-      const contactName = `${lead.name || 'Lead'} ${last4}`;
+      const digits      = rawPhone.replace(/\D/g, '');
+      const last4       = digits.slice(-4) || '0000';
+      const contactName = `${lead?.name || 'Lead'} ${last4}`;
 
-      // Auto-save directly to the device address book via the native
-      // ContactsModule (ContentResolver insert) — NO screen is opened, the
-      // contact is written silently. This replaces the old ACTION_INSERT intent
-      // that only PRE-FILLED the New Contact screen and required a manual tap.
+      // Write directly to the device address book via the native ContactsModule
+      // (ContentResolver insert) — NO screen is opened, the contact is written
+      // silently.
       const { NativeModules } = require('react-native');
       const ContactsModule = NativeModules.ContactsModule;
 
       if (ContactsModule && typeof ContactsModule.saveContact === 'function') {
         try {
+          // 5th arg: the admin-set Google account to save into. When non-empty,
+          // the native module REQUIRES that account to be signed in on the
+          // device; if it isn't, it rejects with code ACCOUNT_NOT_ON_DEVICE so
+          // we can alert the agent. When empty, the native module also rejects
+          // (NO_ACCOUNT_CONFIGURED) — per product decision we alert rather than
+          // silently saving to the device default.
           await ContactsModule.saveContact(
             contactName,
             rawPhone,
-            lead.email || '',
-            lead.company || '',
+            lead?.email || '',
+            lead?.company || '',
+            contactAccountEmail || '',
           );
-          Alert.alert('Saved', `"${contactName}" was saved to your contacts.`);
-          return;
+          if (!silent) Alert.alert('Saved', `"${contactName}" was saved to your contacts.`);
+          return { ok: true };
         } catch (nativeErr) {
-          // Fall through to the intent method below if the native insert fails
-          // for any reason (e.g. OEM ContentResolver quirk).
-          console.warn('[SaveToContacts] native insert failed, falling back:', nativeErr?.message);
+          console.warn('[SaveToContacts] native insert failed:', nativeErr?.message);
+          // react-native bridges the Kotlin promise.reject CODE into err.code.
+          const code = nativeErr?.code || '';
+          if (code === 'NO_ACCOUNT_CONFIGURED') {
+            return { ok: false, reason: 'no-account-configured' };
+          }
+          if (code === 'ACCOUNT_NOT_ON_DEVICE') {
+            return { ok: false, reason: 'account-not-on-device', account: contactAccountEmail };
+          }
+          // In AUTO mode do NOT fall back to an intent (it would open a screen);
+          // just report failure quietly.
+          if (silent) return { ok: false, reason: 'native-failed' };
         }
+      } else if (silent) {
+        // No native module available and we're automatic — don't open a screen.
+        return { ok: false, reason: 'no-native-module' };
       }
 
-      // Fallback: ACTION_INSERT intent (opens pre-filled New Contact screen).
+      // Fallback (MANUAL only): ACTION_INSERT intent (opens pre-filled screen).
       const name    = encodeURIComponent(contactName);
       const phone   = encodeURIComponent(rawPhone);
-      const email   = lead.email ? encodeURIComponent(lead.email) : '';
-      const company = lead.company ? encodeURIComponent(lead.company) : '';
+      const email   = lead?.email ? encodeURIComponent(lead.email) : '';
+      const company = lead?.company ? encodeURIComponent(lead.company) : '';
 
-      // Standard INSERT intent — universally supported on Android 5+
       let uri = `intent:#Intent;action=android.intent.action.INSERT;type=vnd.android.cursor.dir%2Fcontact;S.name=${name};S.phone=${phone}`;
       if (email)   uri += `;S.email=${email}`;
       if (company) uri += `;S.company=${company}`;
@@ -538,7 +784,6 @@ export default function LeadDetailScreen() {
       try {
         await Linking.openURL(uri);
       } catch (intentErr) {
-        // Last resort: open Contacts app home so user can add manually
         try {
           await Linking.openURL('content://contacts/people/');
         } catch {
@@ -548,10 +793,64 @@ export default function LeadDetailScreen() {
           );
         }
       }
+      return { ok: true, viaIntent: true };
     } catch (e) {
-      Alert.alert('Error', e.message || 'Failed to save contact.');
+      if (!silent) Alert.alert('Error', e.message || 'Failed to save contact.');
+      return { ok: false, reason: 'error' };
     }
   };
+
+  // ── Auto-save the lead to contacts when the screen opens ────────────────────
+  // Replaces the manual "Save to Contacts" button. Runs once per lead.id:
+  //   • _autoSavedContactIds (module-level) dedups across navigations in the
+  //     same app session, so re-opening a lead doesn't write it again.
+  //   • The OS contacts provider also dedups identical rows, so this is safe
+  //     even across app restarts.
+  // It only writes when Contacts permission is already granted (silent=true);
+  // it never prompts or opens a screen on its own.
+  //
+  // Account handling (product decision):
+  //   • If no contacts account is configured for this employee → alert them to
+  //     ask their admin to set one (shown once per session).
+  //   • If the configured account isn't signed in on the device → alert them to
+  //     add it in Android settings (shown once per session).
+  useEffect(() => {
+    if (!lead?.id) return;
+    if (Platform.OS !== 'android') return;
+    if (_autoSavedContactIds.has(lead.id)) return;
+
+    const phone = lead.primaryPhone || lead.mobile || lead.phone || '';
+    if (!phone) return;
+
+    // Mark optimistically so a fast re-render doesn't double-fire; clear on
+    // failure so a later open (after permission/account is fixed) can retry.
+    _autoSavedContactIds.add(lead.id);
+    saveLeadToContacts(true).then((res) => {
+      if (res?.ok) return;
+      _autoSavedContactIds.delete(lead.id);
+
+      // Surface account-setup problems to the agent — but only once per app
+      // session per problem, so opening many leads doesn't spam alerts.
+      if (res?.reason === 'no-account-configured' && !_contactsAlertShown.noAccount) {
+        _contactsAlertShown.noAccount = true;
+        Alert.alert(
+          'Contacts Account Not Set',
+          'No contacts email is configured for your account, so leads can’t be auto-saved to your phone. Please ask your admin to set your “Contacts Email (Google account)” in the CRM.',
+        );
+      } else if (res?.reason === 'account-not-on-device' && !_contactsAlertShown.notOnDevice) {
+        _contactsAlertShown.notOnDevice = true;
+        Alert.alert(
+          'Add Your Contacts Account',
+          `Leads are set to auto-save into "${res.account}", but that Google account isn’t signed in on this phone. Add it in Settings → Accounts → Add account → Google, then reopen this lead.`,
+          [
+            { text: 'Later', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => Linking.openSettings() },
+          ],
+        );
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lead?.id]);
 
   // Resolve primary & secondary numbers. `mobile` is the canonical/primary
   // (already prefers primaryPhone in the normalizer); secondaryPhone is optional.
@@ -647,15 +946,6 @@ export default function LeadDetailScreen() {
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={styles.saveContactBtn}
-          onPress={handleSaveToContacts}
-          activeOpacity={0.8}
-        >
-          <Icon name="account-plus-outline" size={18} color="#059669" style={{ marginRight: 8 }} />
-          <Text style={styles.saveContactBtnText}>Save to Contacts</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
           style={styles.remarkBtn}
           onPress={() => setShowRemarkModal(true)}
           activeOpacity={0.8}
@@ -702,21 +992,78 @@ export default function LeadDetailScreen() {
           )}
         </View>
 
+        {/* ── AI Action Summary ─────────────────────────────────────────────── */}
+        <View style={styles.section}>
+          <View style={styles.aiHeaderRow}>
+            <Text style={styles.sectionTitle}>AI Action Summary</Text>
+            {aiSummary && !aiSummaryLoading && (
+              <TouchableOpacity onPress={() => fetchActionSummary(true)}>
+                <Icon name="refresh" size={18} color="#A78BFA" />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {!aiSummary && !aiSummaryLoading && !aiSummaryError && (
+            <TouchableOpacity style={styles.aiGenerateBtn} onPress={() => fetchActionSummary(false)}>
+              <Icon name="robot-happy-outline" size={18} color="#fff" />
+              <Text style={styles.aiGenerateBtnText}>Generate Summary & Next Action</Text>
+            </TouchableOpacity>
+          )}
+
+          {aiSummaryLoading && (
+            <View style={styles.aiLoadingBox}>
+              <ActivityIndicator color="#A78BFA" />
+              <Text style={styles.aiLoadingText}>Analyzing remarks…</Text>
+            </View>
+          )}
+
+          {!!aiSummaryError && !aiSummaryLoading && (
+            <View style={styles.aiErrorBox}>
+              <Text style={styles.aiErrorText}>{aiSummaryError}</Text>
+              <TouchableOpacity onPress={() => fetchActionSummary(false)}>
+                <Text style={styles.aiRetryText}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {aiSummary && !aiSummaryLoading && (
+            <View style={styles.aiCard}>
+              <Text style={styles.aiSummaryText}>{aiSummary.summary}</Text>
+
+              {!!aiSummary.nextAction && (
+                <View style={styles.aiNextBox}>
+                  <Text style={styles.aiNextLabel}>NEXT ACTION</Text>
+                  <Text style={styles.aiNextText}>{aiSummary.nextAction}</Text>
+                </View>
+              )}
+
+              {Array.isArray(aiSummary.keyPoints) && aiSummary.keyPoints.length > 0 && (
+                <View style={{ marginTop: 10 }}>
+                  {aiSummary.keyPoints.map((p, i) => (
+                    <Text key={i} style={styles.aiKeyPoint}>• {p}</Text>
+                  ))}
+                </View>
+              )}
+
+              <View style={styles.aiMetaRow}>
+                {!!aiSummary.sentiment && (
+                  <Text style={styles.aiMetaChip}>{aiSummary.sentiment}</Text>
+                )}
+                {!!aiSummary.suggestedTemp && (
+                  <Text style={styles.aiMetaChip}>Suggested: {aiSummary.suggestedTemp}</Text>
+                )}
+                <Text style={styles.aiBasedOn}>
+                  {aiSummary.basedOn === 'remarks+calls' ? 'From remarks + calls' : 'From remarks'}
+                </Text>
+              </View>
+            </View>
+          )}
+        </View>
+
         {lead.callHistory?.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>CRM Call History</Text>
-            {lead.callHistory.slice().reverse().map((h, i) => (
-              <View key={i} style={styles.historyCard}>
-                <View style={styles.historyHeader}>
-                  <Text style={styles.historyAgent}>{h.userName || 'Agent'}</Text>
-                  <Text style={styles.historyDate}>{formatDateTime(h.calledAt)}</Text>
-                </View>
-                {h.outcome && (
-                  <Text style={styles.historyOutcome}>Outcome: {h.outcome}</Text>
-                )}
-                <Text style={styles.historyRemark}>{h.remark}</Text>
-              </View>
-            ))}
+            {callHistoryView}
           </View>
         )}
 
@@ -740,7 +1087,7 @@ export default function LeadDetailScreen() {
           >
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Call Remark</Text>
+              <Text style={styles.modalTitle}>{isClientMeeting ? 'Client Meeting' : 'Call Remark'}</Text>
               <TouchableOpacity onPress={closeModal}>
                 <Icon name="close" size={22} color="#94A3B8" />
               </TouchableOpacity>
@@ -779,12 +1126,35 @@ export default function LeadDetailScreen() {
               onChangeText={setRemark}
             />
 
-            {/* ── Follow-up date picker ─────────────────────────────────────── */}
+            {/* ── Client Meeting: visit type selector ───────────────────────── */}
+            {isClientMeeting && (
+              <View style={styles.meetingTypeBlock}>
+                <Text style={styles.modalLabel}>Meeting Type</Text>
+                <View style={styles.outcomeRow}>
+                  {MEETING_TYPES.map(mt => (
+                    <TouchableOpacity
+                      key={mt}
+                      style={[styles.outcomeChip, meetingType === mt && styles.outcomeChipActive]}
+                      onPress={() => setMeetingType(mt)}
+                    >
+                      <Text style={[styles.outcomeChipText, meetingType === mt && styles.outcomeChipTextActive]}>{mt}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            )}
+
+            {/* ── Follow-up / meeting date picker ───────────────────────────── */}
             {/* FIX: This entire section was missing. followUpDate was always    */}
             {/* sent as null — agent had no way to schedule a follow-up from     */}
             {/* the mobile app, so follow-up notifications never fired.          */}
+            {/* For a Client Meeting this same date IS the meeting time and is   */}
+            {/* required; otherwise it's an optional follow-up.                  */}
             <View style={styles.followUpRow}>
-              <Text style={styles.modalLabel}>Follow-Up Date <Text style={styles.optionalTag}>(optional)</Text></Text>
+              <Text style={styles.modalLabel}>
+                {isClientMeeting ? 'Meeting Date & Time ' : 'Follow-Up Date '}
+                <Text style={styles.optionalTag}>{isClientMeeting ? '(required)' : '(optional)'}</Text>
+              </Text>
               {followUpDate ? (
                 <View style={styles.followUpSet}>
                   <Icon name="calendar-check" size={16} color="#34D399" style={{ marginRight: 6 }} />
@@ -799,96 +1169,27 @@ export default function LeadDetailScreen() {
                   onPress={openDatePicker}
                 >
                   <Icon name="calendar-plus" size={16} color="#93C5FD" style={{ marginRight: 6 }} />
-                  <Text style={styles.setDateBtnText}>Set Follow-Up Date & Time</Text>
+                  <Text style={styles.setDateBtnText}>
+                    {isClientMeeting ? 'Set Meeting Date & Time' : 'Set Follow-Up Date & Time'}
+                  </Text>
                 </TouchableOpacity>
               )}
             </View>
 
-            {/* Pure-JS date/time picker — replaces DateTimePickerAndroid.open()
-                which crashed because the native module is not in the bundle.
-                Uses only built-in RN components: View, Text, TextInput. */}
+            {/* Calendar + 12-hour AM/PM picker (pure JS — no native module, so it
+                can't hit the DateTimePickerAndroid crash). Confirms with an ISO
+                string, the same value handleDateConfirm used to produce. */}
             {showDatePicker && (
-              <View style={styles.jsPickerWrapper}>
-                <Text style={styles.jsPickerTitle}>Set Follow-Up Date &amp; Time</Text>
-                <View style={styles.jsPickerRow}>
-                  <View style={styles.jsPickerField}>
-                    <Text style={styles.jsPickerLabel}>Day</Text>
-                    <TextInput
-                      style={styles.jsPickerInput}
-                      keyboardType="number-pad"
-                      maxLength={2}
-                      placeholder="DD"
-                      placeholderTextColor="#475569"
-                      value={pickerFields.day}
-                      onChangeText={(v) => setPickerFields(p => ({ ...p, day: v.replace(/\D/g, '') }))}
-                    />
-                  </View>
-                  <View style={styles.jsPickerField}>
-                    <Text style={styles.jsPickerLabel}>Month</Text>
-                    <TextInput
-                      style={styles.jsPickerInput}
-                      keyboardType="number-pad"
-                      maxLength={2}
-                      placeholder="MM"
-                      placeholderTextColor="#475569"
-                      value={pickerFields.month}
-                      onChangeText={(v) => setPickerFields(p => ({ ...p, month: v.replace(/\D/g, '') }))}
-                    />
-                  </View>
-                  <View style={styles.jsPickerField}>
-                    <Text style={styles.jsPickerLabel}>Year</Text>
-                    <TextInput
-                      style={styles.jsPickerInput}
-                      keyboardType="number-pad"
-                      maxLength={4}
-                      placeholder="YYYY"
-                      placeholderTextColor="#475569"
-                      value={pickerFields.year}
-                      onChangeText={(v) => setPickerFields(p => ({ ...p, year: v.replace(/\D/g, '') }))}
-                    />
-                  </View>
-                </View>
-                <View style={styles.jsPickerRow}>
-                  <View style={styles.jsPickerField}>
-                    <Text style={styles.jsPickerLabel}>Hour (0-23)</Text>
-                    <TextInput
-                      style={styles.jsPickerInput}
-                      keyboardType="number-pad"
-                      maxLength={2}
-                      placeholder="HH"
-                      placeholderTextColor="#475569"
-                      value={pickerFields.hour}
-                      onChangeText={(v) => setPickerFields(p => ({ ...p, hour: v.replace(/\D/g, '') }))}
-                    />
-                  </View>
-                  <View style={styles.jsPickerField}>
-                    <Text style={styles.jsPickerLabel}>Minute</Text>
-                    <TextInput
-                      style={styles.jsPickerInput}
-                      keyboardType="number-pad"
-                      maxLength={2}
-                      placeholder="MM"
-                      placeholderTextColor="#475569"
-                      value={pickerFields.minute}
-                      onChangeText={(v) => setPickerFields(p => ({ ...p, minute: v.replace(/\D/g, '') }))}
-                    />
-                  </View>
-                </View>
-                <View style={styles.jsPickerActions}>
-                  <TouchableOpacity
-                    style={styles.jsPickerCancel}
-                    onPress={() => setShowDatePicker(false)}
-                  >
-                    <Text style={styles.jsPickerCancelText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.jsPickerConfirm}
-                    onPress={handleDateConfirm}
-                  >
-                    <Text style={styles.jsPickerConfirmText}>Confirm</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
+              <CalendarDateTimePicker
+                value={followUpDate}
+                minDate={new Date()}
+                onConfirm={(iso) => {
+                  setPickerTempDate(new Date(iso));
+                  setFollowUpDate(iso);
+                  setShowDatePicker(false);
+                }}
+                onCancel={() => setShowDatePicker(false)}
+              />
             )}
 
             <TouchableOpacity
@@ -899,10 +1200,10 @@ export default function LeadDetailScreen() {
               {submitting ? (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                   <ActivityIndicator color="#fff" size="small" />
-                  <Text style={styles.submitBtnText}>Save Remark</Text>
+                  <Text style={styles.submitBtnText}>{isClientMeeting ? 'Scheduling…' : 'Save Remark'}</Text>
                 </View>
               ) : (
-                <Text style={styles.submitBtnText}>Save Remark</Text>
+                <Text style={styles.submitBtnText}>{isClientMeeting ? 'Schedule Meeting' : 'Save Remark'}</Text>
               )}
             </TouchableOpacity>
           </View>
@@ -956,6 +1257,23 @@ const styles = StyleSheet.create({
   historyAgent:       { fontSize: 12, fontWeight: '700', color: '#93C5FD' },
   historyDate:        { fontSize: 11, color: '#475569' },
   historyOutcome:     { fontSize: 12, color: '#A78BFA', fontWeight: '600', marginBottom: 4 },
+  aiHeaderRow:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  aiGenerateBtn:      { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#7C3AED', paddingVertical: 12, borderRadius: 12, marginTop: 4 },
+  aiGenerateBtnText:  { color: '#fff', fontSize: 13, fontWeight: '700' },
+  aiLoadingBox:       { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 16, justifyContent: 'center' },
+  aiLoadingText:      { color: '#A78BFA', fontSize: 13, fontWeight: '600' },
+  aiErrorBox:         { backgroundColor: '#2A1015', borderColor: '#7F1D1D', borderWidth: 1, borderRadius: 12, padding: 12, marginTop: 4 },
+  aiErrorText:        { color: '#FCA5A5', fontSize: 12, marginBottom: 6 },
+  aiRetryText:        { color: '#F87171', fontSize: 13, fontWeight: '700' },
+  aiCard:             { backgroundColor: '#1A1530', borderColor: '#3B2F66', borderWidth: 1, borderRadius: 14, padding: 14, marginTop: 4 },
+  aiSummaryText:      { color: '#E5E7EB', fontSize: 14, lineHeight: 20 },
+  aiNextBox:          { backgroundColor: '#231A45', borderRadius: 10, padding: 10, marginTop: 12 },
+  aiNextLabel:        { color: '#A78BFA', fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 4 },
+  aiNextText:         { color: '#F0EDFF', fontSize: 13, fontWeight: '600', lineHeight: 19 },
+  aiKeyPoint:         { color: '#C4B5FD', fontSize: 12.5, lineHeight: 19 },
+  aiMetaRow:          { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginTop: 12 },
+  aiMetaChip:         { backgroundColor: '#2D2A55', color: '#C4B5FD', fontSize: 11, fontWeight: '700', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, overflow: 'hidden' },
+  aiBasedOn:          { color: '#6B7280', fontSize: 10, marginLeft: 'auto' },
   historyRemark:      { fontSize: 13, color: '#CBD5E1', lineHeight: 18 },
 
   notFound:           { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0D0F14' },
@@ -984,6 +1302,7 @@ const styles = StyleSheet.create({
 
   // Follow-up date picker styles
   followUpRow:        { marginBottom: 16 },
+  meetingTypeBlock:   { marginBottom: 4 },
   followUpSet:        { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0F172A', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#34D39940' },
   followUpDateText:   { flex: 1, fontSize: 13, color: '#34D399', fontWeight: '600' },
   clearDateBtn:       { padding: 2 },

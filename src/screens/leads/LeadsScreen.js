@@ -129,7 +129,15 @@ const LeadRow = memo(function LeadRow({ item, leadId, onPress, onCallStart }) {
           <Text style={s.leadCampaign} numberOfLines={1}>{item.campaign}</Text>
         )}
         {item.remark ? (
-          <Text style={s.remark} numberOfLines={1}>"{item.remark}"</Text>
+          <View style={s.remarkRow}>
+            <Icon
+              name={item.remarkIsManual ? 'pencil' : 'bullhorn-variant-outline'}
+              size={11}
+              color={item.remarkIsManual ? '#A78BFA' : COLORS.textMuted}
+              style={s.remarkIcon}
+            />
+            <Text style={s.remark} numberOfLines={1}>"{item.remark}"</Text>
+          </View>
         ) : null}
       </View>
       <CallButton phoneNumber={item.mobile} onCallStart={handleCallStart} />
@@ -211,7 +219,12 @@ export default function LeadsScreen() {
   }, [navigation]);
 
   const handleCallStart = useCallback((leadId) => {
-    setTimeout(() => navigation.navigate('LeadDetail', { leadId, postCall: true }), 2000);
+    // FIX: the old code waited a hard-coded 2 seconds before navigating, which
+    // left a spinner stuck on the card and could land on a lead the store had
+    // already dropped ("Lead not found"). Navigate immediately; LeadDetail now
+    // fetches the lead by id if it isn't cached, and the post-call recording
+    // sync runs in the background regardless.
+    navigation.navigate('LeadDetail', { leadId, postCall: true });
   }, [navigation]);
 
   const displayed = React.useMemo(() => {
@@ -455,7 +468,9 @@ const s = StyleSheet.create({
   leadPhone:    { fontSize: FONT.sm, color: COLORS.textMuted, fontFamily: 'monospace', letterSpacing: 1 },
   tagRow:       { flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginBottom: 4 },
   leadCampaign: { fontSize: FONT.xs, color: COLORS.textSec, marginTop: 2 },
-  remark:       { fontSize: FONT.xs, color: COLORS.textSec, fontStyle: 'italic', marginTop: 3 },
+  remarkRow:    { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
+  remarkIcon:   { marginRight: 4 },
+  remark:       { fontSize: FONT.xs, color: COLORS.textSec, fontStyle: 'italic', flex: 1 },
   sep:          { height: 8 },
   empty:      { alignItems: 'center', paddingTop: 80 },
   emptyTitle: { fontSize: 17, fontWeight: '700', color: COLORS.textSec, marginTop: 14 },

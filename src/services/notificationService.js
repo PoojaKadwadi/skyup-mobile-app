@@ -49,10 +49,13 @@ const NOTIFIED_FOLLOWUP_KEY = 'notif_notified_followup_ids';
 const REASSIGN_COUNTS_KEY = 'notif_reassign_counts';
 const SOCKET_NOTIFIED_KEY = 'notif_socket_notified_ids';
 const SOCKET_REASSIGN_KEY = 'notif_socket_reassign_ids';
+const MEETING_NOTIFIED_KEY = 'notif_meeting_notified_ids';
+const MEETING_SUMMARY_KEY = 'notif_meeting_summary_date';
 
 // ── Notification channel IDs ─────────────────────────────────────────────────
 const CHANNEL_NEW_LEAD = 'new_lead_channel_v2';
 const CHANNEL_FOLLOW_UP = 'followup_channel_v2';
+const CHANNEL_MEETING = 'meeting_channel_v1';
 
 // old channels
 const CHANNEL_NEW_LEAD_OLD = 'new_lead_channel';
@@ -193,6 +196,16 @@ export async function setupNotifications() {
     await notifee.createChannel({
       id: CHANNEL_FOLLOW_UP,
       name: 'Follow-Up Reminders',
+      importance: IMPORTANCE_HIGH,
+      sound: 'default',
+      vibration: true,
+      vibrationPattern: [300, 500],
+      badge: true,
+    });
+
+    await notifee.createChannel({
+      id: CHANNEL_MEETING,
+      name: 'Client Meetings',
       importance: IMPORTANCE_HIGH,
       sound: 'default',
       vibration: true,
@@ -583,6 +596,10 @@ export function registerNotificationHandlers(
         ? navigate('LeadDetail', { leadId })
         : navigate('Leads');
     } else if (
+      notification.id?.startsWith('meeting_')
+    ) {
+      navigate('ClientMeeting');
+    } else if (
       notification.id?.startsWith('new_leads_') ||
       notification.id?.startsWith('reassigned_')
     ) {
@@ -860,6 +877,217 @@ export async function checkAndScheduleClockInReminder(record) {
   await scheduleClockInReminder(trigger);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MEETING / FOLLOW-UP NOTIFICATIONS (Client Visit Log)
+// ─────────────────────────────────────────────────────────────────────────────
+// A meeting remark logged in ClientMeetingScreen may carry a followUpDate.
+// We notify the rep in three ways:
+//   1. A scheduled reminder REMINDER_BEFORE_MIN minutes before the follow-up.
+//   2. A scheduled notification AT the follow-up time.
+//   3. A daily summary (fired on first sync of the day) of today's follow-ups.
+//
+// (1) and (2) use notifee trigger notifications so they fire even when the app
+// is backgrounded/killed. (3) is an immediate notification shown once per day.
+// All three guard against duplicates via AsyncStorage dedup keys.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REMINDER_BEFORE_MIN = 30; // minutes before the meeting to nudge
+
+async function _ensureMeetingChannel() {
+  if (!notifee) return;
+  try {
+    await notifee.createChannel({
+      id:         CHANNEL_MEETING,
+      name:       'Client Meetings',
+      importance: IMPORTANCE_HIGH,
+      sound:      'default',
+      vibration:  true,
+      badge:      true,
+    });
+  } catch {}
+}
+
+// scheduleMeetingFollowUp(meeting)
+// meeting: { id, leadName, followUpDate (ISO), meetingType?, location? }
+// Schedules a "before" reminder and an "at-time" notification.
+// Safe to call repeatedly — trigger IDs are deterministic so re-scheduling
+// simply replaces the pending triggers (no duplicates).
+export async function scheduleMeetingFollowUp(meeting) {
+  if (!notifee || !meeting?.followUpDate) return;
+
+  const whenMs = new Date(meeting.followUpDate).getTime();
+  if (isNaN(whenMs)) return;
+
+  const now = Date.now();
+  // Nothing to schedule if the follow-up is already in the past.
+  if (whenMs <= now) return;
+
+  await _ensureMeetingChannel();
+
+  const TriggerType =
+    notifee.TriggerType ?? require('@notifee/react-native').TriggerType;
+
+  const baseId = `meeting_${meeting.id || meeting.leadName || 'x'}_${whenMs}`;
+  const lead   = meeting.leadName || 'Client';
+  const typeStr = meeting.meetingType ? ` (${meeting.meetingType})` : '';
+
+  // ── (1) Reminder BEFORE the meeting ──────────────────────────────────────
+  const beforeMs = whenMs - REMINDER_BEFORE_MIN * 60 * 1000;
+  if (beforeMs > now) {
+    try {
+      await notifee.createTriggerNotification(
+        {
+          id:    `${baseId}_before`,
+          title: `🗓️ Upcoming meeting in ${REMINDER_BEFORE_MIN} min`,
+          body:  `${lead}${typeStr}${meeting.location ? ` · ${meeting.location}` : ''}`,
+          android: {
+            channelId:   CHANNEL_MEETING,
+            importance:  IMPORTANCE_HIGH,
+            smallIcon:   'ic_notification',
+            pressAction: { id: 'open_meetings', launchActivity: 'default' },
+            data:        { meetingId: String(meeting.id || ''), leadName: lead },
+          },
+          ios: { sound: 'default' },
+        },
+        { type: TriggerType?.TIMESTAMP ?? 0, timestamp: beforeMs },
+      );
+    } catch (e) {
+      console.warn('[Notifications] scheduleMeetingFollowUp before error:', e.message);
+    }
+  }
+
+  // ── (2) Notification AT the meeting time ─────────────────────────────────
+  try {
+    await notifee.createTriggerNotification(
+      {
+        id:    `${baseId}_attime`,
+        title: `📅 Client meeting now`,
+        body:  `${lead}${typeStr}${meeting.location ? ` · ${meeting.location}` : ''}`,
+        android: {
+          channelId:   CHANNEL_MEETING,
+          importance:  IMPORTANCE_HIGH,
+          smallIcon:   'ic_notification',
+          pressAction: { id: 'open_meetings', launchActivity: 'default' },
+          data:        { meetingId: String(meeting.id || ''), leadName: lead },
+        },
+        ios: { sound: 'default' },
+      },
+      { type: TriggerType?.TIMESTAMP ?? 0, timestamp: whenMs },
+    );
+  } catch (e) {
+    console.warn('[Notifications] scheduleMeetingFollowUp attime error:', e.message);
+  }
+}
+
+// checkAndScheduleMeetingFollowUps(meetings)
+// Given an array of meeting remarks (each with id + followUpDate + leadName),
+// schedules triggers for any future follow-ups not already scheduled, and
+// fires a once-per-day summary of today's follow-ups.
+export async function checkAndScheduleMeetingFollowUps(meetings) {
+  if (!notifee || !Array.isArray(meetings) || meetings.length === 0) return;
+
+  try {
+    const raw = await AsyncStorage.getItem(MEETING_NOTIFIED_KEY);
+    const scheduledSet = new Set(raw ? JSON.parse(raw) : []);
+    const now = Date.now();
+    const newlyScheduled = [];
+
+    // Today's window for the summary
+    const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay   = new Date(); endOfDay.setHours(23, 59, 59, 999);
+    const todaysFollowUps = [];
+
+    for (const m of meetings) {
+      if (!m?.followUpDate) continue;
+      const whenMs = new Date(m.followUpDate).getTime();
+      if (isNaN(whenMs)) continue;
+
+      // Collect today's upcoming follow-ups for the summary
+      if (whenMs >= startOfDay.getTime() && whenMs <= endOfDay.getTime() && whenMs >= now) {
+        todaysFollowUps.push(m);
+      }
+
+      // Schedule future triggers (dedup by id+timestamp)
+      const dedupKey = `${m.id || m.leadName}_${whenMs}`;
+      if (whenMs > now && !scheduledSet.has(dedupKey)) {
+        await scheduleMeetingFollowUp(m);
+        scheduledSet.add(dedupKey);
+        newlyScheduled.push(dedupKey);
+      }
+    }
+
+    if (newlyScheduled.length > 0) {
+      // Keep only future entries to stop the set growing unbounded
+      const pruned = [...scheduledSet].filter((key) => {
+        const ts = parseInt(key.substring(key.lastIndexOf('_') + 1));
+        return !isNaN(ts) && ts > now;
+      });
+      await AsyncStorage.setItem(MEETING_NOTIFIED_KEY, JSON.stringify(pruned));
+    }
+
+    // ── (3) Daily summary — fired at most once per calendar day ──────────────
+    await _maybeShowMeetingSummary(todaysFollowUps);
+  } catch (e) {
+    console.warn('[Notifications] checkAndScheduleMeetingFollowUps error:', e.message);
+  }
+}
+
+async function _maybeShowMeetingSummary(todaysFollowUps) {
+  if (!notifee || !todaysFollowUps?.length) return;
+  try {
+    const todayStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const lastShown = await AsyncStorage.getItem(MEETING_SUMMARY_KEY);
+    if (lastShown === todayStr) return; // already summarised today
+
+    await _ensureMeetingChannel();
+    const count = todaysFollowUps.length;
+    const names = todaysFollowUps.slice(0, 4).map((m) => m.leadName || 'Client');
+
+    const badge = await _incrementBadge(1);
+    await notifee.displayNotification({
+      id:    `meeting_summary_${todayStr}`,
+      title: `🗓️ ${count} client meeting${count > 1 ? 's' : ''} today`,
+      body:  names.join(', ') + (count > names.length ? ` +${count - names.length} more` : ''),
+      android: {
+        channelId:     CHANNEL_MEETING,
+        importance:    IMPORTANCE_HIGH,
+        smallIcon:     'ic_notification',
+        badgeCount:    badge,
+        badgeIconType: 1,
+        pressAction:   { id: 'open_meetings' },
+        ...(count > 1 && AndroidStyle && {
+          style: {
+            type:    AndroidStyle.INBOX,
+            lines:   todaysFollowUps.slice(0, 5).map((m) => m.leadName || 'Client'),
+            summary: `${count} meetings`,
+          },
+        }),
+      },
+      ios: {
+        sound: 'default',
+        badge,
+        foregroundPresentationOptions: { alert: true, sound: true, badge: true },
+      },
+    });
+
+    await AsyncStorage.setItem(MEETING_SUMMARY_KEY, todayStr);
+  } catch (e) {
+    console.warn('[Notifications] _maybeShowMeetingSummary error:', e.message);
+  }
+}
+
+// cancelMeetingFollowUp(meetingId, followUpDate) — cancels pending triggers
+export async function cancelMeetingFollowUp(meetingId, followUpDate) {
+  if (!notifee) return;
+  try {
+    const whenMs = new Date(followUpDate).getTime();
+    if (isNaN(whenMs)) return;
+    const baseId = `meeting_${meetingId}_${whenMs}`;
+    await notifee.cancelTriggerNotification(`${baseId}_before`);
+    await notifee.cancelTriggerNotification(`${baseId}_attime`);
+  } catch {}
+}
+
 export async function clearNotificationState() {
   try {
     await AsyncStorage.multiRemove([
@@ -868,6 +1096,8 @@ export async function clearNotificationState() {
       REASSIGN_COUNTS_KEY,
       SOCKET_NOTIFIED_KEY,
       SOCKET_REASSIGN_KEY,
+      MEETING_NOTIFIED_KEY,
+      MEETING_SUMMARY_KEY,
     ]);
 
     if (notifee) {

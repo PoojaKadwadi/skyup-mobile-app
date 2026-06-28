@@ -185,7 +185,15 @@ const doSync = async ({ forceFullDay = false, fromForeground = false } = {}) => 
     const shouldSyncRec = forceFullDay || (now - lastRecSync >= REC_SYNC_INTERVAL_MS);
 
     if (shouldSyncRec) {
-      const sinceMs = forceFullDay ? todayMidnight : Math.max(lastRecSync, todayMidnight);
+      // FIX: pass lastRecSync directly when it already falls today (> midnight).
+      // The old Math.max(lastRecSync, todayMidnight) reset a recent "last ran at
+      // 10 AM" timestamp back to midnight, causing every sweep to re-walk ALL
+      // of today's recordings instead of only files written since the last sweep.
+      // recordingService.syncRecordings already respects sinceMs > 0 as-is —
+      // this is the matching fix on the caller side.
+      const sinceMs = forceFullDay
+        ? todayMidnight
+        : (lastRecSync > todayMidnight ? lastRecSync : todayMidnight);
       console.log(`[Sync] Recording sweep since ${new Date(sinceMs).toISOString()}`);
 
       // FIX: Pass skipPhones so the periodic sweep skips numbers that were
@@ -211,8 +219,19 @@ const doSync = async ({ forceFullDay = false, fromForeground = false } = {}) => 
   }
 };
 
-const doSyncDeferred = (opts) => {
-  InteractionManager.runAfterInteractions(() => { doSync(opts); });
+const doSyncDeferred = (opts, extraDelayMs = 0) => {
+  // FIX: optional extra delay before queuing — gives screen transitions time
+  // to finish painting before we start heavy sync work. Without this the
+  // app-foreground sync competed with the app-resume animation, occasionally
+  // producing an ANR ("SkyUp CRM isn't responding") if heavy file scanning
+  // landed on the JS thread just as the OS was expecting a draw frame.
+  if (extraDelayMs > 0) {
+    setTimeout(() => {
+      InteractionManager.runAfterInteractions(() => { doSync(opts); });
+    }, extraDelayMs);
+  } else {
+    InteractionManager.runAfterInteractions(() => { doSync(opts); });
+  }
 };
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -233,9 +252,15 @@ export const startBackgroundSync = () => {
     if (nextState !== 'active') return;
     // PERF FIX: use in-memory _lastRanMs — no async, no AsyncStorage bridge call
     if (_lastRanMs > 0 && Date.now() - _lastRanMs >= MIN_FOREGROUND_WAIT_MS) {
-      doSyncDeferred({ fromForeground: true });
+      // FIX: 1500ms extra delay — the app-resume transition (shared-element,
+      // stack animation) runs for ~300-600ms. Deferring 1.5s ensures we don't
+      // start a directory scan or API call while the animator is fighting for
+      // the JS thread, which was a primary cause of the "app not responding" dialog.
+      doSyncDeferred({ fromForeground: true }, 1500);
     } else {
-      doFollowUpCheck();
+      // FIX: wrap follow-up check in InteractionManager so it doesn't race
+      // with screen-open animations either.
+      InteractionManager.runAfterInteractions(() => { doFollowUpCheck(); });
     }
   });
 };
@@ -266,11 +291,11 @@ export const triggerManualSync = async (forceFullDay = false) => {
 // Called by callDetector immediately after a call ends.
 // On success, records the phone number in _postCallSyncedNumbers so the
 // periodic sweep doesn't re-attempt the same file within the same 10-min window.
-export const triggerPostCallRecordingSync = (phoneNumber, callStartedAt) => {
+export const triggerPostCallRecordingSync = (phoneNumber, callStartedAt, leadName = '') => {
   console.log(`[Sync] 📞 Post-call sync queued for ${phoneNumber} startedAt=${new Date(callStartedAt).toISOString()}`);
 
   enqueueUpload(async () => {
-    const delays = [3_000, 10_000, 25_000];
+    const delays = [3_000, 10_000, 25_000, 45_000]; // FIX: added 45s for slow dialers / saved contacts
 
     for (let attempt = 0; attempt < delays.length; attempt++) {
       const waitMs = delays[attempt];
@@ -281,7 +306,23 @@ export const triggerPostCallRecordingSync = (phoneNumber, callStartedAt) => {
         const sinceMs = (callStartedAt || Date.now()) - 30_000;
         console.log(`[Sync] Scanning for ${phoneNumber} since ${new Date(sinceMs).toISOString()}`);
 
-        const result = await syncRecordings(phoneNumber, sinceMs);
+        // FIX: pass leadName so name-saved recordings ("pooja 1057....mp3")
+        // are matched — this is what the manual Upload button uses and is why
+        // those files uploaded manually but never automatically.
+        //
+        // ANR FIX ("SkyUp CRM isn't responding"): the scan does synchronous
+        // per-file work. If it runs while the user is interacting (e.g. the
+        // post-call remark modal / follow-up date picker is open and
+        // animating), it competes for the single JS thread and freezes the UI.
+        // Defer the scan until active interactions/animations have finished so
+        // it never blocks a gesture or transition.
+        const result = await new Promise((resolve) => {
+          InteractionManager.runAfterInteractions(() => {
+            syncRecordings(phoneNumber, sinceMs, new Set(), leadName)
+              .then(resolve)
+              .catch((err) => resolve({ uploaded: 0, skipped: 0, failed: 0, error: err?.message }));
+          });
+        });
         console.log(`[Sync] Scan result: uploaded=${result.uploaded} skipped=${result.skipped} failed=${result.failed}`);
 
         if (result.uploaded > 0) {

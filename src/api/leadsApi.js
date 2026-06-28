@@ -55,6 +55,26 @@ export const updateLead = async (id, data) => {
   return response.data;
 };
 
+// ── Mark a lead Invalid (two-step verification flow) ──────────────────────────
+// First Invalid  → backend reassigns to another agent for verification.
+// Verifier confirms Invalid → backend closes the lead and removes it from all
+//   employee panels (it then lives only in the admin "Closed Leads" view).
+// Verifier rejects (reject:true) → lead returns to the original employee.
+export const markLeadInvalid = async (leadId, { remark, reject = false } = {}) => {
+  const response = await apiClient.patch(`/lead/${leadId}/invalid`, { remark, reject });
+  return response.data;
+};
+
+// ── AI Action Summary ─────────────────────────────────────────────────────────
+// Returns { summary, nextAction, keyPoints[], sentiment, suggestedTemp, basedOn,
+//   generatedAt, model, cached }. Pass refresh=true to force regeneration.
+export const getLeadActionSummary = async (leadId, { refresh = false } = {}) => {
+  const response = await apiClient.get(
+    `/lead/${leadId}/action-summary${refresh ? '?refresh=1' : ''}`,
+  );
+  return response.data;
+};
+
 export const addCallRemark = async (leadId, { remark, outcome, followUpDate }) => {
   const payload = { remark, outcome };
   if (followUpDate) payload.followUpDate = followUpDate;
@@ -173,6 +193,16 @@ function formatLead(lead) {
     ? callHistory[callHistory.length - 1]
     : null;
 
+  // Decide which remark to SHOW and whether it's a manual agent remark or the
+  // original lead-source (form/ad) remark, so the UI can mark them differently.
+  //   • If the latest call-history entry has a remark, that's an agent-typed
+  //     (manual) remark → prefer it and flag it manual.
+  //   • Otherwise fall back to lead.remark, which is the source/form remark.
+  const lastManualRemark = lastCall && lastCall.remark ? String(lastCall.remark).trim() : '';
+  const sourceRemark     = lead.remark ? String(lead.remark).trim() : '';
+  const displayRemark    = lastManualRemark || sourceRemark;
+  const remarkIsManual   = !!lastManualRemark;
+
   return {
     id:             String(lead._id),
     name:           lead.name           || 'Unknown',
@@ -187,7 +217,8 @@ function formatLead(lead) {
     status:         lead.status         || 'New',
     date:           lead.date,
     _raw_date:      lead.date           || lead.createdAt || null,
-    remark:         lead.remark         || '',
+    remark:         displayRemark,
+    remarkIsManual,
     followUpDate:   lead.followUpDate   || null,
     temperature:    lead.temperature    || lead.Quality || null,
     Quality:        lead.temperature    || lead.Quality || null,
@@ -196,6 +227,8 @@ function formatLead(lead) {
     callHistory,
     scheduledCalls: Array.isArray(lead.scheduledCalls) ? lead.scheduledCalls : [],
     reassignCount:  lead.reassignCount  || 0,
+    invalidStage:   lead.invalidStage   || null,
+    isClosed:       lead.isClosed        || false,
     lastOutcome:    lastCall?.outcome   || null,
     lastCalledAt:   lastCall?.calledAt  || null,
   };

@@ -23,6 +23,7 @@ import CallLogsScreen      from '../screens/calls/CallLogsScreen';
 import ClientMeetingScreen from '../screens/calls/ClientMeetingScreen'; // ← replaces RecordingsScreen
 import ProfileScreen       from '../screens/dashboard/ProfileScreen';
 import ClockInGate         from '../components/ClockInGate';
+import TermsGate           from '../components/TermsGate';
 
 const Stack = createNativeStackNavigator();
 const Tab   = createBottomTabNavigator();
@@ -76,12 +77,14 @@ function MainTabs() {
   );
 }
 
-// Gated tabs — employee must clock in before the bottom-tab app is shown.
+// Gated tabs — employee must accept Terms, then clock in, before the app shows.
 function GatedMainTabs() {
   return (
-    <ClockInGate>
-      <MainTabs />
-    </ClockInGate>
+    <TermsGate>
+      <ClockInGate>
+        <MainTabs />
+      </ClockInGate>
+    </TermsGate>
   );
 }
 

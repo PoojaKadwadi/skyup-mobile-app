@@ -10,7 +10,7 @@
 // Remote clock-in support added: employees outside the office geofence can
 // request permission from admin directly from this screen.
 // ─────────────────────────────────────────────────────────────────────────────
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, ActivityIndicator, StyleSheet, Alert, AppState,
   Modal, TextInput, KeyboardAvoidingView, Platform,
@@ -35,8 +35,19 @@ export default function ClockInGate({ children }) {
 
   const userId = useSelector(state => state.auth?.user?._id || null);
 
+  // FIX: throttle AppState-driven refresh to at most once per 30s.
+  // Without this, every screen-wake (lock/unlock, back from another app)
+  // fired a /attendance/my-today request — wasteful and slow.
+  const lastRefreshMsRef = useRef(0);
+  const REFRESH_THROTTLE_MS = 30_000;
+
   // ── Check attendance status ─────────────────────────────────────────────────
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
+    // FIX: throttle — skip network call if we checked within the last 30s.
+    // Pass force=true to bypass (e.g. after a successful clock-in action).
+    const now = Date.now();
+    if (!force && now - lastRefreshMsRef.current < REFRESH_THROTTLE_MS) return;
+    lastRefreshMsRef.current = now;
     try {
       const res = await api.get('/attendance/my-today');
       const rec = res.data;
@@ -134,11 +145,22 @@ export default function ClockInGate({ children }) {
           try {
             Geolocation.setRNConfiguration({ skipPermissionRequests: true, locationProvider: 'auto' });
           } catch (_) { /* older lib */ }
-          const pos = await new Promise((resolve, reject) => {
+          // FIX: GPS timeout reduced 12s → 5s and maximumAge 10s → 60s.
+          // With maximumAge=60000 the OS returns a cached GPS fix instantly
+          // (no satellite round-trip) when the device already has a recent
+          // fix. The 12s timeout was the main reason clock-in felt slow —
+          // the button spun for up to 12 seconds before submitting.
+          // A hard 6s Promise.race() wrapper ensures we never block longer
+          // than that even if the Geolocation callback stalls entirely.
+          const posPromise = new Promise((resolve, reject) => {
             Geolocation.getCurrentPosition(resolve, reject, {
-              enableHighAccuracy: true, timeout: 12000, maximumAge: 10000,
+              enableHighAccuracy: false, timeout: 5000, maximumAge: 60000,
             });
-          }).catch(() => null);
+          });
+          const pos = await Promise.race([
+            posPromise,
+            new Promise(resolve => setTimeout(() => resolve(null), 6000)),
+          ]).catch(() => null);
           if (pos?.coords) {
             locationPayload = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
           }
@@ -146,7 +168,7 @@ export default function ClockInGate({ children }) {
       } catch { /* location optional */ }
 
       await api.post('/attendance/clock-in', locationPayload);
-      await refresh();
+      await refresh(true); // force=true — bypass throttle after user action
     } catch (e) {
       const code = e?.response?.data?.code;
       const msg  = e?.response?.data?.message || 'Could not clock in. Please try again.';

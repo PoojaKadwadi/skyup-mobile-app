@@ -90,7 +90,9 @@ function timeAgo(ms) {
   return hrs < 24 ? `${hrs}h ago` : `${Math.floor(hrs / 24)}d ago`;
 }
 
-const LogRow = memo(function LogRow({ item, onPress, isLoading, disabled }) {
+const ItemSeparator = () => <View style={{ height: 8 }} />;
+
+const LogRow = memo(function LogRow({ item, onPress, isLoading }) {
   const cfg = CALL_TYPE_CONFIG[item.callType] || CALL_TYPE_CONFIG.incoming;
   const handlePress = useCallback(() => onPress(item), [onPress, item]);
   const { time, date } = formatTimestamp(item.timestamp);
@@ -100,7 +102,6 @@ const LogRow = memo(function LogRow({ item, onPress, isLoading, disabled }) {
       style={styles.logCard}
       onPress={handlePress}
       activeOpacity={0.75}
-      disabled={disabled}
     >
       <View style={[styles.logIconWrap, { backgroundColor: cfg.color + '20' }]}>
         {isLoading
@@ -169,7 +170,10 @@ export default function CallLogsScreen() {
   useFocusEffect(
     useCallback(() => {
       if (!hasSyncedOnFocusRef.current) {
-        setTimeout(async () => {
+        // FIX: store the timer id and clear it in the cleanup function so we
+        // don't fire the sync after the screen unmounts (memory leak + possible
+        // state-update-on-unmounted-component warning on fast navigation).
+        const timer = setTimeout(async () => {
           try {
             await triggerManualSync();
             setLastSynced(Date.now());
@@ -182,6 +186,9 @@ export default function CallLogsScreen() {
             loadTodayLogs().catch(() => {});
           }
         }, 600);
+        // Return cleanup so useFocusEffect cancels the timer when the user
+        // navigates away before the 600ms fires.
+        return () => clearTimeout(timer);
       }
     }, [])
   );
@@ -296,7 +303,6 @@ export default function CallLogsScreen() {
       item={item}
       onPress={handleLogPress}
       isLoading={lookingUp === new Date(item.timestamp).getTime()}
-      disabled={!!lookingUp}
     />
   ), [lookingUp, handleLogPress]);
 
@@ -385,7 +391,7 @@ export default function CallLogsScreen() {
           />
         }
         contentContainerStyle={styles.listContent}
-        ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
+        ItemSeparatorComponent={ItemSeparator}
         ListEmptyComponent={
           !loading ? (
             <View style={styles.emptyState}>
