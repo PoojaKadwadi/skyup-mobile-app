@@ -42,12 +42,19 @@ export function startCallStateListener() {
   if (!isAvailable) return;
   if (nativeSub) return;  // already started
 
-  // Seed local state synchronously so callers asking isOnCall() immediately
-  // after start get a correct answer, not a stale "idle" default.
-  try {
-    currentState = CallStateModule.getCurrentState() || 'idle';
-  } catch {
-    currentState = 'idle';
+  // ANR FIX: the native getCurrentState() blocking-synchronous method was
+  // removed because it stalled the JS thread on a TelephonyManager system call
+  // during startup. We now seed state two non-blocking ways instead:
+  //   1. start() (called below) emits the current state on registration via
+  //      the "CallStateChanged" event — the listener below picks it up.
+  //   2. getCurrentStateAsync() (Promise-based, runs off the UI/JS thread) is
+  //      used as a belt-and-suspenders fallback. Until either resolves, the
+  //      default 'idle' is correct for the overwhelmingly common case.
+  currentState = 'idle';
+  if (typeof CallStateModule.getCurrentStateAsync === 'function') {
+    CallStateModule.getCurrentStateAsync()
+      .then((s) => { if (s) currentState = s; })
+      .catch(() => {});
   }
 
   emitter   = new NativeEventEmitter(CallStateModule);

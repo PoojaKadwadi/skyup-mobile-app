@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
@@ -26,6 +28,33 @@ import java.util.concurrent.Executor
  *   they would get incorrectly marked idle. This module emits real-time call
  *   state events so JS can pause idle detection while a call is in progress.
  *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ANR FIX ("SkyUp CRM isn't responding"):
+ *   PREVIOUS BUGS that froze the UI:
+ *     1. registerModernCallback() delivered TelephonyCallback events on
+ *        reactContext.mainExecutor — i.e. the MAIN (UI) THREAD. Every call
+ *        state transition ran onCallStateChanged + a bridge emit on the UI
+ *        thread. On some OEMs the first registration callback also does a
+ *        synchronous system query, and routing it onto the UI thread risked
+ *        blocking a draw frame → ANR.
+ *     2. getCurrentState() was isBlockingSynchronousMethod = true. It is
+ *        called from JS at startup (callStateService.startCallStateListener)
+ *        and synchronously blocked the JS thread on a TelephonyManager system
+ *        call. Under contention (startup, while other native work was queued)
+ *        this stalled long enough to trigger the not-responding dialog.
+ *
+ *   FIX:
+ *     • Telephony callbacks are now delivered on a dedicated background
+ *       HandlerThread executor — NEVER the UI thread. The emit hop to the JS
+ *       thread is handled internally by DeviceEventManagerModule and is
+ *       thread-safe from any thread.
+ *     • getCurrentState() is no longer a blocking synchronous method. JS reads
+ *       the initial state from the "CallStateChanged" event that start() emits
+ *       on registration (callStateService already listens for it), so no
+ *       synchronous bridge call is needed. getCurrentStateAsync() is provided
+ *       as a Promise-based fallback that runs off the UI/JS thread.
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
  * API-VERSION-AWARE IMPLEMENTATION:
  *   API 31+ (Android 12+):   uses TelephonyCallback (current, non-deprecated)
  *   API 24-30 (Android 7-11): uses PhoneStateListener (deprecated but only
@@ -35,19 +64,12 @@ import java.util.concurrent.Executor
  * EVENTS EMITTED:
  *   "CallStateChanged" with payload { state: String, timestamp: Long }
  *   state ∈ { "idle", "ringing", "offhook" }
- *     - idle:    no active call
- *     - ringing: incoming call, not yet answered
- *     - offhook: call in progress (incoming answered or outgoing made)
  *
  * BATTERY:
  *   Telephony listeners are event-driven by the OS — they consume zero CPU
  *   when no call is active. There is NO polling, NO timer, NO wake lock.
- *   Total cost when idle is the listener registration only.
- *
- * THREADING:
- *   Callbacks arrive on a system-managed thread. The bridge call to emit
- *   the JS event is thread-safe — DeviceEventManagerModule handles the hop
- *   to the JS thread internally.
+ *   The single background HandlerThread is cheap (parked when idle) and is
+ *   torn down on stop()/destroy.
  */
 class CallStateModule(private val reactContext: ReactApplicationContext)
   : ReactContextBaseJavaModule(reactContext) {
@@ -59,9 +81,34 @@ class CallStateModule(private val reactContext: ReactApplicationContext)
   private var legacyListener: PhoneStateListener? = null
   private var modernCallback: TelephonyCallback?  = null
 
-  // Required for NativeEventEmitter on JS side. Returning these empty stubs
-  // prevents the warning "new NativeEventEmitter() was called with a non-null
-  // argument without the required addListener method".
+  // ── ANR FIX: dedicated background thread for telephony callback delivery ──
+  // We never want OS callbacks (or the bridge emit they trigger) running on
+  // the UI thread. A single HandlerThread + executor is created lazily and
+  // reused; it is quit on stop()/onCatalystInstanceDestroy().
+  private var handlerThread: HandlerThread? = null
+  private var bgExecutor: Executor? = null
+
+  @Synchronized
+  private fun backgroundExecutor(): Executor {
+    var exec = bgExecutor
+    if (exec == null) {
+      val ht = HandlerThread("CallStateModule-bg").apply { start() }
+      val handler = Handler(ht.looper)
+      exec = Executor { command -> handler.post(command) }
+      handlerThread = ht
+      bgExecutor = exec
+    }
+    return exec
+  }
+
+  @Synchronized
+  private fun shutdownBackgroundThread() {
+    handlerThread?.quitSafely()
+    handlerThread = null
+    bgExecutor = null
+  }
+
+  // Required for NativeEventEmitter on JS side.
   @ReactMethod fun addListener(eventName: String) { /* no-op */ }
   @ReactMethod fun removeListeners(count: Int)    { /* no-op */ }
 
@@ -75,9 +122,6 @@ class CallStateModule(private val reactContext: ReactApplicationContext)
     if (legacyListener != null || modernCallback != null) return  // already running
 
     if (!hasPhoneStatePermission()) {
-      // Permission not granted — emit one event so JS knows we're disabled.
-      // JS treats absence of further events as "permanently idle", which is
-      // the correct fallback (idle detection just runs as before).
       emit("idle", System.currentTimeMillis())
       return
     }
@@ -91,8 +135,9 @@ class CallStateModule(private val reactContext: ReactApplicationContext)
       registerLegacyListener(tm)
     }
 
-    // Emit current state on registration so JS doesn't have to wait for the
-    // first transition before knowing the initial state.
+    // Emit current state on registration so JS gets the initial state without
+    // any synchronous bridge call. This is the channel callStateService uses
+    // to seed its local cache.
     emit(stateToString(tm.callState), System.currentTimeMillis())
   }
 
@@ -108,27 +153,30 @@ class CallStateModule(private val reactContext: ReactApplicationContext)
       legacyListener?.let { tm?.listen(it, PhoneStateListener.LISTEN_NONE) }
       legacyListener = null
     }
+    shutdownBackgroundThread()
   }
 
   /**
-   * Synchronous getter — returns the current call state without waiting for
-   * an event. Used by JS at startup to seed local state before any events
-   * have fired. Returns "idle" if permission missing or telephony unavailable.
+   * ANR FIX: Async, Promise-based replacement for the old blocking
+   * getCurrentState(). Runs the TelephonyManager query on the background
+   * executor so it never blocks the JS thread. JS should normally rely on the
+   * "CallStateChanged" event emitted by start() and only use this as a fallback.
    */
-  @ReactMethod(isBlockingSynchronousMethod = true)
-  fun getCurrentState(): String {
-    if (!hasPhoneStatePermission()) return "idle"
-    val tm = reactContext.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
-      ?: return "idle"
-    return stateToString(tm.callState)
+  @ReactMethod
+  fun getCurrentStateAsync(promise: com.facebook.react.bridge.Promise) {
+    backgroundExecutor().execute {
+      try {
+        if (!hasPhoneStatePermission()) { promise.resolve("idle"); return@execute }
+        val tm = reactContext.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+        promise.resolve(if (tm != null) stateToString(tm.callState) else "idle")
+      } catch (e: Exception) {
+        promise.resolve("idle")
+      }
+    }
   }
 
   // ── API 31+ implementation ────────────────────────────────────────────────
-  // TelephonyCallback is the modern, non-deprecated replacement for
-  // PhoneStateListener. It requires an Executor for delivery — we use the
-  // main looper executor since callbacks are extremely infrequent (one per
-  // call state change) and the work in onCallStateChanged is just an event
-  // emit (microseconds).
+  // ANR FIX: deliver callbacks on the background executor, NOT mainExecutor.
   private fun registerModernCallback(tm: TelephonyManager) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return  // for compiler
 
@@ -137,24 +185,27 @@ class CallStateModule(private val reactContext: ReactApplicationContext)
         emit(stateToString(state), System.currentTimeMillis())
       }
     }
-    val executor: Executor = reactContext.mainExecutor  // Available API 28+
-    tm.registerTelephonyCallback(executor, cb)
+    tm.registerTelephonyCallback(backgroundExecutor(), cb)
     modernCallback = cb
   }
 
   // ── API 24-30 implementation ──────────────────────────────────────────────
-  // PhoneStateListener is deprecated as of API 31 but is the only available
-  // mechanism on those versions. The deprecation warning is suppressed — we
-  // explicitly route to TelephonyCallback when available.
+  // PhoneStateListener delivers on the thread of the Looper it was created on.
+  // Construct it on the background HandlerThread so callbacks never land on the
+  // UI thread.
   @Suppress("DEPRECATION")
   private fun registerLegacyListener(tm: TelephonyManager) {
-    val listener = object : PhoneStateListener() {
-      override fun onCallStateChanged(state: Int, phoneNumber: String?) {
-        emit(stateToString(state), System.currentTimeMillis())
+    val ht = (handlerThread ?: run { backgroundExecutor(); handlerThread!! })
+    val handler = Handler(ht.looper)
+    handler.post {
+      val listener = object : PhoneStateListener() {
+        override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+          emit(stateToString(state), System.currentTimeMillis())
+        }
       }
+      tm.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
+      legacyListener = listener
     }
-    tm.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
-    legacyListener = listener
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -171,10 +222,8 @@ class CallStateModule(private val reactContext: ReactApplicationContext)
   private fun emit(state: String, timestamp: Long) {
     val params: WritableMap = Arguments.createMap().apply {
       putString("state", state)
-      putDouble("timestamp", timestamp.toDouble())  // JS number = double
+      putDouble("timestamp", timestamp.toDouble())
     }
-    // hasActiveCatalystInstance() returns false during teardown — guard against
-    // emitting events into a dead bridge, which would crash on some RN versions.
     if (reactContext.hasActiveCatalystInstance()) {
       reactContext
         .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
@@ -184,6 +233,6 @@ class CallStateModule(private val reactContext: ReactApplicationContext)
 
   override fun onCatalystInstanceDestroy() {
     super.onCatalystInstanceDestroy()
-    stop()  // ensure we don't leak a system-level telephony listener
+    stop()  // ensure we don't leak a system-level telephony listener or thread
   }
 }
