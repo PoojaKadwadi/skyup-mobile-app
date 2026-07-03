@@ -9,7 +9,7 @@
 //   4. AUTO-SCAN on mount — scans automatically when screen opens.
 //   5. CRASH FIX — replaced Intl.DateTimeFormat with moment (Hermes has no en-IN locale data).
 
-import React, { useState, useCallback, useRef, useEffect, memo } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import {
   View, Text, FlatList, StyleSheet, TouchableOpacity,
   Alert, ActivityIndicator, StatusBar, InteractionManager,
@@ -18,6 +18,7 @@ import { useNavigation } from '@react-navigation/native';
 import Icon              from 'react-native-vector-icons/MaterialCommunityIcons';
 import AsyncStorage      from '@react-native-async-storage/async-storage';
 import moment            from 'moment';
+import { useTheme }      from '../../theme/ThemeContext';
 
 import { normalizePhone } from '../../services/phoneService';
 import { store }          from '../../store';
@@ -236,6 +237,8 @@ function formatSize(bytes) {
 // whole uploading/uploaded maps), so changing one file's status re-renders only
 // that row instead of the entire list.
 const RecordingRow = memo(function RecordingRow({ item, isUploading, isDone, onUpload }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const phone = extractPhone(item.name);
   const handleUpload = useCallback(() => onUpload(item), [onUpload, item]);
 
@@ -259,21 +262,21 @@ const RecordingRow = memo(function RecordingRow({ item, isUploading, isDone, onU
       </View>
 
       {isUploading ? (
-        <ActivityIndicator size="small" color="#93C5FD" style={styles.statusBadge} />
+        <ActivityIndicator size="small" color={colors.blueLight} style={styles.statusBadge} />
       ) : isDone ? (
         <View style={[styles.statusBadge, styles.statusBadgeDone]}>
-          <Icon name="check-circle" size={18} color="#4ADE80" />
+          <Icon name="check-circle" size={18} color={colors.greenLight} />
         </View>
       ) : phone ? (
         <TouchableOpacity
           style={[styles.statusBadge, styles.statusBadgeUpload]}
           onPress={handleUpload}
         >
-          <Icon name="cloud-upload-outline" size={18} color="#93C5FD" />
+          <Icon name="cloud-upload-outline" size={18} color={colors.blueLight} />
         </TouchableOpacity>
       ) : (
         <View style={styles.statusBadge}>
-          <Icon name="cloud-clock-outline" size={18} color="#64748B" />
+          <Icon name="cloud-clock-outline" size={18} color={colors.textSec} />
         </View>
       )}
 
@@ -305,6 +308,8 @@ function makeFileKey(filename, phone, mtimeMs) {
 
 export default function RecordingsScreen() {
   const navigation = useNavigation();
+  const { dark, colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [recordings,    setRecordings]    = useState([]);
   const [loading,       setLoading]       = useState(false);
   const [uploading,     setUploading]     = useState({});
@@ -416,7 +421,7 @@ export default function RecordingsScreen() {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
+      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} backgroundColor={colors.surface} />
 
       <View style={styles.header}>
         <View>
@@ -433,8 +438,8 @@ export default function RecordingsScreen() {
           disabled={loading}
         >
           {loading
-            ? <ActivityIndicator size="small" color="#93C5FD" />
-            : <Icon name="folder-search-outline" size={18} color="#93C5FD" />
+            ? <ActivityIndicator size="small" color={colors.blueLight} />
+            : <Icon name="folder-search-outline" size={18} color={colors.blueLight} />
           }
           <Text style={styles.scanBtnText}>
             {loading ? 'Scanning…' : 'Rescan'}
@@ -455,14 +460,14 @@ export default function RecordingsScreen() {
         ListEmptyComponent={
           !loading ? (
             <View style={styles.emptyState}>
-              <Icon name="microphone-off" size={52} color="#334155" />
+              <Icon name="microphone-off" size={52} color={colors.border} />
               <Text style={styles.emptyTitle}>No recordings today</Text>
               <Text style={styles.emptySubtitle}>
                 No call recordings from today were found on your device.
                 {'\n\n'}Tap Rescan if you just completed a call.
               </Text>
               <TouchableOpacity style={styles.scanBtnLarge} onPress={() => scanRecordings(false)}>
-                <Icon name="folder-search-outline" size={20} color="#93C5FD" />
+                <Icon name="folder-search-outline" size={20} color={colors.blueLight} />
                 <Text style={styles.scanBtnLargeText}>Rescan for Today's Recordings</Text>
               </TouchableOpacity>
             </View>
@@ -473,33 +478,35 @@ export default function RecordingsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container:          { flex: 1, backgroundColor: '#0D0F14' },
-  header:             { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 52, paddingBottom: 14, backgroundColor: '#1A1D27', borderBottomWidth: 1, borderBottomColor: '#262A38' },
-  title:              { fontSize: 22, fontWeight: '800', color: '#F0F2FA' },
-  subtitle:           { fontSize: 12, color: '#565C75', marginTop: 2 },
-  scanBtn:            { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#1E2236', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 1, borderColor: '#262A38' },
+function createStyles(colors) {
+return StyleSheet.create({
+  container:          { flex: 1, backgroundColor: colors.bg },
+  header:             { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 52, paddingBottom: 14, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
+  title:              { fontSize: 22, fontWeight: '800', color: colors.textPrimary },
+  subtitle:           { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  scanBtn:            { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.surfaceAlt, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 1, borderColor: colors.border },
   scanBtnDisabled:    { opacity: 0.5 },
-  scanBtnText:        { color: '#93C5FD', fontSize: 13, fontWeight: '600' },
+  scanBtnText:        { color: colors.blueLight, fontSize: 13, fontWeight: '600' },
   listContent:        { padding: 16, paddingBottom: 40 },
-  card:               { backgroundColor: '#1A1D27', borderRadius: 14, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderColor: '#262A38' },
+  card:               { backgroundColor: colors.surface, borderRadius: 14, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderColor: colors.border },
   cardLeft:           { alignItems: 'center', justifyContent: 'center' },
-  extBadge:           { backgroundColor: '#1e293b', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: '#334155' },
-  extBadgeDone:       { backgroundColor: '#052e16', borderColor: '#166534' },
-  extText:            { fontSize: 10, fontWeight: '800', color: '#93C5FD', letterSpacing: 1 },
+  extBadge:           { backgroundColor: colors.surfaceAlt, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: colors.border },
+  extBadgeDone:       { backgroundColor: colors.greenBg, borderColor: colors.green },
+  extText:            { fontSize: 10, fontWeight: '800', color: colors.blueLight, letterSpacing: 1 },
   cardMid:            { flex: 1, minWidth: 0 },
-  fileName:           { fontSize: 13, fontWeight: '600', color: '#F0F2FA', marginBottom: 3 },
-  fileMeta:           { fontSize: 11, color: '#565C75', marginBottom: 3 },
-  phoneHint:          { fontSize: 11, color: '#4ADE80', fontWeight: '600' },
-  noPhone:            { fontSize: 11, color: '#F59E0B' },
-  statusBadge:        { width: 36, height: 36, borderRadius: 18, backgroundColor: '#1e293b', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#334155' },
-  statusBadgeDone:    { backgroundColor: '#052e16', borderColor: '#166534' },
-  statusBadgeUpload:  { borderColor: '#3b82f6', backgroundColor: '#1e3a5f' },
+  fileName:           { fontSize: 13, fontWeight: '600', color: colors.textPrimary, marginBottom: 3 },
+  fileMeta:           { fontSize: 11, color: colors.textMuted, marginBottom: 3 },
+  phoneHint:          { fontSize: 11, color: colors.greenLight, fontWeight: '600' },
+  noPhone:            { fontSize: 11, color: colors.amber },
+  statusBadge:        { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border },
+  statusBadgeDone:    { backgroundColor: colors.greenBg, borderColor: colors.green },
+  statusBadgeUpload:  { borderColor: colors.blue, backgroundColor: colors.blueBg },
   emptyState:         { alignItems: 'center', paddingTop: 80, paddingHorizontal: 32 },
-  emptyTitle:         { fontSize: 17, fontWeight: '700', color: '#475569', marginTop: 14 },
-  emptySubtitle:      { fontSize: 13, color: '#334155', marginTop: 6, textAlign: 'center', lineHeight: 20 },
-  scanBtnLarge:       { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 24, backgroundColor: '#1E2236', borderRadius: 12, paddingHorizontal: 20, paddingVertical: 12, borderWidth: 1, borderColor: '#262A38' },
-  scanBtnLargeText:   { color: '#93C5FD', fontSize: 14, fontWeight: '600' },
-  autoLabelDone:      { fontSize: 9, color: '#4ADE80', fontWeight: '700', textAlign: 'center', marginTop: 2, letterSpacing: 0.5 },
-  autoLabelPending:   { fontSize: 9, color: '#475569', fontWeight: '600', textAlign: 'center', marginTop: 2 },
+  emptyTitle:         { fontSize: 17, fontWeight: '700', color: colors.textMuted, marginTop: 14 },
+  emptySubtitle:      { fontSize: 13, color: colors.border, marginTop: 6, textAlign: 'center', lineHeight: 20 },
+  scanBtnLarge:       { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 24, backgroundColor: colors.surfaceAlt, borderRadius: 12, paddingHorizontal: 20, paddingVertical: 12, borderWidth: 1, borderColor: colors.border },
+  scanBtnLargeText:   { color: colors.blueLight, fontSize: 14, fontWeight: '600' },
+  autoLabelDone:      { fontSize: 9, color: colors.greenLight, fontWeight: '700', textAlign: 'center', marginTop: 2, letterSpacing: 0.5 },
+  autoLabelPending:   { fontSize: 9, color: colors.textMuted, fontWeight: '600', textAlign: 'center', marginTop: 2 },
 });
+}

@@ -860,19 +860,37 @@ export async function checkAndScheduleClockInReminder(record) {
   }
 
   // Not clocked in — schedule a reminder
-  const now     = new Date();
-  const trigger = new Date();
+  //
+  // FIX (clock/timezone bug): trigger.setHours(9, 30, 0, 0) sets 9:30 AM in
+  // the DEVICE's local timezone. The company's shift start (and the
+  // "late" cutoff enforced server-side) is 9:30 AM IST specifically — so on
+  // a phone whose timezone isn't Asia/Kolkata (auto-updated while
+  // traveling, a misconfigured device, an emulator, etc.) this reminder
+  // fired at the wrong wall-clock moment relative to the actual shift
+  // start. Compute "9:30 AM IST today" as an absolute instant instead, so
+  // the reminder always lines up with the real shift start regardless of
+  // the device's own timezone setting.
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // +05:30
+  const now      = new Date();
+  const istNow   = new Date(now.getTime() + IST_OFFSET_MS);
+  const istHour  = istNow.getUTCHours();
 
-  // Target: 9:30 AM today
-  trigger.setHours(9, 30, 0, 0);
+  // Midnight IST today, expressed as a real (UTC) instant.
+  const istMidnightUTC = new Date(istNow.getTime());
+  istMidnightUTC.setUTCHours(0, 0, 0, 0);
+  const todayMidnightIST = new Date(istMidnightUTC.getTime() - IST_OFFSET_MS);
+
+  // Target: 9:30 AM IST today.
+  let trigger = new Date(todayMidnightIST.getTime() + (9 * 60 + 30) * 60 * 1000);
 
   if (trigger <= now) {
-    // Already past 9:30 AM — fire in 5 minutes as an immediate nudge
-    trigger.setTime(now.getTime() + 5 * 60 * 1000);
+    // Already past 9:30 AM IST — fire in 5 minutes as an immediate nudge.
+    trigger = new Date(now.getTime() + 5 * 60 * 1000);
   }
 
-  // Don't schedule if it's already evening (after 8 PM — shift likely not needed)
-  if (now.getHours() >= 20) return;
+  // Don't schedule if it's already evening in IST (after 8 PM IST — shift
+  // likely not needed).
+  if (istHour >= 20) return;
 
   await scheduleClockInReminder(trigger);
 }

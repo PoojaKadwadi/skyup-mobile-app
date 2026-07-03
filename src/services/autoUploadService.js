@@ -22,11 +22,24 @@
 //   Uses @notifee/react-native's registerForegroundService. The service task
 //   simply stays alive (the actual upload work is driven by callDetector and
 //   backgroundSyncService, which keep running because the process is alive).
+//
+// ── CRASH FIX (Android 14/15) ──────────────────────────────────────────────
+//   Without an explicit `foregroundServiceTypes` value, Notifee defaults this
+//   service to Android's "shortService" type, which has a HARD 3-minute
+//   execution limit enforced by the OS. Since this service is designed to run
+//   for the entire session (not just 3 minutes), Android was force-killing the
+//   process with ForegroundServiceDidNotStopInTimeException once the 3-minute
+//   mark passed — this was the app crash.
+//
+//   Fix: declare this as a "dataSync" type foreground service, which is meant
+//   for exactly this kind of long-running background sync/upload work. This
+//   also requires the FOREGROUND_SERVICE_DATA_SYNC permission in
+//   AndroidManifest.xml (see android/app/src/main/AndroidManifest.xml).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import notifee, { AndroidImportance } from '@notifee/react-native';
+import notifee, { AndroidImportance, AndroidForegroundServiceType } from '@notifee/react-native';
 
 const PREF_KEY      = 'auto_upload_enabled_v1';
 const CHANNEL_ID    = 'auto_upload_service';
@@ -101,6 +114,9 @@ export async function startAutoUploadService() {
       android: {
         channelId:            CHANNEL_ID,
         asForegroundService:  true,
+        // ✅ FIX — explicit long-running type instead of Notifee's default
+        // "shortService" (which force-kills the app after 3 minutes).
+        foregroundServiceTypes: [AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_DATA_SYNC],
         ongoing:              true,
         smallIcon:            'ic_launcher',   // falls back to app icon
         importance:           AndroidImportance.LOW,

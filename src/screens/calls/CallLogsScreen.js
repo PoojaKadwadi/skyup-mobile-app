@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, memo, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, memo, useRef } from 'react';
 import {
   View, Text, FlatList, StyleSheet, TouchableOpacity,
   RefreshControl, StatusBar, Alert, ActivityIndicator, Linking,
@@ -9,6 +9,7 @@ import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import Icon                            from 'react-native-vector-icons/MaterialCommunityIcons';
 import { ScrollView as HScrollView }   from 'react-native';
 import moment                          from 'moment';
+import { useTheme }                    from '../../theme/ThemeContext';
 
 // CRASH FIX: Replaced Intl.DateTimeFormat('en-IN', ...) with moment.
 // Hermes (the Android JS engine) ships without full ICU locale data, so
@@ -93,6 +94,8 @@ function timeAgo(ms) {
 const ItemSeparator = () => <View style={{ height: 8 }} />;
 
 const LogRow = memo(function LogRow({ item, onPress, isLoading }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const cfg = CALL_TYPE_CONFIG[item.callType] || CALL_TYPE_CONFIG.incoming;
   const handlePress = useCallback(() => onPress(item), [onPress, item]);
   const { time, date } = formatTimestamp(item.timestamp);
@@ -137,6 +140,8 @@ const LogRow = memo(function LogRow({ item, onPress, isLoading }) {
 export default function CallLogsScreen() {
   const dispatch   = useDispatch();
   const navigation = useNavigation();
+  const { dark, colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
 
   const lastSyncedAt = useSelector((s) => s.calls?.lastSyncedAt ?? null);
   const authUser     = useSelector((s) => s.auth?.user);
@@ -312,7 +317,7 @@ export default function CallLogsScreen() {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
+      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} backgroundColor={colors.surface} />
 
       <View style={styles.header}>
         <View>
@@ -321,15 +326,15 @@ export default function CallLogsScreen() {
         </View>
         <View style={styles.autoSyncBadge}>
           {syncing
-            ? <ActivityIndicator size="small" color="#93C5FD" />
-            : <Icon name="cloud-check-outline" size={16} color="#4ADE80" />
+            ? <ActivityIndicator size="small" color={colors.blueLight} />
+            : <Icon name="cloud-check-outline" size={16} color={colors.greenLight} />
           }
           <Text style={styles.autoSyncText}>{syncing ? 'Syncing…' : 'Auto'}</Text>
         </View>
       </View>
 
       <View style={styles.syncInfo}>
-        <Icon name="information-outline" size={12} color="#475569" />
+        <Icon name="information-outline" size={12} color={colors.textMuted} />
         <Text style={styles.syncInfoText}>{syncedText}</Text>
       </View>
 
@@ -350,7 +355,7 @@ export default function CallLogsScreen() {
               <Icon
                 name={a._id === 'all' ? 'account-group-outline' : 'account-outline'}
                 size={12}
-                color={activeAgent === a._id ? '#F0F2FA' : '#64748B'}
+                color={activeAgent === a._id ? colors.textPrimary : colors.textSec}
               />
               <Text style={[styles.agentTabText, activeAgent === a._id && styles.agentTabTextActive]}>
                 {a.name}
@@ -386,8 +391,8 @@ export default function CallLogsScreen() {
           <RefreshControl
             refreshing={loading}
             onRefresh={handleRefresh}
-            tintColor="#2563EB"
-            colors={['#2563EB']}
+            tintColor={colors.blue}
+            colors={[colors.blue]}
           />
         }
         contentContainerStyle={styles.listContent}
@@ -395,7 +400,7 @@ export default function CallLogsScreen() {
         ListEmptyComponent={
           !loading ? (
             <View style={styles.emptyState}>
-              <Icon name="phone-outline" size={48} color="#334155" />
+              <Icon name="phone-outline" size={48} color={colors.textMuted} />
               <Text style={styles.emptyTitle}>No calls synced yet today</Text>
               <Text style={styles.emptySubtitle}>
                 Tap Sync to upload today's call logs, or pull down to refresh.
@@ -408,37 +413,39 @@ export default function CallLogsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container:           { flex: 1, backgroundColor: '#0D0F14' },
-  header:              { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 52, paddingBottom: 14, backgroundColor: '#1A1D27', borderBottomWidth: 1, borderBottomColor: '#262A38' },
-  title:               { fontSize: 22, fontWeight: '800', color: '#F0F2FA' },
-  subtitle:            { fontSize: 12, color: '#565C75', marginTop: 2 },
-  autoSyncBadge:       { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#0d2011', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: '#166534' },
-  autoSyncText:        { color: '#4ADE80', fontSize: 12, fontWeight: '600' },
-  syncInfo:            { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 20, paddingVertical: 8 },
-  syncInfoText:        { fontSize: 11, color: '#475569' },
-  filterRow:           { flexDirection: 'row', paddingHorizontal: 16, gap: 8, marginBottom: 12 },
-  filterTab:           { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: '#1A1D27', borderWidth: 1, borderColor: '#262A38' },
-  filterTabActive:     { backgroundColor: '#0F172A', borderColor: '#475569' },
-  filterTabText:       { color: '#64748B', fontSize: 12, fontWeight: '600' },
-  filterTabTextActive: { color: '#CBD5E1' },
-  listContent:         { paddingHorizontal: 16, paddingBottom: 24 },
-  logCard:             { backgroundColor: '#1A1D27', borderRadius: 14, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderColor: '#262A38' },
-  logIconWrap:         { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  logBody:             { flex: 1, minWidth: 0 },
-  logNumber:           { fontSize: 14, fontWeight: '700', color: '#F0F2FA', marginBottom: 2 },
-  logSubNumber:        { fontSize: 11, color: '#565C75', marginBottom: 2, fontFamily: 'monospace' },
-  logType:             { fontSize: 11, fontWeight: '600' },
-  logRight:            { alignItems: 'flex-end', gap: 2 },
-  logTime:             { fontSize: 12, fontWeight: '600', color: '#9DA3BB' },
-  logDate:             { fontSize: 11, color: '#565C75' },
-  logDuration:         { fontSize: 11, color: '#565C75' },
-  emptyState:          { alignItems: 'center', paddingTop: 80 },
-  emptyTitle:          { fontSize: 17, fontWeight: '700', color: '#475569', marginTop: 14 },
-  emptySubtitle:       { fontSize: 13, color: '#334155', marginTop: 6, textAlign: 'center', paddingHorizontal: 32 },
-  agentTab:            { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, backgroundColor: '#1A1D27', borderWidth: 1, borderColor: '#262A38' },
-  agentTabActive:      { backgroundColor: '#1E2A3A', borderColor: '#2563EB' },
-  agentTabText:        { color: '#64748B', fontSize: 12, fontWeight: '600' },
-  agentTabTextActive:  { color: '#F0F2FA' },
-  logAgent:            { fontSize: 10, color: '#475569', marginTop: 2 },
-});
+function createStyles(colors) {
+  return StyleSheet.create({
+    container:           { flex: 1, backgroundColor: colors.bg },
+    header:              { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 52, paddingBottom: 14, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
+    title:               { fontSize: 22, fontWeight: '800', color: colors.textPrimary },
+    subtitle:            { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+    autoSyncBadge:       { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: colors.greenBg, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: colors.green },
+    autoSyncText:        { color: colors.greenLight, fontSize: 12, fontWeight: '600' },
+    syncInfo:            { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 20, paddingVertical: 8 },
+    syncInfoText:        { fontSize: 11, color: colors.textMuted },
+    filterRow:           { flexDirection: 'row', paddingHorizontal: 16, gap: 8, marginBottom: 12 },
+    filterTab:           { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+    filterTabActive:     { backgroundColor: colors.surfaceAlt, borderColor: colors.textMuted },
+    filterTabText:       { color: colors.textSec, fontSize: 12, fontWeight: '600' },
+    filterTabTextActive: { color: colors.textPrimary },
+    listContent:         { paddingHorizontal: 16, paddingBottom: 24 },
+    logCard:             { backgroundColor: colors.surface, borderRadius: 14, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderColor: colors.border },
+    logIconWrap:         { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+    logBody:             { flex: 1, minWidth: 0 },
+    logNumber:           { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
+    logSubNumber:        { fontSize: 11, color: colors.textMuted, marginBottom: 2, fontFamily: 'monospace' },
+    logType:             { fontSize: 11, fontWeight: '600' },
+    logRight:            { alignItems: 'flex-end', gap: 2 },
+    logTime:             { fontSize: 12, fontWeight: '600', color: colors.textSec },
+    logDate:             { fontSize: 11, color: colors.textMuted },
+    logDuration:         { fontSize: 11, color: colors.textMuted },
+    emptyState:          { alignItems: 'center', paddingTop: 80 },
+    emptyTitle:          { fontSize: 17, fontWeight: '700', color: colors.textSec, marginTop: 14 },
+    emptySubtitle:       { fontSize: 13, color: colors.textMuted, marginTop: 6, textAlign: 'center', paddingHorizontal: 32 },
+    agentTab:            { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+    agentTabActive:      { backgroundColor: colors.blueBg, borderColor: colors.blue },
+    agentTabText:        { color: colors.textSec, fontSize: 12, fontWeight: '600' },
+    agentTabTextActive:  { color: colors.textPrimary },
+    logAgent:            { fontSize: 10, color: colors.textMuted, marginTop: 2 },
+  });
+}

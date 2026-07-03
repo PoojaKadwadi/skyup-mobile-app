@@ -14,6 +14,7 @@ import { checkAllPermissions, requestCallPermission,
 import { triggerManualSync }        from '../../services/backgroundSyncService';
 import { getCustomRecordingPath, setCustomRecordingPath } from '../../services/recordingPathService';
 import { isAutoUploadEnabled, setAutoUpload } from '../../services/autoUploadService';
+import { useTheme }                 from '../../theme/ThemeContext';
 import moment from 'moment';
 
 let RNFS;
@@ -24,6 +25,8 @@ export default function ProfileScreen() {
   const { user } = useSelector((s) => s.auth);
   const { lastSyncedAt } = useSelector((s) => s.calls);
   const { pendingQueue }  = useSelector((s) => s.sync);
+  const { dark, toggle, colors } = useTheme();
+  const styles = React.useMemo(() => createStyles(colors), [colors]);
 
   const [perms, setPerms] = React.useState({ callPhone: false, readCallLog: false, readStorage: false, readContacts: false, location: false });
   const [customPath,     setCustomPath]     = React.useState(null);   // saved folder
@@ -159,7 +162,7 @@ export default function ProfileScreen() {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
+      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} backgroundColor={colors.surface} />
       <ScrollView showsVerticalScrollIndicator={false}>
 
         {/* Profile Card */}
@@ -190,13 +193,13 @@ export default function ProfileScreen() {
                 </Text>
               </View>
               {autoUploadBusy
-                ? <ActivityIndicator size="small" color="#2563EB" />
+                ? <ActivityIndicator size="small" color={colors.blue} />
                 : (
                   <Switch
                     value={autoUpload}
                     onValueChange={handleAutoUploadToggle}
-                    trackColor={{ false: '#334155', true: '#1D4ED8' }}
-                    thumbColor={autoUpload ? '#60A5FA' : '#94A3B8'}
+                    trackColor={{ false: colors.border, true: '#1D4ED8' }}
+                    thumbColor={autoUpload ? '#60A5FA' : colors.textSec}
                   />
                 )}
             </View>
@@ -212,7 +215,7 @@ export default function ProfileScreen() {
             <Row icon="clock-outline" label="Pending Items"
               value={pendingQueue.length > 0 ? `${pendingQueue.length} queued` : 'None'} />
             <TouchableOpacity style={styles.syncBtn} onPress={triggerManualSync}>
-              <Icon name="sync" size={16} color="#2563EB" style={{ marginRight: 6 }} />
+              <Icon name="sync" size={16} color={colors.blue} style={{ marginRight: 6 }} />
               <Text style={styles.syncBtnText}>Sync Now</Text>
             </TouchableOpacity>
           </View>
@@ -256,20 +259,20 @@ export default function ProfileScreen() {
           <View style={styles.infoCard}>
             {customPath ? (
               <View style={styles.pathRow}>
-                <Icon name="folder-music" size={18} color="#7C3AED" style={{ marginRight: 10 }} />
+                <Icon name="folder-music" size={18} color={colors.purple} style={{ marginRight: 10 }} />
                 <Text style={styles.pathText} numberOfLines={2}>{customPath}</Text>
                 <TouchableOpacity onPress={clearCustomPath} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                  <Icon name="close-circle" size={18} color="#475569" />
+                  <Icon name="close-circle" size={18} color={colors.textMuted} />
                 </TouchableOpacity>
               </View>
             ) : (
               <View style={styles.pathRow}>
-                <Icon name="folder-question" size={18} color="#475569" style={{ marginRight: 10 }} />
+                <Icon name="folder-question" size={18} color={colors.textMuted} style={{ marginRight: 10 }} />
                 <Text style={styles.pathHint}>No folder set — app scans all common locations</Text>
               </View>
             )}
             <TouchableOpacity style={styles.browseBtn} onPress={openBrowser}>
-              <Icon name="folder-open" size={16} color="#7C3AED" style={{ marginRight: 8 }} />
+              <Icon name="folder-open" size={16} color={colors.purple} style={{ marginRight: 8 }} />
               <Text style={styles.browseBtnText}>{customPath ? 'Change Folder' : 'Browse & Set Folder'}</Text>
             </TouchableOpacity>
           </View>
@@ -280,18 +283,38 @@ export default function ProfileScreen() {
           </Text>
         </View>
 
+        {/* Appearance */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Appearance</Text>
+          <View style={styles.infoCard}>
+            <View style={styles.toggleRow}>
+              <View style={{ flex: 1, paddingRight: 12 }}>
+                <Text style={styles.toggleLabel}>Dark Mode</Text>
+                <Text style={styles.toggleHint}>
+                  {dark ? 'Currently using the dark theme.' : 'Currently using the light theme.'}
+                </Text>
+              </View>
+              <Switch
+                value={dark}
+                onValueChange={toggle}
+                trackColor={{ false: '#CBD5E1', true: '#1D4ED8' }}
+                thumbColor={dark ? '#60A5FA' : '#F8FAFC'}
+              />
+            </View>
+          </View>
+        </View>
+
         {/* App Info */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>App Info</Text>
           <View style={styles.infoCard}>
             <Row icon="information" label="Version"     value="1.0.0" />
-            <Row icon="shield-lock" label="Auth"        value="JWT (Encrypted Storage)" />
           </View>
         </View>
 
         {/* Logout */}
         <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
-          <Icon name="logout" size={18} color="#EF4444" style={{ marginRight: 8 }} />
+          <Icon name="logout" size={18} color={colors.red} style={{ marginRight: 8 }} />
           <Text style={styles.logoutText}>Sign Out</Text>
         </TouchableOpacity>
 
@@ -313,7 +336,7 @@ export default function ProfileScreen() {
               style={styles.browserBackBtn}
               hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
             >
-              <Icon name={browserStack.length > 0 ? 'arrow-left' : 'close'} size={22} color="#F1F5F9" />
+              <Icon name={browserStack.length > 0 ? 'arrow-left' : 'close'} size={22} color={colors.textPrimary} />
             </TouchableOpacity>
             <View style={{ flex: 1, marginHorizontal: 12 }}>
               <Text style={styles.browserTitle}>Choose Recording Folder</Text>
@@ -330,12 +353,12 @@ export default function ProfileScreen() {
           {/* Folder list */}
           {browseLoading ? (
             <View style={styles.browserLoader}>
-              <ActivityIndicator size="large" color="#7C3AED" />
+              <ActivityIndicator size="large" color={colors.purple} />
               <Text style={styles.browserLoaderText}>Reading folder…</Text>
             </View>
           ) : browseEntries.length === 0 ? (
             <View style={styles.browserEmpty}>
-              <Icon name="folder-open-outline" size={48} color="#334155" />
+              <Icon name="folder-open-outline" size={48} color={colors.border} />
               <Text style={styles.browserEmptyText}>No sub-folders here</Text>
               <Text style={styles.browserEmptyHint}>Tap "Use This Folder" to select the current location</Text>
             </View>
@@ -348,9 +371,9 @@ export default function ProfileScreen() {
                   onPress={() => navigateInto(entry)}
                   activeOpacity={0.7}
                 >
-                  <Icon name="folder" size={20} color="#7C3AED" style={{ marginRight: 14 }} />
+                  <Icon name="folder" size={20} color={colors.purple} style={{ marginRight: 14 }} />
                   <Text style={styles.browserEntryName} numberOfLines={1}>{entry.name}</Text>
-                  <Icon name="chevron-right" size={18} color="#475569" />
+                  <Icon name="chevron-right" size={18} color={colors.textMuted} />
                 </TouchableOpacity>
               ))}
             </ScrollView>
@@ -363,9 +386,11 @@ export default function ProfileScreen() {
 }
 
 function Row({ icon, label, value }) {
+  const { colors } = useTheme();
+  const styles = React.useMemo(() => createStyles(colors), [colors]);
   return (
     <View style={styles.row}>
-      <Icon name={icon} size={16} color="#64748B" style={{ marginRight: 10 }} />
+      <Icon name={icon} size={16} color={colors.textMuted} style={{ marginRight: 10 }} />
       <Text style={styles.rowLabel}>{label}</Text>
       <Text style={styles.rowValue} numberOfLines={1}>{value}</Text>
     </View>
@@ -373,12 +398,14 @@ function Row({ icon, label, value }) {
 }
 
 function PermRow({ label, granted, onRequest }) {
+  const { colors } = useTheme();
+  const styles = React.useMemo(() => createStyles(colors), [colors]);
   return (
     <View style={styles.permRow}>
       <Icon
         name={granted ? 'check-circle' : 'close-circle'}
         size={18}
-        color={granted ? '#059669' : '#EF4444'}
+        color={granted ? colors.green : colors.red}
         style={{ marginRight: 10 }}
       />
       <Text style={styles.permLabel}>{label}</Text>
@@ -391,74 +418,76 @@ function PermRow({ label, granted, onRequest }) {
   );
 }
 
-const styles = StyleSheet.create({
-  container:    { flex: 1, backgroundColor: '#0F172A' },
+function createStyles(colors) {
+  return StyleSheet.create({
+  container:    { flex: 1, backgroundColor: colors.bg },
   profileCard:  { alignItems: 'center', paddingTop: 64, paddingBottom: 28,
                   paddingHorizontal: 20 },
-  avatar:       { width: 88, height: 88, borderRadius: 28, backgroundColor: '#2563EB',
+  avatar:       { width: 88, height: 88, borderRadius: 28, backgroundColor: colors.blue,
                   alignItems: 'center', justifyContent: 'center', marginBottom: 16,
-                  elevation: 8, shadowColor: '#2563EB', shadowOpacity: 0.4,
+                  elevation: 8, shadowColor: colors.blue, shadowOpacity: 0.4,
                   shadowOffset: { width: 0, height: 4 }, shadowRadius: 12 },
   avatarText:   { color: '#fff', fontSize: 28, fontWeight: '800' },
-  userName:     { fontSize: 22, fontWeight: '800', color: '#F1F5F9' },
-  userEmail:    { fontSize: 14, color: '#64748B', marginTop: 4 },
-  roleBadge:    { backgroundColor: '#1E3A8A', borderRadius: 20, paddingHorizontal: 14,
-                  paddingVertical: 4, marginTop: 10, borderWidth: 1, borderColor: '#2563EB50' },
-  roleText:     { color: '#93C5FD', fontSize: 11, fontWeight: '800', letterSpacing: 1.5 },
+  userName:     { fontSize: 22, fontWeight: '800', color: colors.textPrimary },
+  userEmail:    { fontSize: 14, color: colors.textMuted, marginTop: 4 },
+  roleBadge:    { backgroundColor: colors.blueBg, borderRadius: 20, paddingHorizontal: 14,
+                  paddingVertical: 4, marginTop: 10, borderWidth: 1, borderColor: colors.blue + '50' },
+  roleText:     { color: colors.blueLight, fontSize: 11, fontWeight: '800', letterSpacing: 1.5 },
   section:      { paddingHorizontal: 20, marginBottom: 20 },
-  sectionTitle: { fontSize: 11, fontWeight: '700', color: '#64748B',
+  sectionTitle: { fontSize: 11, fontWeight: '700', color: colors.textMuted,
                   textTransform: 'uppercase', letterSpacing: 1.5, marginBottom: 10 },
-  infoCard:     { backgroundColor: '#1E293B', borderRadius: 18, overflow: 'hidden',
-                  borderWidth: 1, borderColor: '#334155' },
+  infoCard:     { backgroundColor: colors.surface, borderRadius: 18, overflow: 'hidden',
+                  borderWidth: 1, borderColor: colors.border },
   toggleRow:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 14 },
-  toggleLabel:  { fontSize: 14, fontWeight: '700', color: '#E2E8F0', marginBottom: 4 },
-  toggleHint:   { fontSize: 11, color: '#64748B', lineHeight: 16 },
+  toggleLabel:  { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 4 },
+  toggleHint:   { fontSize: 11, color: colors.textMuted, lineHeight: 16 },
   row:          { flexDirection: 'row', alignItems: 'center', padding: 14,
-                  borderBottomWidth: 1, borderBottomColor: '#334155' },
-  rowLabel:     { flex: 1, color: '#94A3B8', fontSize: 14 },
-  rowValue:     { color: '#CBD5E1', fontSize: 13, fontWeight: '600', maxWidth: '50%', textAlign: 'right' },
+                  borderBottomWidth: 1, borderBottomColor: colors.border },
+  rowLabel:     { flex: 1, color: colors.textSec, fontSize: 14 },
+  rowValue:     { color: colors.textPrimary, fontSize: 13, fontWeight: '600', maxWidth: '50%', textAlign: 'right' },
   permRow:      { flexDirection: 'row', alignItems: 'center', padding: 14,
-                  borderBottomWidth: 1, borderBottomColor: '#334155' },
-  permLabel:    { flex: 1, color: '#94A3B8', fontSize: 14 },
-  grantBtn:     { backgroundColor: '#1E3A8A', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 4 },
-  grantText:    { color: '#93C5FD', fontSize: 12, fontWeight: '700' },
+                  borderBottomWidth: 1, borderBottomColor: colors.border },
+  permLabel:    { flex: 1, color: colors.textSec, fontSize: 14 },
+  grantBtn:     { backgroundColor: colors.blueBg, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 4 },
+  grantText:    { color: colors.blueLight, fontSize: 12, fontWeight: '700' },
   syncBtn:      { flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
                   padding: 14 },
-  syncBtnText:  { color: '#2563EB', fontSize: 14, fontWeight: '700' },
+  syncBtnText:  { color: colors.blue, fontSize: 14, fontWeight: '700' },
   logoutBtn:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                  backgroundColor: '#7F1D1D20', marginHorizontal: 20, borderRadius: 16,
-                  height: 54, borderWidth: 1, borderColor: '#EF444440' },
-  logoutText:   { color: '#EF4444', fontSize: 16, fontWeight: '700' },
+                  backgroundColor: colors.red + '20', marginHorizontal: 20, borderRadius: 16,
+                  height: 54, borderWidth: 1, borderColor: colors.red + '40' },
+  logoutText:   { color: colors.red, fontSize: 16, fontWeight: '700' },
 
   // ── Recording folder section ──────────────────────────────────────────────
   pathRow:         { flexDirection: 'row', alignItems: 'center', padding: 14,
-                     borderBottomWidth: 1, borderBottomColor: '#334155' },
-  pathText:        { flex: 1, color: '#A78BFA', fontSize: 13, fontWeight: '600' },
-  pathHint:        { flex: 1, color: '#475569', fontSize: 13 },
+                     borderBottomWidth: 1, borderBottomColor: colors.border },
+  pathText:        { flex: 1, color: colors.purpleLight, fontSize: 13, fontWeight: '600' },
+  pathHint:        { flex: 1, color: colors.textMuted, fontSize: 13 },
   browseBtn:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
                      padding: 14 },
-  browseBtnText:   { color: '#7C3AED', fontSize: 14, fontWeight: '700' },
-  folderHint:      { fontSize: 12, color: '#475569', marginTop: 8, lineHeight: 18,
+  browseBtnText:   { color: colors.purple, fontSize: 14, fontWeight: '700' },
+  folderHint:      { fontSize: 12, color: colors.textMuted, marginTop: 8, lineHeight: 18,
                      paddingHorizontal: 4 },
 
   // ── Folder browser modal ──────────────────────────────────────────────────
-  browserContainer: { flex: 1, backgroundColor: '#0F172A' },
+  browserContainer: { flex: 1, backgroundColor: colors.bg },
   browserHeader:    { flexDirection: 'row', alignItems: 'center', paddingTop: 52,
                       paddingBottom: 16, paddingHorizontal: 16,
-                      borderBottomWidth: 1, borderBottomColor: '#1E293B',
-                      backgroundColor: '#0F172A' },
+                      borderBottomWidth: 1, borderBottomColor: colors.border,
+                      backgroundColor: colors.bg },
   browserBackBtn:   { padding: 4 },
-  browserTitle:     { fontSize: 16, fontWeight: '800', color: '#F1F5F9' },
-  browserPath:      { fontSize: 11, color: '#475569', marginTop: 2 },
+  browserTitle:     { fontSize: 16, fontWeight: '800', color: colors.textPrimary },
+  browserPath:      { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   selectFolderBtn:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                      backgroundColor: '#7C3AED', margin: 16, borderRadius: 14, height: 48 },
+                      backgroundColor: colors.purple, margin: 16, borderRadius: 14, height: 48 },
   selectFolderText: { color: '#fff', fontSize: 15, fontWeight: '700' },
   browserEntry:     { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20,
-                      paddingVertical: 16, borderTopWidth: 1, borderTopColor: '#1E293B' },
-  browserEntryName: { flex: 1, color: '#CBD5E1', fontSize: 15 },
+                      paddingVertical: 16, borderTopWidth: 1, borderTopColor: colors.border },
+  browserEntryName: { flex: 1, color: colors.textPrimary, fontSize: 15 },
   browserLoader:    { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
-  browserLoaderText:{ color: '#475569', fontSize: 14, marginTop: 12 },
+  browserLoaderText:{ color: colors.textMuted, fontSize: 14, marginTop: 12 },
   browserEmpty:     { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
-  browserEmptyText: { color: '#475569', fontSize: 16, fontWeight: '700', marginTop: 16 },
-  browserEmptyHint: { color: '#334155', fontSize: 13, marginTop: 8, textAlign: 'center' },
-});
+  browserEmptyText: { color: colors.textMuted, fontSize: 16, fontWeight: '700', marginTop: 16 },
+  browserEmptyHint: { color: colors.textMuted, fontSize: 13, marginTop: 8, textAlign: 'center' },
+  });
+}

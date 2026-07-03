@@ -47,10 +47,22 @@ const MIN_FOREGROUND_WAIT_MS =  5 * 60 * 1000;  // 5 min min between foreground 
 const REC_SYNC_INTERVAL_MS   = 15 * 60 * 1000;  // 15 min recording sweep (was 10 min)
 const LOG_BATCH_SIZE         = 50;
 
+// FIX (clock/timezone bug): this used to compute midnight in the DEVICE's
+// local timezone via d.setHours(0,0,0,0). The company's day boundary — and
+// the backend's attendance "today" — is IST specifically, so on a phone
+// whose timezone isn't Asia/Kolkata (traveling, misconfigured device,
+// etc.) the "since midnight" sync window here would be offset from the
+// real IST day: it could re-scan yesterday's call logs/recordings as if
+// they were today's, or skip this morning's until the device's own
+// midnight arrives. Compute IST midnight explicitly instead.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // +05:30
 function getTodayMidnightMs() {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
+  const now           = Date.now();
+  const istNow        = new Date(now + IST_OFFSET_MS);
+  const istMidnightUTC = new Date(istNow.getTime());
+  istMidnightUTC.setUTCHours(0, 0, 0, 0);
+  // Convert back to a real (UTC) instant.
+  return istMidnightUTC.getTime() - IST_OFFSET_MS;
 }
 
 let syncInterval         = null;

@@ -53,6 +53,28 @@
 -dontwarn com.facebook.react.**
 -dontwarn com.facebook.hermes.**
 
+# ── Firebase / Google Play Services ──────────────────────────────────────────
+# ✅ FIX — CRASH ON LAUNCH ROOT CAUSE. Firebase's ComponentDiscoveryService
+# reflectively looks up FirebaseMessagingRegistrar / FirebaseInstallationsRegistrar
+# and related classes at process start (before any JS runs). R8 can't see this
+# reflection use and was stripping those classes, causing an immediate crash
+# on cold start in release builds only.
+-keep class com.google.firebase.** { *; }
+-keep interface com.google.firebase.** { *; }
+-keep class com.google.android.gms.** { *; }
+-dontwarn com.google.firebase.**
+-dontwarn com.google.android.gms.**
+-keepattributes Signature
+-keepattributes *Annotation*
+-keepnames class com.google.firebase.messaging.FirebaseMessagingService
+-keep class * extends com.google.firebase.messaging.FirebaseMessagingService { *; }
+
+# ── react-native-permissions ─────────────────────────────────────────────────
+-keep class com.zoontek.rnpermissions.** { *; }
+
+# ── react-native-community (netinfo, datetimepicker, geolocation) ───────────
+-keep class com.reactnativecommunity.** { *; }
+
 # ── Keep JS-callable native methods ──────────────────────────────────────────
 -keepclassmembers class * extends com.facebook.react.bridge.JavaScriptModule { *; }
 -keepclassmembers class * extends com.facebook.react.bridge.NativeModule {
@@ -64,7 +86,7 @@
     public <methods>;
 }
 
-# ── Suppress warnings for okhttp + okio (used internally) ────────────────────
+# ── Suppress warnings for okhttp + okio (used internally by Firebase/axios) ──
 -dontwarn okhttp3.**
 -dontwarn okio.**
 -dontwarn javax.annotation.**

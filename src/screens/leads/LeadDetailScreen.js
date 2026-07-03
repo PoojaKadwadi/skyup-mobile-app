@@ -23,6 +23,7 @@ import CalendarDateTimePicker                       from '../../components/Calen
 import { postMeetingRemark }                        from '../../api/meetingsApi';
 import { scheduleMeetingFollowUp }                  from '../../services/notificationService';
 import moment                                      from 'moment';
+import { useTheme }                                from '../../theme/ThemeContext';
 
 // Visit types offered when the agent logs a Client Meeting from the remark modal.
 const MEETING_TYPES = ['In-Person', 'Site Visit', 'Demo', 'Video Call', 'Phone Call'];
@@ -60,8 +61,8 @@ function formatDuration(secs) {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-function callTypeColor(type) {
-  return ({ incoming: '#059669', outgoing: '#2563EB', missed: '#EF4444', rejected: '#F59E0B', blocked: '#64748B' })[type] || '#64748B';
+function callTypeColor(type, colors) {
+  return ({ incoming: colors.green, outgoing: colors.blue, missed: colors.red, rejected: colors.amber, blocked: colors.textSec })[type] || colors.textSec;
 }
 function callTypeIcon(type) {
   return ({ incoming: 'phone-incoming', outgoing: 'phone-outgoing', missed: 'phone-missed', rejected: 'phone-cancel', blocked: 'phone-off' })[type] || 'phone';
@@ -79,10 +80,12 @@ function maskEmail(email) {
 }
 
 function InfoItem({ icon, label, value, full }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   return (
     <View style={[styles.infoItem, full && { flex: 1, width: '100%' }]}>
       <View style={styles.infoItemLeft}>
-        <Icon name={icon} size={14} color="#64748B" style={{ marginRight: 6 }} />
+        <Icon name={icon} size={14} color={colors.textSec} style={{ marginRight: 6 }} />
         <Text style={styles.infoLabel}>{label}</Text>
       </View>
       <Text style={styles.infoValue} numberOfLines={full ? 0 : 1}>{value}</Text>
@@ -103,6 +106,8 @@ export default function LeadDetailScreen() {
   const navigation = useNavigation();
   const route      = useRoute();
   const { leadId, postCall = false } = route.params;
+  const { dark, colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
 
   const storeLead = useSelector((s) => s.leads.items.find(l => l.id === leadId));
   // Admin-configured Google account email that leads should auto-save into on
@@ -637,14 +642,14 @@ export default function LeadDetailScreen() {
     if (leadLoading || (!leadFetchFail && !storeLead)) {
       return (
         <View style={styles.notFound}>
-          <ActivityIndicator size="large" color="#2563EB" />
+          <ActivityIndicator size="large" color={colors.blue} />
           <Text style={[styles.notFoundText, { marginTop: 12 }]}>Loading lead…</Text>
         </View>
       );
     }
     return (
       <View style={styles.notFound}>
-        <Icon name="account-alert" size={48} color="#334155" />
+        <Icon name="account-alert" size={48} color={colors.textMuted} />
         <Text style={styles.notFoundText}>Lead not found</Text>
         <TouchableOpacity onPress={() => navigation.goBack()}>
           <Text style={styles.backLink}>← Go back</Text>
@@ -861,11 +866,11 @@ export default function LeadDetailScreen() {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
+      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} backgroundColor={colors.surface} />
 
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Icon name="arrow-left" size={22} color="#F1F5F9" />
+          <Icon name="arrow-left" size={22} color={colors.textPrimary} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle} numberOfLines={1}>{lead.name}</Text>
@@ -880,7 +885,7 @@ export default function LeadDetailScreen() {
           <View style={styles.infoRow}>
             <View style={styles.infoItem}>
               <View style={styles.infoItemLeft}>
-                <Icon name="phone-lock" size={14} color="#64748B" style={{ marginRight: 6 }} />
+                <Icon name="phone-lock" size={14} color={colors.textSec} style={{ marginRight: 6 }} />
                 <Text style={styles.infoLabel}>Primary</Text>
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -900,7 +905,7 @@ export default function LeadDetailScreen() {
               <View style={styles.infoRow}>
                 <View style={styles.infoItem}>
                   <View style={styles.infoItemLeft}>
-                    <Icon name="phone-plus" size={14} color="#64748B" style={{ marginRight: 6 }} />
+                    <Icon name="phone-plus" size={14} color={colors.textSec} style={{ marginRight: 6 }} />
                     <Text style={styles.infoLabel}>Secondary</Text>
                   </View>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -941,7 +946,7 @@ export default function LeadDetailScreen() {
           <Icon name="phone" size={20} color="#fff" style={{ marginRight: 8 }} />
           <Text style={styles.callBigBtnText}>Call {maskedPhone}</Text>
           <View style={styles.lockBadge}>
-            <Icon name="lock" size={10} color="#93C5FD" />
+            <Icon name="lock" size={10} color={colors.blueLight} />
           </View>
         </TouchableOpacity>
 
@@ -950,7 +955,7 @@ export default function LeadDetailScreen() {
           onPress={() => setShowRemarkModal(true)}
           activeOpacity={0.8}
         >
-          <Icon name="pencil-plus-outline" size={18} color="#7C3AED" style={{ marginRight: 8 }} />
+          <Icon name="pencil-plus-outline" size={18} color={colors.purple} style={{ marginRight: 8 }} />
           <Text style={styles.remarkBtnText}>Add Call Remark</Text>
         </TouchableOpacity>
 
@@ -961,14 +966,14 @@ export default function LeadDetailScreen() {
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
             <Text style={styles.sectionTitle}>Call Logs</Text>
             <TouchableOpacity onPress={loadCrmCallLogs} style={{ padding: 4 }}>
-              <Icon name="refresh" size={16} color="#64748B" />
+              <Icon name="refresh" size={16} color={colors.textSec} />
             </TouchableOpacity>
           </View>
           {loadingLogs ? (
-            <ActivityIndicator color="#2563EB" style={{ marginTop: 8 }} />
+            <ActivityIndicator color={colors.blue} style={{ marginTop: 8 }} />
           ) : !logsLoaded ? (
             <TouchableOpacity style={styles.loadLogsBtn} onPress={loadCrmCallLogs}>
-              <Icon name="download-outline" size={15} color="#93C5FD" style={{ marginRight: 6 }} />
+              <Icon name="download-outline" size={15} color={colors.blueLight} style={{ marginRight: 6 }} />
               <Text style={styles.loadLogsBtnText}>Load Call Logs</Text>
             </TouchableOpacity>
           ) : crmCallLogs.length === 0 ? (
@@ -976,13 +981,13 @@ export default function LeadDetailScreen() {
           ) : (
             crmCallLogs.map((log, i) => (
               <View key={i} style={styles.logRow}>
-                <View style={[styles.logIcon, { backgroundColor: callTypeColor(log.callType) + '20' }]}>
-                  <Icon name={callTypeIcon(log.callType)} size={16} color={callTypeColor(log.callType)} />
+                <View style={[styles.logIcon, { backgroundColor: callTypeColor(log.callType, colors) + '20' }]}>
+                  <Icon name={callTypeIcon(log.callType)} size={16} color={callTypeColor(log.callType, colors)} />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.logType}>{capitalize(log.callType || 'unknown')}</Text>
                   <Text style={styles.logTime}>{formatDateTime(log.timestamp)}</Text>
-                  {log.remark ? <Text style={[styles.logTime, { color: '#94A3B8' }]}>{log.remark}</Text> : null}
+                  {log.remark ? <Text style={[styles.logTime, { color: colors.textSec }]}>{log.remark}</Text> : null}
                 </View>
                 <Text style={styles.logDuration}>
                   {log.duration > 0 ? formatDuration(log.duration) : '—'}
@@ -998,7 +1003,7 @@ export default function LeadDetailScreen() {
             <Text style={styles.sectionTitle}>AI Action Summary</Text>
             {aiSummary && !aiSummaryLoading && (
               <TouchableOpacity onPress={() => fetchActionSummary(true)}>
-                <Icon name="refresh" size={18} color="#A78BFA" />
+                <Icon name="refresh" size={18} color={colors.purpleLight} />
               </TouchableOpacity>
             )}
           </View>
@@ -1012,7 +1017,7 @@ export default function LeadDetailScreen() {
 
           {aiSummaryLoading && (
             <View style={styles.aiLoadingBox}>
-              <ActivityIndicator color="#A78BFA" />
+              <ActivityIndicator color={colors.purpleLight} />
               <Text style={styles.aiLoadingText}>Analyzing remarks…</Text>
             </View>
           )}
@@ -1089,14 +1094,14 @@ export default function LeadDetailScreen() {
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>{isClientMeeting ? 'Client Meeting' : 'Call Remark'}</Text>
               <TouchableOpacity onPress={closeModal}>
-                <Icon name="close" size={22} color="#94A3B8" />
+                <Icon name="close" size={22} color={colors.textSec} />
               </TouchableOpacity>
             </View>
 
             <Text style={styles.modalLabel}>Outcome *</Text>
             {alreadyInterested && (
               <View style={styles.alreadyInterestedNote}>
-                <Icon name="check-circle" size={13} color="#34D399" />
+                <Icon name="check-circle" size={13} color={colors.greenLight} />
                 <Text style={styles.alreadyInterestedText}>
                   This lead is already marked Interested — pick a different outcome.
                 </Text>
@@ -1120,7 +1125,7 @@ export default function LeadDetailScreen() {
             <TextInput
               style={styles.remarkInput}
               placeholder="What did you discuss?"
-              placeholderTextColor="#475569"
+              placeholderTextColor={colors.textMuted}
               multiline
               value={remark}
               onChangeText={setRemark}
@@ -1157,10 +1162,10 @@ export default function LeadDetailScreen() {
               </Text>
               {followUpDate ? (
                 <View style={styles.followUpSet}>
-                  <Icon name="calendar-check" size={16} color="#34D399" style={{ marginRight: 6 }} />
+                  <Icon name="calendar-check" size={16} color={colors.greenLight} style={{ marginRight: 6 }} />
                   <Text style={styles.followUpDateText}>{formatDateTime(followUpDate)}</Text>
                   <TouchableOpacity onPress={clearFollowUpDate} style={styles.clearDateBtn}>
-                    <Icon name="close-circle" size={18} color="#EF4444" />
+                    <Icon name="close-circle" size={18} color={colors.red} />
                   </TouchableOpacity>
                 </View>
               ) : (
@@ -1168,7 +1173,7 @@ export default function LeadDetailScreen() {
                   style={styles.setDateBtn}
                   onPress={openDatePicker}
                 >
-                  <Icon name="calendar-plus" size={16} color="#93C5FD" style={{ marginRight: 6 }} />
+                  <Icon name="calendar-plus" size={16} color={colors.blueLight} style={{ marginRight: 6 }} />
                   <Text style={styles.setDateBtnText}>
                     {isClientMeeting ? 'Set Meeting Date & Time' : 'Set Follow-Up Date & Time'}
                   </Text>
@@ -1215,125 +1220,127 @@ export default function LeadDetailScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container:          { flex: 1, backgroundColor: '#0D0F14' },
-  header:             { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingTop: 52, paddingBottom: 14, backgroundColor: '#1A1D27', borderBottomWidth: 1, borderBottomColor: '#262A38' },
-  backBtn:            { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: '#1E2236' },
-  headerTitle:        { fontSize: 17, fontWeight: '800', color: '#F0F2FA' },
-  headerPhone:        { fontSize: 12, color: '#565C75', fontFamily: 'monospace', letterSpacing: 1, marginTop: 2 },
+function createStyles(colors) {
+return StyleSheet.create({
+  container:          { flex: 1, backgroundColor: colors.bg },
+  header:             { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingTop: 52, paddingBottom: 14, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
+  backBtn:            { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceAlt },
+  headerTitle:        { fontSize: 17, fontWeight: '800', color: colors.textPrimary },
+  headerPhone:        { fontSize: 12, color: colors.textMuted, fontFamily: 'monospace', letterSpacing: 1, marginTop: 2 },
 
-  infoCard:           { backgroundColor: '#1A1D27', margin: 16, borderRadius: 14, padding: 14, borderWidth: 1, borderColor: '#262A38' },
+  infoCard:           { backgroundColor: colors.surface, margin: 16, borderRadius: 14, padding: 14, borderWidth: 1, borderColor: colors.border },
   infoRow:            { flexDirection: 'row', gap: 12 },
   infoItem:           { flex: 1, minWidth: 0 },
   infoItemLeft:       { flexDirection: 'row', alignItems: 'center', marginBottom: 4 },
-  infoLabel:          { fontSize: 11, color: '#64748B', textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: '600' },
-  infoValue:          { fontSize: 13, color: '#F0F2FA', fontWeight: '600' },
-  divider:            { height: 1, backgroundColor: '#262A38', marginVertical: 10 },
+  infoLabel:          { fontSize: 11, color: colors.textSec, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: '600' },
+  infoValue:          { fontSize: 13, color: colors.textPrimary, fontWeight: '600' },
+  divider:            { height: 1, backgroundColor: colors.border, marginVertical: 10 },
 
-  callBigBtn:         { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#059669', marginHorizontal: 16, marginBottom: 8, borderRadius: 14, paddingVertical: 14 },
+  callBigBtn:         { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.green, marginHorizontal: 16, marginBottom: 8, borderRadius: 14, paddingVertical: 14 },
   callBigBtnText:     { color: '#fff', fontSize: 15, fontWeight: '700' },
   lockBadge:          { marginLeft: 8, backgroundColor: '#06402b', borderRadius: 8, paddingHorizontal: 4, paddingVertical: 2 },
 
-  remarkBtn:          { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#1A1D27', marginHorizontal: 16, marginBottom: 16, borderRadius: 14, paddingVertical: 12, borderWidth: 1, borderColor: '#7C3AED40' },
-  remarkBtnText:      { color: '#A78BFA', fontSize: 14, fontWeight: '700' },
-  saveContactBtn:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#1A1D27', marginHorizontal: 16, marginBottom: 8, borderRadius: 14, paddingVertical: 12, borderWidth: 1, borderColor: '#05966940' },
-  saveContactBtnText: { color: '#34D399', fontSize: 14, fontWeight: '700' },
+  remarkBtn:          { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface, marginHorizontal: 16, marginBottom: 16, borderRadius: 14, paddingVertical: 12, borderWidth: 1, borderColor: colors.purple + '40' },
+  remarkBtnText:      { color: colors.purpleLight, fontSize: 14, fontWeight: '700' },
+  saveContactBtn:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface, marginHorizontal: 16, marginBottom: 8, borderRadius: 14, paddingVertical: 12, borderWidth: 1, borderColor: colors.green + '40' },
+  saveContactBtnText: { color: colors.greenLight, fontSize: 14, fontWeight: '700' },
 
   section:            { paddingHorizontal: 16, marginTop: 8 },
-  sectionTitle:       { fontSize: 11, fontWeight: '700', color: '#64748B', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 },
-  noLogsText:         { fontSize: 12, color: '#475569', fontStyle: 'italic', marginTop: 6 },
+  sectionTitle:       { fontSize: 11, fontWeight: '700', color: colors.textSec, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 },
+  noLogsText:         { fontSize: 12, color: colors.textMuted, fontStyle: 'italic', marginTop: 6 },
 
-  loadLogsBtn:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#1E2236', borderRadius: 12, paddingVertical: 11, borderWidth: 1, borderColor: '#262A38' },
-  loadLogsBtnText:    { color: '#93C5FD', fontSize: 13, fontWeight: '600' },
+  loadLogsBtn:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceAlt, borderRadius: 12, paddingVertical: 11, borderWidth: 1, borderColor: colors.border },
+  loadLogsBtnText:    { color: colors.blueLight, fontSize: 13, fontWeight: '600' },
 
-  logRow:             { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#262A38' },
+  logRow:             { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border },
   logIcon:            { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
-  logType:            { fontSize: 13, fontWeight: '600', color: '#F0F2FA' },
-  logTime:            { fontSize: 11, color: '#565C75', marginTop: 2 },
-  logDuration:        { fontSize: 11, color: '#94A3B8' },
+  logType:            { fontSize: 13, fontWeight: '600', color: colors.textPrimary },
+  logTime:            { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  logDuration:        { fontSize: 11, color: colors.textSec },
 
-  historyCard:        { backgroundColor: '#1A1D27', borderRadius: 12, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: '#262A38' },
+  historyCard:        { backgroundColor: colors.surface, borderRadius: 12, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: colors.border },
   historyHeader:      { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
-  historyAgent:       { fontSize: 12, fontWeight: '700', color: '#93C5FD' },
-  historyDate:        { fontSize: 11, color: '#475569' },
-  historyOutcome:     { fontSize: 12, color: '#A78BFA', fontWeight: '600', marginBottom: 4 },
+  historyAgent:       { fontSize: 12, fontWeight: '700', color: colors.blueLight },
+  historyDate:        { fontSize: 11, color: colors.textMuted },
+  historyOutcome:     { fontSize: 12, color: colors.purpleLight, fontWeight: '600', marginBottom: 4 },
   aiHeaderRow:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  aiGenerateBtn:      { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#7C3AED', paddingVertical: 12, borderRadius: 12, marginTop: 4 },
+  aiGenerateBtn:      { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: colors.purple, paddingVertical: 12, borderRadius: 12, marginTop: 4 },
   aiGenerateBtnText:  { color: '#fff', fontSize: 13, fontWeight: '700' },
   aiLoadingBox:       { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 16, justifyContent: 'center' },
-  aiLoadingText:      { color: '#A78BFA', fontSize: 13, fontWeight: '600' },
+  aiLoadingText:      { color: colors.purpleLight, fontSize: 13, fontWeight: '600' },
   aiErrorBox:         { backgroundColor: '#2A1015', borderColor: '#7F1D1D', borderWidth: 1, borderRadius: 12, padding: 12, marginTop: 4 },
-  aiErrorText:        { color: '#FCA5A5', fontSize: 12, marginBottom: 6 },
-  aiRetryText:        { color: '#F87171', fontSize: 13, fontWeight: '700' },
+  aiErrorText:        { color: colors.redLight, fontSize: 12, marginBottom: 6 },
+  aiRetryText:        { color: colors.redLight, fontSize: 13, fontWeight: '700' },
   aiCard:             { backgroundColor: '#1A1530', borderColor: '#3B2F66', borderWidth: 1, borderRadius: 14, padding: 14, marginTop: 4 },
   aiSummaryText:      { color: '#E5E7EB', fontSize: 14, lineHeight: 20 },
   aiNextBox:          { backgroundColor: '#231A45', borderRadius: 10, padding: 10, marginTop: 12 },
-  aiNextLabel:        { color: '#A78BFA', fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 4 },
+  aiNextLabel:        { color: colors.purpleLight, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 4 },
   aiNextText:         { color: '#F0EDFF', fontSize: 13, fontWeight: '600', lineHeight: 19 },
-  aiKeyPoint:         { color: '#C4B5FD', fontSize: 12.5, lineHeight: 19 },
+  aiKeyPoint:         { color: colors.purpleLight, fontSize: 12.5, lineHeight: 19 },
   aiMetaRow:          { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginTop: 12 },
-  aiMetaChip:         { backgroundColor: '#2D2A55', color: '#C4B5FD', fontSize: 11, fontWeight: '700', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, overflow: 'hidden' },
+  aiMetaChip:         { backgroundColor: '#2D2A55', color: colors.purpleLight, fontSize: 11, fontWeight: '700', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, overflow: 'hidden' },
   aiBasedOn:          { color: '#6B7280', fontSize: 10, marginLeft: 'auto' },
-  historyRemark:      { fontSize: 13, color: '#CBD5E1', lineHeight: 18 },
+  historyRemark:      { fontSize: 13, color: colors.textPrimary, lineHeight: 18 },
 
-  notFound:           { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0D0F14' },
-  notFoundText:       { color: '#475569', fontSize: 16, marginTop: 14, marginBottom: 14 },
-  backLink:           { color: '#60A5FA', fontSize: 14, fontWeight: '600' },
+  notFound:           { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.bg },
+  notFoundText:       { color: colors.textMuted, fontSize: 16, marginTop: 14, marginBottom: 14 },
+  backLink:           { color: colors.blueLight, fontSize: 14, fontWeight: '600' },
 
   modalOverlay:       { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   modalDismissArea:   { flex: 1 },
   modalScroll:        { maxHeight: '90%', flexGrow: 0 },
-  modalCard:          { backgroundColor: '#1A1D27', padding: 20, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, borderColor: '#262A38', paddingBottom: 36 },
+  modalCard:          { backgroundColor: colors.surface, padding: 20, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, borderColor: colors.border, paddingBottom: 36 },
   modalHeader:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
-  modalTitle:         { fontSize: 17, fontWeight: '800', color: '#F0F2FA' },
-  modalLabel:         { fontSize: 12, color: '#94A3B8', fontWeight: '600', marginBottom: 8, textTransform: 'uppercase' },
-  optionalTag:        { fontSize: 11, color: '#64748B', fontWeight: '400', textTransform: 'none' },
+  modalTitle:         { fontSize: 17, fontWeight: '800', color: colors.textPrimary },
+  modalLabel:         { fontSize: 12, color: colors.textSec, fontWeight: '600', marginBottom: 8, textTransform: 'uppercase' },
+  optionalTag:        { fontSize: 11, color: colors.textSec, fontWeight: '400', textTransform: 'none' },
   outcomeRow:         { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 16 },
-  alreadyInterestedNote: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8, backgroundColor: '#0E2A1E', borderWidth: 1, borderColor: '#34D39940', marginBottom: 10 },
-  alreadyInterestedText: { fontSize: 11, color: '#34D399', fontWeight: '600', flex: 1 },
-  outcomeChip:        { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, backgroundColor: '#0F172A', borderWidth: 1, borderColor: '#262A38' },
-  outcomeChipActive:  { backgroundColor: '#1E40AF20', borderColor: '#3B82F6' },
-  outcomeChipText:    { fontSize: 12, color: '#94A3B8', fontWeight: '600' },
-  outcomeChipTextActive: { color: '#93C5FD' },
-  remarkInput:        { backgroundColor: '#0F172A', borderRadius: 10, padding: 12, color: '#F0F2FA', minHeight: 100, textAlignVertical: 'top', borderWidth: 1, borderColor: '#262A38', marginBottom: 16 },
-  submitBtn:          { backgroundColor: '#2563EB', borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
+  alreadyInterestedNote: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8, backgroundColor: '#0E2A1E', borderWidth: 1, borderColor: colors.greenLight + '40', marginBottom: 10 },
+  alreadyInterestedText: { fontSize: 11, color: colors.greenLight, fontWeight: '600', flex: 1 },
+  outcomeChip:        { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  outcomeChipActive:  { backgroundColor: colors.blue + '20', borderColor: colors.blue },
+  outcomeChipText:    { fontSize: 12, color: colors.textSec, fontWeight: '600' },
+  outcomeChipTextActive: { color: colors.blueLight },
+  remarkInput:        { backgroundColor: colors.surface, borderRadius: 10, padding: 12, color: colors.textPrimary, minHeight: 100, textAlignVertical: 'top', borderWidth: 1, borderColor: colors.border, marginBottom: 16 },
+  submitBtn:          { backgroundColor: colors.blue, borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
   submitBtnDisabled:  { opacity: 0.6 },
   submitBtnText:      { color: '#fff', fontSize: 14, fontWeight: '700' },
 
   // Follow-up date picker styles
   followUpRow:        { marginBottom: 16 },
   meetingTypeBlock:   { marginBottom: 4 },
-  followUpSet:        { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0F172A', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#34D39940' },
-  followUpDateText:   { flex: 1, fontSize: 13, color: '#34D399', fontWeight: '600' },
+  followUpSet:        { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: colors.greenLight + '40' },
+  followUpDateText:   { flex: 1, fontSize: 13, color: colors.greenLight, fontWeight: '600' },
   clearDateBtn:       { padding: 2 },
-  setDateBtn:         { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0F172A', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#262A38' },
-  setDateBtnText:     { fontSize: 13, color: '#93C5FD', fontWeight: '600' },
-  iosPickerWrapper:   { backgroundColor: '#0F172A', borderRadius: 12, marginBottom: 12, overflow: 'hidden', borderWidth: 1, borderColor: '#262A38' },
-  iosDoneBtn:         { alignItems: 'center', paddingVertical: 12, borderTopWidth: 1, borderTopColor: '#262A38' },
-  iosDoneBtnText:     { color: '#3B82F6', fontSize: 15, fontWeight: '700' },
+  setDateBtn:         { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderRadius: 10, padding: 12, borderWidth: 1, borderColor: colors.border },
+  setDateBtnText:     { fontSize: 13, color: colors.blueLight, fontWeight: '600' },
+  iosPickerWrapper:   { backgroundColor: colors.surface, borderRadius: 12, marginBottom: 12, overflow: 'hidden', borderWidth: 1, borderColor: colors.border },
+  iosDoneBtn:         { alignItems: 'center', paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.border },
+  iosDoneBtnText:     { color: colors.blue, fontSize: 15, fontWeight: '700' },
 
   // Attachment styles
   attachRow:          { marginBottom: 10 },
   attachLabelRow:     { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
-  attachTypeLabel:    { fontSize: 12, color: '#94A3B8', fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.4 },
-  attachPickBtn:      { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0F172A', borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#262A38' },
-  attachPickBtnText:  { fontSize: 13, color: '#93C5FD', fontWeight: '600' },
-  attachHint:         { fontSize: 11, color: '#475569' },
-  attachChip:         { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0F172A', borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#1E3A5F' },
-  attachChipName:     { flex: 1, fontSize: 12, color: '#CBD5E1', fontWeight: '500' },
-  attachChipSize:     { fontSize: 11, color: '#475569' },
+  attachTypeLabel:    { fontSize: 12, color: colors.textSec, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.4 },
+  attachPickBtn:      { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: colors.border },
+  attachPickBtnText:  { fontSize: 13, color: colors.blueLight, fontWeight: '600' },
+  attachHint:         { fontSize: 11, color: colors.textMuted },
+  attachChip:         { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#1E3A5F' },
+  attachChipName:     { flex: 1, fontSize: 12, color: colors.textPrimary, fontWeight: '500' },
+  attachChipSize:     { fontSize: 11, color: colors.textMuted },
   attachRemoveBtn:    { marginLeft: 6, padding: 2 },
 
   // Pure-JS date/time picker styles (replaces native DateTimePickerAndroid)
-  jsPickerWrapper:     { backgroundColor: '#0F172A', borderRadius: 12, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: '#334155' },
-  jsPickerTitle:       { fontSize: 12, fontWeight: '700', color: '#94A3B8', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14, textAlign: 'center' },
+  jsPickerWrapper:     { backgroundColor: colors.surface, borderRadius: 12, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: colors.textMuted },
+  jsPickerTitle:       { fontSize: 12, fontWeight: '700', color: colors.textSec, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14, textAlign: 'center' },
   jsPickerRow:         { flexDirection: 'row', gap: 8, marginBottom: 10 },
   jsPickerField:       { flex: 1 },
-  jsPickerLabel:       { fontSize: 10, color: '#64748B', fontWeight: '600', textTransform: 'uppercase', marginBottom: 4, textAlign: 'center' },
-  jsPickerInput:       { backgroundColor: '#1A1D27', borderRadius: 8, borderWidth: 1, borderColor: '#334155', color: '#F0F2FA', fontSize: 16, fontWeight: '700', textAlign: 'center', paddingVertical: 10 },
+  jsPickerLabel:       { fontSize: 10, color: colors.textSec, fontWeight: '600', textTransform: 'uppercase', marginBottom: 4, textAlign: 'center' },
+  jsPickerInput:       { backgroundColor: colors.surface, borderRadius: 8, borderWidth: 1, borderColor: colors.textMuted, color: colors.textPrimary, fontSize: 16, fontWeight: '700', textAlign: 'center', paddingVertical: 10 },
   jsPickerActions:     { flexDirection: 'row', gap: 10, marginTop: 6 },
-  jsPickerCancel:      { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, backgroundColor: '#1A1D27', borderWidth: 1, borderColor: '#334155' },
-  jsPickerCancelText:  { color: '#94A3B8', fontSize: 14, fontWeight: '600' },
-  jsPickerConfirm:     { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, backgroundColor: '#2563EB' },
+  jsPickerCancel:      { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.textMuted },
+  jsPickerCancelText:  { color: colors.textSec, fontSize: 14, fontWeight: '600' },
+  jsPickerConfirm:     { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, backgroundColor: colors.blue },
   jsPickerConfirmText: { color: '#fff', fontSize: 14, fontWeight: '700' },
 });
+}

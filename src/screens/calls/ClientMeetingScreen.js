@@ -31,6 +31,7 @@ import Icon                       from 'react-native-vector-icons/MaterialCommun
 import AsyncStorage               from '@react-native-async-storage/async-storage';
 import { BASE_URL }               from '../../config/config';
 import { requestLocationPermission } from '../../services/permissionsService';
+import { useTheme } from '../../theme/ThemeContext';
 import {
   scheduleMeetingFollowUp,
   checkAndScheduleMeetingFollowUps,
@@ -45,14 +46,22 @@ const VISIT_TYPES = [
   { id: 'Phone Call', icon: 'phone-outline',        label: 'Phone Call' },
 ];
 
-const OUTCOMES = [
-  { id: 'Interested',         color: '#34D399', icon: 'thumb-up-outline'    },
-  { id: 'Follow-Up Required', color: '#F59E0B', icon: 'calendar-clock'      },
-  { id: 'Converted',          color: '#10B981', icon: 'check-decagram'      },
-  { id: 'Pending Decision',   color: '#93C5FD', icon: 'clock-outline'       },
-  { id: 'Not Interested',     color: '#EF4444', icon: 'thumb-down-outline'  },
-  { id: 'No Show',            color: '#64748B', icon: 'account-off-outline' },
-];
+// NOTE: OUTCOMES depends on theme `colors`, which only exists at runtime via
+// useTheme() inside a component. Defining it at module scope referenced the
+// undefined `colors` identifier and crashed the whole app on load
+// ("ReferenceError: Property 'colors' doesn't exist" on Hermes). It is now a
+// factory that receives colors, matching the getStatusCfg(colors) pattern used
+// elsewhere. Callers build it inside the component with useMemo.
+function getOutcomes(colors) {
+  return [
+    { id: 'Interested',         color: colors.greenLight, icon: 'thumb-up-outline'    },
+    { id: 'Follow-Up Required', color: colors.amber,      icon: 'calendar-clock'      },
+    { id: 'Converted',          color: colors.green,      icon: 'check-decagram'      },
+    { id: 'Pending Decision',   color: colors.blueLight,  icon: 'clock-outline'       },
+    { id: 'Not Interested',     color: colors.red,        icon: 'thumb-down-outline'  },
+    { id: 'No Show',            color: colors.textSec,    icon: 'account-off-outline' },
+  ];
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 // NOTE: Date.prototype.toLocaleString(locale, options) relies on the JS
@@ -152,8 +161,12 @@ async function fetchMeetingRemarks(leadId) {
 
 // ── Past Meeting Card ─────────────────────────────────────────────────────────
 function PastMeetingCard({ item }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const OUTCOMES = useMemo(() => getOutcomes(colors), [colors]);
+
   const outcome = OUTCOMES.find(o => o.id === item.outcome);
-  const color   = outcome?.color || '#94A3B8';
+  const color   = outcome?.color || colors.textSec;
   const visitType = VISIT_TYPES.find(v => v.id === item.meetingType);
 
   return (
@@ -163,7 +176,7 @@ function PastMeetingCard({ item }) {
           <Icon
             name={visitType?.icon || 'calendar-check'}
             size={13}
-            color="#64748B"
+            color={colors.textSec}
             style={{ marginRight: 5 }}
           />
           <Text style={styles.histType}>{item.meetingType || 'Meeting'}</Text>
@@ -179,19 +192,19 @@ function PastMeetingCard({ item }) {
       ) : null}
 
       {item.remark ? (
-        <Text style={styles.histRemark} numberOfLines={2}>{item.remark}</Text>
+        <Text style={styles.histRemark}>{item.remark}</Text>
       ) : null}
 
       <View style={styles.histFooter}>
         {item.location ? (
           <View style={styles.histLocationRow}>
-            <Icon name="map-marker-outline" size={11} color="#475569" style={{ marginRight: 3 }} />
+            <Icon name="map-marker-outline" size={11} color={colors.textMuted} style={{ marginRight: 3 }} />
             <Text style={styles.histLocationText} numberOfLines={1}>{item.location}</Text>
           </View>
         ) : null}
         {item.followUpDate ? (
           <View style={styles.histFollowRow}>
-            <Icon name="calendar-arrow-right" size={11} color="#F59E0B" style={{ marginRight: 3 }} />
+            <Icon name="calendar-arrow-right" size={11} color={colors.amber} style={{ marginRight: 3 }} />
             <Text style={styles.histFollowText}>{formatDateShort(item.followUpDate)}</Text>
           </View>
         ) : null}
@@ -207,6 +220,9 @@ function PastMeetingCard({ item }) {
 export default function ClientMeetingScreen() {
   const navigation = useNavigation();
   const leads      = useSelector(s => s.leads.items);
+  const { dark, colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const OUTCOMES = useMemo(() => getOutcomes(colors), [colors]);
 
   // ── Lead search ─────────────────────────────────────────────────────────────
   const [leadSearch,     setLeadSearch]     = useState('');
@@ -494,12 +510,12 @@ export default function ClientMeetingScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   return (
     <View style={styles.root}>
-      <StatusBar barStyle="light-content" backgroundColor="#0B1120" />
+      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} backgroundColor={colors.surface} />
 
       {/* ── Header ── */}
       <View style={styles.header}>
         <View style={styles.headerIconWrap}>
-          <Icon name="map-marker-check" size={20} color="#34D399" />
+          <Icon name="map-marker-check" size={20} color={colors.greenLight} />
         </View>
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Client Visit Log</Text>
@@ -519,7 +535,7 @@ export default function ClientMeetingScreen() {
 
           {/* ── Lead Selector ──────────────────────────────────────────────── */}
           <Text style={styles.sectionTitle}>
-            <Icon name="account-outline" size={13} color="#64748B" />  CLIENT  *
+            <Icon name="account-outline" size={13} color={colors.textSec} />  CLIENT  *
           </Text>
 
           <TouchableOpacity
@@ -538,13 +554,13 @@ export default function ClientMeetingScreen() {
                   <Text style={styles.leadBtnName}>{selectedLead.name}</Text>
                   <Text style={styles.leadBtnPhone}>{selectedLead.mobile}</Text>
                 </View>
-                <Icon name={showPicker ? 'chevron-up' : 'chevron-down'} size={16} color="#34D399" />
+                <Icon name={showPicker ? 'chevron-up' : 'chevron-down'} size={16} color={colors.greenLight} />
               </View>
             ) : (
               <View style={styles.leadBtnInner}>
-                <Icon name="account-search-outline" size={18} color="#475569" style={{ marginRight: 10 }} />
+                <Icon name="account-search-outline" size={18} color={colors.textMuted} style={{ marginRight: 10 }} />
                 <Text style={styles.leadBtnPlaceholder}>Search and select a client…</Text>
-                <Icon name="chevron-down" size={16} color="#475569" />
+                <Icon name="chevron-down" size={16} color={colors.textMuted} />
               </View>
             )}
           </TouchableOpacity>
@@ -552,18 +568,18 @@ export default function ClientMeetingScreen() {
           {showPicker && (
             <View style={styles.leadDropdown}>
               <View style={styles.leadSearchBar}>
-                <Icon name="magnify" size={16} color="#475569" style={{ marginRight: 8 }} />
+                <Icon name="magnify" size={16} color={colors.textMuted} style={{ marginRight: 8 }} />
                 <TextInput
                   style={styles.leadSearchInput}
                   placeholder="Name or phone…"
-                  placeholderTextColor="#334155"
+                  placeholderTextColor={colors.textMuted}
                   value={leadSearch}
                   onChangeText={setLeadSearch}
                   autoFocus
                 />
                 {leadSearch.length > 0 && (
                   <TouchableOpacity onPress={() => setLeadSearch('')}>
-                    <Icon name="close-circle" size={16} color="#475569" />
+                    <Icon name="close-circle" size={16} color={colors.textMuted} />
                   </TouchableOpacity>
                 )}
               </View>
@@ -578,7 +594,7 @@ export default function ClientMeetingScreen() {
                   >
                     <View style={[styles.leadOptionDot, selectedLeadId === l.id && styles.leadOptionDotActive]} />
                     <View style={{ flex: 1 }}>
-                      <Text style={[styles.leadOptionName, selectedLeadId === l.id && { color: '#34D399' }]}>
+                      <Text style={[styles.leadOptionName, selectedLeadId === l.id && { color: colors.greenLight }]}>
                         {l.name}
                       </Text>
                       <Text style={styles.leadOptionPhone}>{l.mobile}</Text>
@@ -591,7 +607,7 @@ export default function ClientMeetingScreen() {
 
           {/* ── Visit Type ─────────────────────────────────────────────────── */}
           <Text style={styles.sectionTitle}>
-            <Icon name="briefcase-outline" size={13} color="#64748B" />  VISIT TYPE
+            <Icon name="briefcase-outline" size={13} color={colors.textSec} />  VISIT TYPE
           </Text>
           <ScrollView
             horizontal
@@ -607,7 +623,7 @@ export default function ClientMeetingScreen() {
                 <Icon
                   name={vt.icon}
                   size={14}
-                  color={visitType === vt.id ? '#34D399' : '#64748B'}
+                  color={visitType === vt.id ? colors.greenLight : colors.textSec}
                   style={{ marginRight: 5 }}
                 />
                 <Text style={[styles.visitTypeText, visitType === vt.id && styles.visitTypeTextActive]}>
@@ -619,14 +635,14 @@ export default function ClientMeetingScreen() {
 
           {/* ── Location Check-In ──────────────────────────────────────────── */}
           <Text style={styles.sectionTitle}>
-            <Icon name="map-marker-outline" size={13} color="#64748B" />  LOCATION  <Text style={styles.optTag}>(optional)</Text>
+            <Icon name="map-marker-outline" size={13} color={colors.textSec} />  LOCATION  <Text style={styles.optTag}>(optional)</Text>
           </Text>
 
           <View style={styles.locationRow}>
             <TextInput
               style={styles.locationInput}
               placeholder="Type location or tap Check-In…"
-              placeholderTextColor="#334155"
+              placeholderTextColor={colors.textMuted}
               value={location}
               onChangeText={setLocation}
               multiline={false}
@@ -637,8 +653,8 @@ export default function ClientMeetingScreen() {
               disabled={fetchingGPS}
             >
               {fetchingGPS
-                ? <ActivityIndicator color="#34D399" size="small" />
-                : <><Icon name="crosshairs-gps" size={14} color="#34D399" style={{ marginRight: 5 }} />
+                ? <ActivityIndicator color={colors.greenLight} size="small" />
+                : <><Icon name="crosshairs-gps" size={14} color={colors.greenLight} style={{ marginRight: 5 }} />
                     <Text style={styles.checkInBtnText}>Check-In</Text></>
               }
             </TouchableOpacity>
@@ -646,7 +662,7 @@ export default function ClientMeetingScreen() {
 
           {/* ── Outcome ────────────────────────────────────────────────────── */}
           <Text style={styles.sectionTitle}>
-            <Icon name="flag-checkered" size={13} color="#64748B" />  VISIT OUTCOME  *
+            <Icon name="flag-checkered" size={13} color={colors.textSec} />  VISIT OUTCOME  *
           </Text>
 
           <View style={styles.outcomeGrid}>
@@ -662,7 +678,7 @@ export default function ClientMeetingScreen() {
                 <Icon
                   name={o.icon}
                   size={16}
-                  color={outcome === o.id ? o.color : '#334155'}
+                  color={outcome === o.id ? o.color : colors.textMuted}
                   style={{ marginBottom: 4 }}
                 />
                 <Text style={[
@@ -677,13 +693,13 @@ export default function ClientMeetingScreen() {
 
           {/* ── Meeting Notes ──────────────────────────────────────────────── */}
           <Text style={styles.sectionTitle}>
-            <Icon name="note-edit-outline" size={13} color="#64748B" />  MEETING NOTES  *
+            <Icon name="note-edit-outline" size={13} color={colors.textSec} />  MEETING NOTES  *
           </Text>
 
           <TextInput
             style={styles.notesInput}
             placeholder="What was discussed? Key points, decisions, next steps…"
-            placeholderTextColor="#334155"
+            placeholderTextColor={colors.textMuted}
             multiline
             value={notes}
             onChangeText={setNotes}
@@ -692,7 +708,7 @@ export default function ClientMeetingScreen() {
 
           {/* ── Upload Media ───────────────────────────────────────────────── */}
           <Text style={styles.sectionTitle}>
-            <Icon name="paperclip" size={13} color="#64748B" />  UPLOAD MEDIA  <Text style={styles.optTag}>(optional)</Text>
+            <Icon name="paperclip" size={13} color={colors.textSec} />  UPLOAD MEDIA  <Text style={styles.optTag}>(optional)</Text>
           </Text>
 
           {mediaFile ? (
@@ -700,37 +716,37 @@ export default function ClientMeetingScreen() {
               <Icon
                 name={mediaFile.type?.startsWith('image') ? 'image' : mediaFile.type?.startsWith('audio') ? 'music-note' : 'file-document-outline'}
                 size={16}
-                color="#34D399"
+                color={colors.greenLight}
                 style={{ marginRight: 8 }}
               />
               <Text style={styles.followUpSetText} numberOfLines={1}>{mediaFile.name}</Text>
               <TouchableOpacity onPress={() => setMediaFile(null)} style={styles.clearFollowUp}>
-                <Icon name="close-circle" size={18} color="#EF4444" />
+                <Icon name="close-circle" size={18} color={colors.red} />
               </TouchableOpacity>
             </View>
           ) : (
             <TouchableOpacity style={styles.followUpBtn} onPress={pickMedia}>
-              <Icon name="upload" size={16} color="#93C5FD" style={{ marginRight: 8 }} />
+              <Icon name="upload" size={16} color={colors.blueLight} style={{ marginRight: 8 }} />
               <Text style={styles.followUpBtnText}>Attach Photo, Document or Recording</Text>
             </TouchableOpacity>
           )}
 
           {/* ── Follow-Up Date ─────────────────────────────────────────────── */}
           <Text style={styles.sectionTitle}>
-            <Icon name="calendar-arrow-right" size={13} color="#64748B" />  FOLLOW-UP DATE  <Text style={styles.optTag}>(optional)</Text>
+            <Icon name="calendar-arrow-right" size={13} color={colors.textSec} />  FOLLOW-UP DATE  <Text style={styles.optTag}>(optional)</Text>
           </Text>
 
           {followUpDate ? (
             <View style={styles.followUpSet}>
-              <Icon name="calendar-check" size={16} color="#34D399" style={{ marginRight: 8 }} />
+              <Icon name="calendar-check" size={16} color={colors.greenLight} style={{ marginRight: 8 }} />
               <Text style={styles.followUpSetText}>{formatDateTime(followUpDate)}</Text>
               <TouchableOpacity onPress={clearFollowUp} style={styles.clearFollowUp}>
-                <Icon name="close-circle" size={18} color="#EF4444" />
+                <Icon name="close-circle" size={18} color={colors.red} />
               </TouchableOpacity>
             </View>
           ) : (
             <TouchableOpacity style={styles.followUpBtn} onPress={openDatePicker}>
-              <Icon name="calendar-plus" size={16} color="#93C5FD" style={{ marginRight: 8 }} />
+              <Icon name="calendar-plus" size={16} color={colors.blueLight} style={{ marginRight: 8 }} />
               <Text style={styles.followUpBtnText}>Schedule Follow-Up</Text>
             </TouchableOpacity>
           )}
@@ -769,7 +785,7 @@ export default function ClientMeetingScreen() {
           {selectedLeadId ? (
             <View style={styles.histSection}>
               <View style={styles.histHeader}>
-                <Icon name="history" size={14} color="#334155" style={{ marginRight: 6 }} />
+                <Icon name="history" size={14} color={colors.textMuted} style={{ marginRight: 6 }} />
                 <Text style={styles.histHeaderText}>
                   Visit History
                   {pastMeetings.length > 0 ? `  ·  ${pastMeetings.length}` : ''}
@@ -777,10 +793,10 @@ export default function ClientMeetingScreen() {
               </View>
 
               {loadingPast ? (
-                <ActivityIndicator color="#2563EB" style={{ marginVertical: 20 }} />
+                <ActivityIndicator color={colors.blue} style={{ marginVertical: 20 }} />
               ) : pastMeetings.length === 0 ? (
                 <View style={styles.histEmpty}>
-                  <Icon name="calendar-blank-outline" size={36} color="#1E293B" />
+                  <Icon name="calendar-blank-outline" size={36} color={colors.textMuted} />
                   <Text style={styles.histEmptyText}>No visits logged for this client yet</Text>
                 </View>
               ) : (
@@ -798,111 +814,113 @@ export default function ClientMeetingScreen() {
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
-const styles = StyleSheet.create({
+function createStyles(colors) {
+return StyleSheet.create({
   // ── Pure-JS follow-up date picker ──
-  jsPickerWrapper:     { backgroundColor: '#0F172A', borderRadius: 12, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: '#334155' },
-  jsPickerTitle:       { fontSize: 12, fontWeight: '700', color: '#94A3B8', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14, textAlign: 'center' },
+  jsPickerWrapper:     { backgroundColor: colors.surface, borderRadius: 12, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: colors.textMuted },
+  jsPickerTitle:       { fontSize: 12, fontWeight: '700', color: colors.textSec, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 14, textAlign: 'center' },
   jsPickerRow:         { flexDirection: 'row', gap: 8, marginBottom: 10 },
   jsPickerField:       { flex: 1 },
-  jsPickerLabel:       { fontSize: 10, color: '#64748B', fontWeight: '600', textTransform: 'uppercase', marginBottom: 4, textAlign: 'center' },
-  jsPickerInput:       { backgroundColor: '#1A1D27', borderRadius: 8, borderWidth: 1, borderColor: '#334155', color: '#F0F2FA', fontSize: 16, fontWeight: '700', textAlign: 'center', paddingVertical: 10 },
+  jsPickerLabel:       { fontSize: 10, color: colors.textSec, fontWeight: '600', textTransform: 'uppercase', marginBottom: 4, textAlign: 'center' },
+  jsPickerInput:       { backgroundColor: colors.surface, borderRadius: 8, borderWidth: 1, borderColor: colors.textMuted, color: colors.textPrimary, fontSize: 16, fontWeight: '700', textAlign: 'center', paddingVertical: 10 },
   jsPickerActions:     { flexDirection: 'row', gap: 10, marginTop: 6 },
-  jsPickerCancel:      { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, backgroundColor: '#1A1D27', borderWidth: 1, borderColor: '#334155' },
-  jsPickerCancelText:  { color: '#94A3B8', fontSize: 14, fontWeight: '600' },
-  jsPickerConfirm:     { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, backgroundColor: '#2563EB' },
+  jsPickerCancel:      { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.textMuted },
+  jsPickerCancelText:  { color: colors.textSec, fontSize: 14, fontWeight: '600' },
+  jsPickerConfirm:     { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, backgroundColor: colors.blue },
   jsPickerConfirmText: { color: '#fff', fontSize: 14, fontWeight: '700' },
-  root:               { flex: 1, backgroundColor: '#080E1A' },
+  root:               { flex: 1, backgroundColor: colors.bg },
 
   // Header
-  header:             { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, paddingTop: 52, paddingBottom: 16, backgroundColor: '#0B1120', borderBottomWidth: 1, borderBottomColor: '#1E2A3A', gap: 12 },
-  headerIconWrap:     { width: 40, height: 40, borderRadius: 20, backgroundColor: '#34D39918', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#34D39930' },
-  headerTitle:        { fontSize: 18, fontWeight: '800', color: '#F0F2FA', letterSpacing: 0.2 },
-  headerSub:          { fontSize: 11, color: '#334155', marginTop: 2 },
+  header:             { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, paddingTop: 52, paddingBottom: 16, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border, gap: 12 },
+  headerIconWrap:     { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.greenLight + '18', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.greenLight + '30' },
+  headerTitle:        { fontSize: 18, fontWeight: '800', color: colors.textPrimary, letterSpacing: 0.2 },
+  headerSub:          { fontSize: 11, color: colors.textMuted, marginTop: 2 },
 
   // Scroll
   scrollContent:      { padding: 16, paddingBottom: 60 },
 
   // Section titles
-  sectionTitle:       { fontSize: 10, fontWeight: '800', color: '#334155', letterSpacing: 1.2, marginBottom: 8, marginTop: 20 },
-  optTag:             { fontSize: 10, fontWeight: '400', color: '#1E293B', letterSpacing: 0 },
+  sectionTitle:       { fontSize: 10, fontWeight: '800', color: colors.textMuted, letterSpacing: 1.2, marginBottom: 8, marginTop: 20 },
+  optTag:             { fontSize: 10, fontWeight: '400', color: colors.textMuted, letterSpacing: 0 },
 
   // Lead selector
-  leadBtn:            { backgroundColor: '#0D1828', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#1E2A3A' },
-  leadBtnSelected:    { borderColor: '#34D39940', backgroundColor: '#0D1F2E' },
+  leadBtn:            { backgroundColor: colors.surfaceAlt, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: colors.border },
+  leadBtnSelected:    { borderColor: colors.greenLight + '40', backgroundColor: colors.greenBg },
   leadBtnInner:       { flexDirection: 'row', alignItems: 'center' },
-  leadAvatar:         { width: 36, height: 36, borderRadius: 18, backgroundColor: '#34D39918', alignItems: 'center', justifyContent: 'center', marginRight: 10, borderWidth: 1, borderColor: '#34D39930' },
-  leadAvatarText:     { fontSize: 15, fontWeight: '800', color: '#34D399' },
-  leadBtnName:        { fontSize: 14, fontWeight: '700', color: '#F0F2FA' },
-  leadBtnPhone:       { fontSize: 11, color: '#475569', marginTop: 2 },
-  leadBtnPlaceholder: { flex: 1, fontSize: 13, color: '#334155' },
+  leadAvatar:         { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.greenLight + '18', alignItems: 'center', justifyContent: 'center', marginRight: 10, borderWidth: 1, borderColor: colors.greenLight + '30' },
+  leadAvatarText:     { fontSize: 15, fontWeight: '800', color: colors.greenLight },
+  leadBtnName:        { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
+  leadBtnPhone:       { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  leadBtnPlaceholder: { flex: 1, fontSize: 13, color: colors.textMuted },
 
-  leadDropdown:       { marginTop: 6, backgroundColor: '#0D1828', borderRadius: 12, borderWidth: 1, borderColor: '#1E2A3A', overflow: 'hidden', maxHeight: 280 },
-  leadSearchBar:      { flexDirection: 'row', alignItems: 'center', padding: 10, borderBottomWidth: 1, borderBottomColor: '#1E2A3A' },
-  leadSearchInput:    { flex: 1, color: '#F0F2FA', fontSize: 13, padding: 0 },
-  leadEmptyText:      { padding: 16, color: '#334155', textAlign: 'center', fontSize: 13 },
-  leadOption:         { flexDirection: 'row', alignItems: 'center', padding: 12, borderBottomWidth: 1, borderBottomColor: '#0F1A2A', gap: 10 },
-  leadOptionActive:   { backgroundColor: '#0D2040' },
-  leadOptionDot:      { width: 8, height: 8, borderRadius: 4, backgroundColor: '#1E2A3A' },
-  leadOptionDotActive:{ backgroundColor: '#34D399' },
-  leadOptionName:     { fontSize: 13, fontWeight: '600', color: '#CBD5E1' },
-  leadOptionPhone:    { fontSize: 11, color: '#334155', marginTop: 2 },
+  leadDropdown:       { marginTop: 6, backgroundColor: colors.surfaceAlt, borderRadius: 12, borderWidth: 1, borderColor: colors.border, overflow: 'hidden', maxHeight: 280 },
+  leadSearchBar:      { flexDirection: 'row', alignItems: 'center', padding: 10, borderBottomWidth: 1, borderBottomColor: colors.border },
+  leadSearchInput:    { flex: 1, color: colors.textPrimary, fontSize: 13, padding: 0 },
+  leadEmptyText:      { padding: 16, color: colors.textMuted, textAlign: 'center', fontSize: 13 },
+  leadOption:         { flexDirection: 'row', alignItems: 'center', padding: 12, borderBottomWidth: 1, borderBottomColor: colors.border, gap: 10 },
+  leadOptionActive:   { backgroundColor: colors.blueBg },
+  leadOptionDot:      { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.border },
+  leadOptionDotActive:{ backgroundColor: colors.greenLight },
+  leadOptionName:     { fontSize: 13, fontWeight: '600', color: colors.textPrimary },
+  leadOptionPhone:    { fontSize: 11, color: colors.textMuted, marginTop: 2 },
 
   // Visit type
   visitTypeRow:       { gap: 8, paddingBottom: 4 },
-  visitTypeChip:      { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 20, backgroundColor: '#0D1828', borderWidth: 1, borderColor: '#1E2A3A' },
-  visitTypeChipActive:{ backgroundColor: '#34D39910', borderColor: '#34D39950' },
-  visitTypeText:      { fontSize: 12, color: '#475569', fontWeight: '600' },
-  visitTypeTextActive:{ color: '#34D399' },
+  visitTypeChip:      { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 20, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  visitTypeChipActive:{ backgroundColor: colors.greenLight + '10', borderColor: colors.greenLight + '50' },
+  visitTypeText:      { fontSize: 12, color: colors.textMuted, fontWeight: '600' },
+  visitTypeTextActive:{ color: colors.greenLight },
 
   // Location
   locationRow:        { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  locationInput:      { flex: 1, backgroundColor: '#0D1828', borderRadius: 10, padding: 12, color: '#F0F2FA', fontSize: 13, borderWidth: 1, borderColor: '#1E2A3A' },
-  checkInBtn:         { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 12, borderRadius: 10, backgroundColor: '#34D39910', borderWidth: 1, borderColor: '#34D39940' },
+  locationInput:      { flex: 1, backgroundColor: colors.surfaceAlt, borderRadius: 10, padding: 12, color: colors.textPrimary, fontSize: 13, borderWidth: 1, borderColor: colors.border },
+  checkInBtn:         { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 12, borderRadius: 10, backgroundColor: colors.greenLight + '10', borderWidth: 1, borderColor: colors.greenLight + '40' },
   checkInBtnLoading:  { opacity: 0.6 },
-  checkInBtnText:     { fontSize: 12, fontWeight: '700', color: '#34D399' },
+  checkInBtnText:     { fontSize: 12, fontWeight: '700', color: colors.greenLight },
 
   // Outcome grid
   outcomeGrid:        { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  outcomeCard:        { width: '30.5%', paddingVertical: 12, borderRadius: 12, backgroundColor: '#0D1828', borderWidth: 1, borderColor: '#1E2A3A', alignItems: 'center' },
-  outcomeCardText:    { fontSize: 11, fontWeight: '600', color: '#334155', textAlign: 'center', lineHeight: 14, marginTop: 2 },
+  outcomeCard:        { width: '30.5%', paddingVertical: 12, borderRadius: 12, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border, alignItems: 'center' },
+  outcomeCardText:    { fontSize: 11, fontWeight: '600', color: colors.textMuted, textAlign: 'center', lineHeight: 14, marginTop: 2 },
 
   // Notes
-  notesInput:         { backgroundColor: '#0D1828', borderRadius: 12, padding: 14, color: '#F0F2FA', minHeight: 120, borderWidth: 1, borderColor: '#1E2A3A', fontSize: 13, lineHeight: 21 },
+  notesInput:         { backgroundColor: colors.surfaceAlt, borderRadius: 12, padding: 14, color: colors.textPrimary, minHeight: 120, borderWidth: 1, borderColor: colors.border, fontSize: 13, lineHeight: 21 },
 
   // Follow-up
-  followUpSet:        { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0D1828', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#34D39940' },
-  followUpSetText:    { flex: 1, color: '#34D399', fontSize: 13, fontWeight: '700' },
+  followUpSet:        { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceAlt, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: colors.greenLight + '40' },
+  followUpSetText:    { flex: 1, color: colors.greenLight, fontSize: 13, fontWeight: '700' },
   clearFollowUp:      { padding: 2 },
-  followUpBtn:        { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0D1828', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#1E2A3A' },
-  followUpBtnText:    { color: '#93C5FD', fontSize: 13, fontWeight: '700' },
-  iosPickerBox:       { backgroundColor: '#0B1120', borderRadius: 12, marginTop: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#1E2A3A' },
-  iosDoneBtn:         { alignItems: 'center', paddingVertical: 12, borderTopWidth: 1, borderTopColor: '#1E2A3A' },
-  iosDoneBtnText:     { color: '#34D399', fontSize: 15, fontWeight: '700' },
+  followUpBtn:        { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceAlt, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: colors.border },
+  followUpBtnText:    { color: colors.blueLight, fontSize: 13, fontWeight: '700' },
+  iosPickerBox:       { backgroundColor: colors.surface, borderRadius: 12, marginTop: 8, overflow: 'hidden', borderWidth: 1, borderColor: colors.border },
+  iosDoneBtn:         { alignItems: 'center', paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.border },
+  iosDoneBtnText:     { color: colors.greenLight, fontSize: 15, fontWeight: '700' },
 
   // Save button
-  saveBtn:            { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#059669', borderRadius: 14, paddingVertical: 16, marginTop: 24 },
+  saveBtn:            { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.green, borderRadius: 14, paddingVertical: 16, marginTop: 24 },
   saveBtnDisabled:    { opacity: 0.55 },
   saveBtnText:        { color: '#fff', fontSize: 15, fontWeight: '800', letterSpacing: 0.3 },
 
   // History
   histSection:        { marginTop: 32 },
   histHeader:         { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
-  histHeaderText:     { fontSize: 11, fontWeight: '800', color: '#334155', letterSpacing: 1.1 },
+  histHeaderText:     { fontSize: 11, fontWeight: '800', color: colors.textMuted, letterSpacing: 1.1 },
   histEmpty:          { alignItems: 'center', paddingVertical: 36 },
-  histEmptyText:      { fontSize: 13, color: '#1E293B', marginTop: 10 },
+  histEmptyText:      { fontSize: 13, color: colors.textMuted, marginTop: 10 },
 
-  histCard:           { backgroundColor: '#0D1828', borderRadius: 12, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: '#1E2A3A' },
+  histCard:           { backgroundColor: colors.surfaceAlt, borderRadius: 12, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: colors.border },
   histCardTop:        { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   histTypeRow:        { flexDirection: 'row', alignItems: 'center' },
-  histType:           { fontSize: 12, fontWeight: '700', color: '#475569' },
-  histTime:           { fontSize: 11, color: '#1E293B' },
+  histType:           { fontSize: 12, fontWeight: '700', color: colors.textMuted },
+  histTime:           { fontSize: 11, color: colors.textMuted },
   histOutcomePill:    { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10, borderWidth: 1, marginBottom: 8 },
   histOutcomeText:    { fontSize: 11, fontWeight: '700' },
-  histRemark:         { fontSize: 12, color: '#64748B', lineHeight: 18, marginBottom: 8 },
+  histRemark:         { fontSize: 12, color: colors.textSec, lineHeight: 18, marginBottom: 8 },
   histFooter:         { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
   histLocationRow:    { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  histLocationText:   { fontSize: 11, color: '#334155', flex: 1 },
+  histLocationText:   { fontSize: 11, color: colors.textMuted, flex: 1 },
   histFollowRow:      { flexDirection: 'row', alignItems: 'center' },
-  histFollowText:     { fontSize: 11, color: '#F59E0B', fontWeight: '600' },
-  histAgent:          { fontSize: 11, color: '#1E293B', marginLeft: 'auto' },
+  histFollowText:     { fontSize: 11, color: colors.amber, fontWeight: '600' },
+  histAgent:          { fontSize: 11, color: colors.textMuted, marginLeft: 'auto' },
 });
+}

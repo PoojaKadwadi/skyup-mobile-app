@@ -105,7 +105,12 @@ export default function LoginScreen() {
   return (
     <KeyboardAvoidingView
       style={s.root}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      // FIX: behavior was `undefined` on Android, which makes
+      // KeyboardAvoidingView a complete no-op — the keyboard just overlapped
+      // the password field with nothing pushing it into view. 'height' is
+      // the standard Android behavior (paired with windowSoftInputMode=
+      // "adjustResize" in AndroidManifest.xml, already set).
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
       <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">

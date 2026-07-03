@@ -57,6 +57,21 @@ try {
   console.warn('[recordingService] react-native-fs not installed. Run: npm install react-native-fs');
 }
 
+// FIX (clock/timezone bug): "today's midnight" must be IST midnight, not the
+// device's local midnight — see the same fix in backgroundSyncService.js.
+// On a device whose timezone isn't Asia/Kolkata, computing this with
+// d.setHours(0,0,0,0) would offset the "scan since midnight" window from
+// the real IST day boundary the backend/website use.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // +05:30
+function getISTMidnightMs() {
+  const now            = Date.now();
+  const istNow         = new Date(now + IST_OFFSET_MS);
+  const istMidnightUTC = new Date(istNow.getTime());
+  istMidnightUTC.setUTCHours(0, 0, 0, 0);
+  return istMidnightUTC.getTime() - IST_OFFSET_MS; // back to a real UTC instant
+}
+
+
 // ── Recording directories to scan ─────────────────────────────────────────────
 const RECORDING_DIRS = [
   CRM_RECORDING_FOLDER,
@@ -413,7 +428,7 @@ export const syncRecordings = async (phoneNumber = null, sinceMs = 0, skipPhones
   //   midnight — a post-call scan must be allowed to look at just the last few
   //   minutes. (sinceMs is always "today" in practice, so we never regress to
   //   scanning previous days.)
-  const todayMidnight  = (() => { const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); })();
+  const todayMidnight  = getISTMidnightMs();
   const effectiveSince = sinceMs > 0
     ? sinceMs            // respect the caller's window exactly
     : todayMidnight;     // no timestamp given — scan from midnight

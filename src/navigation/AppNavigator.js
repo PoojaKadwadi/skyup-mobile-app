@@ -14,6 +14,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator }   from '@react-navigation/bottom-tabs';
 import { useSelector }                from 'react-redux';
 import Icon                           from 'react-native-vector-icons/MaterialCommunityIcons';
+import { useSafeAreaInsets }          from 'react-native-safe-area-context';
 
 import LoginScreen         from '../screens/auth/LoginScreen';
 import DashboardScreen     from '../screens/dashboard/DashboardScreen';
@@ -24,6 +25,7 @@ import ClientMeetingScreen from '../screens/calls/ClientMeetingScreen'; // ← r
 import ProfileScreen       from '../screens/dashboard/ProfileScreen';
 import ClockInGate         from '../components/ClockInGate';
 import TermsGate           from '../components/TermsGate';
+import { useTheme }        from '../theme/ThemeContext';
 
 const Stack = createNativeStackNavigator();
 const Tab   = createBottomTabNavigator();
@@ -36,20 +38,29 @@ const SCREEN_OPTIONS = {
 };
 
 function MainTabs() {
+  const { colors } = useTheme();
+  // Bottom safe-area inset — non-zero on devices with a gesture pill / nav
+  // bar. Without adding this, the fixed height:65 tab bar sits partly
+  // (or fully) under the system nav bar, so the icons/labels for the last
+  // row get clipped or hard to tap. We push the bar up by that inset and
+  // add it on top of the resting padding instead of replacing it.
+  const insets = useSafeAreaInsets();
+  const tabBarBottomPad = Math.max(insets.bottom, 8);
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
         lazy: true,
-        tabBarActiveTintColor:   '#2563EB',
-        tabBarInactiveTintColor: '#94A3B8',
+        tabBarActiveTintColor:   colors.blue,
+        tabBarInactiveTintColor: colors.textSec,
         tabBarStyle: {
-          backgroundColor: '#0F172A',
-          borderTopColor:  '#1E293B',
+          backgroundColor: colors.surface,
+          borderTopColor:  colors.border,
           borderTopWidth:  1,
-          paddingBottom:   8,
+          paddingBottom:   tabBarBottomPad,
           paddingTop:      8,
-          height:          65,
+          height:          57 + tabBarBottomPad,
         },
         tabBarLabelStyle: {
           fontSize:   11,

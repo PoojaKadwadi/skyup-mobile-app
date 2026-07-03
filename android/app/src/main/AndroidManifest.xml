@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Network -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -45,6 +46,12 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
+    <!-- ✅ FIX — required because autoUploadService.js now declares its
+         foreground service as type "dataSync" (see autoUploadService.js).
+         Without this permission, the app throws a SecurityException on
+         startForeground() instead of the previous 3-minute shortService crash. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
     <!-- Required for Linking.canOpenURL tel: on Android 11+ -->
     <queries>
         <intent>
@@ -80,6 +87,24 @@
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
       </activity>
+
+      <!-- FIX (post-login crash on Android 14+):
+           Notifee's library manifest declares app.notifee.core.ForegroundService
+           with android:foregroundServiceType="shortService" (0x00000800).
+           autoUploadService.js starts that service as FOREGROUND_SERVICE_TYPE_DATA_SYNC
+           (0x00000001). On API 34+ the started type must be a SUBSET of the type
+           declared on the <service> element, so the mismatch threw:
+             IllegalArgumentException: foregroundServiceType 0x00000001 is not a
+             subset of foregroundServiceType attribute 0x00000800
+           and crashed the app right after login (when autoUpload starts).
+           We override that service here to declare dataSync (plus shortService so
+           other Notifee foreground uses still work). tools:replace tells the
+           manifest merger to override the library's value. -->
+      <service
+        android:name="app.notifee.core.ForegroundService"
+        android:exported="false"
+        android:foregroundServiceType="dataSync|shortService"
+        tools:replace="android:foregroundServiceType" />
 
     </application>
 </manifest>

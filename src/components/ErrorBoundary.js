@@ -66,9 +66,11 @@ export default class ErrorBoundary extends React.Component {
             of the app is still working.
           </Text>
 
-          {__DEV__ && this.state.error ? (
+          {this.state.error ? (
             <View style={s.devBox}>
-              <Text style={s.devLabel}>Error (dev only):</Text>
+              <Text style={s.devLabel}>
+                {__DEV__ ? 'Error (dev only):' : 'Error details (tap to screenshot for support):'}
+              </Text>
               <Text style={s.devText}>{String(this.state.error?.message || this.state.error)}</Text>
             </View>
           ) : null}

@@ -1,8 +1,14 @@
 // src/theme/tokens.js
 // Design tokens matching the SkyUp CRM frontend (UserDashboard.jsx / UserLogin.jsx) exactly.
 // Every color maps 1:1 to a CSS variable or Tailwind class used in the web app.
+//
+// LIGHT/DARK THEME:
+// getColors(dark) returns the full palette for the requested mode. The dark
+// values are unchanged from before; the light values mirror the frontend's
+// non-"dark:" Tailwind classes (see ThemeContext.jsx / Dashboard.jsx on web —
+// e.g. "bg-white dark:bg-[#1A1D27]", "text-[#0F1117] dark:text-[#F0F2FA]").
 
-export const COLORS = {
+const DARK = {
   // ── Backgrounds ────────────────────────────────────────────────────────────
   bg:          '#0D0F14',   // dark:bg-[#0D0F14]  — page background
   surface:     '#1A1D27',   // dark:bg-[#1A1D27]  — cards, header
@@ -42,6 +48,57 @@ export const COLORS = {
   purpleLight: '#A78BFA',
   purpleBg:    '#2E1065',
 };
+
+const LIGHT = {
+  // ── Backgrounds ────────────────────────────────────────────────────────────
+  bg:          '#F8F9FC',   // page background (web: bg-[#F8F9FC])
+  surface:     '#FFFFFF',   // cards, header    (web: bg-white)
+  surfaceAlt:  '#F8F9FC',   // table rows, input bg, stat boxes
+
+  // ── Borders ────────────────────────────────────────────────────────────────
+  border:      '#E4E7EF',   // border-[#E4E7EF]
+  borderLight: '#E4E7EF',
+
+  // ── Text ───────────────────────────────────────────────────────────────────
+  textPrimary: '#0F1117',   // text-[#0F1117]
+  textSec:     '#6B7280',   // text-gray-500
+  textMuted:   '#8B92A9',   // placeholder text
+
+  // ── Blue / Primary ─────────────────────────────────────────────────────────
+  blue:        '#2563EB',
+  blueLight:   '#1D4ED8',
+  blueBg:      '#DCEAFE',
+
+  // ── Green / Success ────────────────────────────────────────────────────────
+  green:       '#059669',
+  greenLight:  '#047857',
+  greenBg:     '#DCFCE7',
+
+  // ── Amber / Warning ────────────────────────────────────────────────────────
+  amber:       '#D97706',
+  amberLight:  '#B45309',
+  amberBg:     '#FEF3C7',
+
+  // ── Red / Danger ───────────────────────────────────────────────────────────
+  red:         '#DC2626',
+  redLight:    '#B91C1C',
+  redBg:       '#FEE2E2',
+
+  // ── Purple ─────────────────────────────────────────────────────────────────
+  purple:      '#7C3AED',
+  purpleLight: '#6D28D9',
+  purpleBg:    '#EDE9FE',
+};
+
+// Returns the full color palette for the given mode.
+// Usage: const colors = getColors(dark); — or, inside a component, useTheme().colors
+export function getColors(dark = true) {
+  return dark ? DARK : LIGHT;
+}
+
+// Legacy default export — unchanged, still the dark palette, so any screen
+// that hasn't been migrated to useTheme() yet keeps working exactly as before.
+export const COLORS = DARK;
 
 export const RADIUS = {
   sm:   8,

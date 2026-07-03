@@ -13,7 +13,7 @@
 //  4. Socket disconnected on logout/unmount
 //  5. Backend pushes new_lead_assigned events instantly
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { StatusBar, View, ActivityIndicator, StyleSheet, InteractionManager } from 'react-native';
 
 import { Provider, useSelector, useDispatch } from 'react-redux';
@@ -32,6 +32,8 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { enableScreens } from 'react-native-screens';
 
 import { store, persistor } from './src/store';
+
+import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 
 import AppNavigator from './src/navigation/AppNavigator';
 
@@ -95,23 +97,28 @@ enableScreens(true);
 
 export const navigationRef = React.createRef();
 
-// ✅ Dark theme prevents white flash during transitions
-const NAV_THEME = {
-  ...DarkTheme,
-  colors: {
-    ...DarkTheme.colors,
-    background: '#0D0F14',
-    card: '#1A1D27',
-    border: '#262A38',
-    text: '#F0F2FA',
-  },
-};
+// Builds the react-navigation theme from our color tokens so the background
+// during screen transitions always matches the current light/dark mode.
+function buildNavTheme(colors) {
+  return {
+    ...DarkTheme,
+    colors: {
+      ...DarkTheme.colors,
+      background: colors.bg,
+      card:       colors.surface,
+      border:     colors.border,
+      text:       colors.textPrimary,
+      primary:    colors.blue,
+    },
+  };
+}
 
 function PersistLoadingScreen() {
+  const { colors } = useTheme();
   return (
-    <View style={splashStyles.root}>
+    <View style={[splashStyles.root, { backgroundColor: colors.bg }]}>
       <ActivityIndicator
-        color="#2563EB"
+        color={colors.blue}
         size="large"
       />
     </View>
@@ -121,7 +128,6 @@ function PersistLoadingScreen() {
 const splashStyles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#0D0F14',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -284,86 +290,97 @@ function AppManager() {
   return null;
 }
 
+function RootNavigation() {
+  const { dark, colors } = useTheme();
+  const navTheme = useMemo(() => buildNavTheme(colors), [colors]);
+
+  return (
+    <NavigationContainer
+      ref={navigationRef}
+      theme={navTheme}
+      onReady={() => {
+        // Handle notification taps when app was closed
+        try {
+          const notifee =
+            require('@notifee/react-native')
+              .default;
+
+          notifee
+            .getInitialNotification()
+            .then(initial => {
+              if (!initial?.notification)
+                return;
+
+              const n =
+                initial.notification;
+
+              const nav =
+                navigationRef.current;
+
+              if (!nav) return;
+
+              nav.navigate('Main');
+
+              if (
+                n.id?.startsWith(
+                  'followup_'
+                )
+              ) {
+                const leadId =
+                  n.data?.leadId;
+
+                if (leadId) {
+                  setTimeout(() => {
+                    nav.navigate(
+                      'LeadDetail',
+                      { leadId }
+                    );
+                  }, 150);
+                } else {
+                  setTimeout(() => {
+                    nav.navigate(
+                      'Leads'
+                    );
+                  }, 150);
+                }
+              } else {
+                setTimeout(() => {
+                  nav.navigate('Leads');
+                }, 150);
+              }
+            })
+            .catch(() => {});
+        } catch {}
+      }}
+    >
+      <StatusBar
+        barStyle={dark ? 'light-content' : 'dark-content'}
+        backgroundColor={colors.surface}
+      />
+
+      <AppManager />
+
+      <ErrorBoundary>
+        <AppNavigator />
+      </ErrorBoundary>
+    </NavigationContainer>
+  );
+}
+
 export default function App() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
-        <Provider store={store}>
-          <PersistGate
-            loading={<PersistLoadingScreen />}
-            persistor={persistor}
-          >
-            <NavigationContainer
-              ref={navigationRef}
-              theme={NAV_THEME}
-              onReady={() => {
-                // Handle notification taps when app was closed
-                try {
-                  const notifee =
-                    require('@notifee/react-native')
-                      .default;
-
-                  notifee
-                    .getInitialNotification()
-                    .then(initial => {
-                      if (!initial?.notification)
-                        return;
-
-                      const n =
-                        initial.notification;
-
-                      const nav =
-                        navigationRef.current;
-
-                      if (!nav) return;
-
-                      nav.navigate('Main');
-
-                      if (
-                        n.id?.startsWith(
-                          'followup_'
-                        )
-                      ) {
-                        const leadId =
-                          n.data?.leadId;
-
-                        if (leadId) {
-                          setTimeout(() => {
-                            nav.navigate(
-                              'LeadDetail',
-                              { leadId }
-                            );
-                          }, 150);
-                        } else {
-                          setTimeout(() => {
-                            nav.navigate(
-                              'Leads'
-                            );
-                          }, 150);
-                        }
-                      } else {
-                        setTimeout(() => {
-                          nav.navigate('Leads');
-                        }, 150);
-                      }
-                    })
-                    .catch(() => {});
-                } catch {}
-              }}
+        <ThemeProvider>
+          <Provider store={store}>
+            <PersistGate
+              loading={<PersistLoadingScreen />}
+              persistor={persistor}
             >
-              <StatusBar
-                barStyle="light-content"
-                backgroundColor="#0F172A"
-              />
-
-              <AppManager />
-
-              <ErrorBoundary>
-                <AppNavigator />
-              </ErrorBoundary>
-            </NavigationContainer>
-          </PersistGate>
-        </Provider>
+              <RootNavigation />
+            </PersistGate>
+          </Provider>
+        </ThemeProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );

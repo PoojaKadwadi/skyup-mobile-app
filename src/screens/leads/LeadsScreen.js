@@ -21,7 +21,7 @@
 //
 // All previous fixes (React.memo, getItemLayout, windowSize, etc.) retained.
 
-import React, { useEffect, useCallback, useState, memo, useRef } from 'react';
+import React, { useEffect, useCallback, useMemo, useState, memo, useRef } from 'react';
 import {
   View, Text, FlatList, StyleSheet, TouchableOpacity,
   TextInput, RefreshControl, StatusBar, InteractionManager,
@@ -35,7 +35,8 @@ import {
   setSearchQuery, setFilterStatus,
 } from '../../store/slices/leadsSlice';
 import CallButton                    from '../../components/CallButton';
-import { COLORS, RADIUS, FONT }      from '../../theme/tokens';
+import { RADIUS, FONT }              from '../../theme/tokens';
+import { useTheme }                  from '../../theme/ThemeContext';
 
 function maskPhone(phone) {
   if (!phone) return '—';
@@ -46,18 +47,34 @@ function maskPhone(phone) {
 
 const STATUS_FILTERS = ['all', 'New', 'In Progress', 'Converted', 'Not Interested'];
 
-const STATUS_CFG = {
-  'New':            { dot: COLORS.blue,  bg: COLORS.blueBg,  text: COLORS.blueLight  },
-  'In Progress':    { dot: COLORS.amber, bg: COLORS.amberBg, text: COLORS.amberLight },
-  'Converted':      { dot: COLORS.green, bg: COLORS.greenBg, text: COLORS.greenLight },
-  'Not Interested': { dot: COLORS.red,   bg: COLORS.redBg,   text: COLORS.redLight   },
-};
+// Returns true when a lead has a follow-up scheduled for today or earlier
+// (due today or overdue). Mirrors the same predicate in DashboardScreen so the
+// "Followups" card count and this filtered list always agree.
+function isFollowUpDue(lead) {
+  if (!lead?.followUpDate) return false;
+  const d = new Date(lead.followUpDate);
+  if (isNaN(d.getTime())) return false;
+  const endOfToday = new Date();
+  endOfToday.setHours(23, 59, 59, 999);
+  return d.getTime() <= endOfToday.getTime();
+}
 
-const QUALITY_CFG = {
-  Hot:  { color: COLORS.red,   bg: COLORS.redBg,   text: COLORS.redLight,   emoji: '🔥' },
-  Warm: { color: COLORS.amber, bg: COLORS.amberBg, text: COLORS.amberLight, emoji: '🌤️' },
-  Cold: { color: COLORS.blue,  bg: COLORS.blueBg,  text: COLORS.blueLight,  emoji: '❄️' },
-};
+function getStatusCfg(colors) {
+  return {
+    'New':            { dot: colors.blue,  bg: colors.blueBg,  text: colors.blueLight  },
+    'In Progress':    { dot: colors.amber, bg: colors.amberBg, text: colors.amberLight },
+    'Converted':      { dot: colors.green, bg: colors.greenBg, text: colors.greenLight },
+    'Not Interested': { dot: colors.red,   bg: colors.redBg,   text: colors.redLight   },
+  };
+}
+
+function getQualityCfg(colors) {
+  return {
+    Hot:  { color: colors.red,   bg: colors.redBg,   text: colors.redLight,   emoji: '🔥' },
+    Warm: { color: colors.amber, bg: colors.amberBg, text: colors.amberLight, emoji: '🌤️' },
+    Cold: { color: colors.blue,  bg: colors.blueBg,  text: colors.blueLight,  emoji: '❄️' },
+  };
+}
 
 const SORT_OPTIONS = [
   { label: 'Newest first', value: 'date_desc' },
@@ -67,7 +84,8 @@ const SORT_OPTIONS = [
 ];
 
 function StatusBadge({ status }) {
-  const c = STATUS_CFG[status] || STATUS_CFG['New'];
+  const { colors } = useTheme();
+  const c = getStatusCfg(colors)[status] || getStatusCfg(colors)['New'];
   return (
     <View style={[badge.wrap, { backgroundColor: c.bg }]}>
       <View style={[badge.dot, { backgroundColor: c.dot }]} />
@@ -82,7 +100,8 @@ const badge = StyleSheet.create({
 });
 
 function TempBadge({ temp }) {
-  const c = QUALITY_CFG[temp];
+  const { colors } = useTheme();
+  const c = getQualityCfg(colors)[temp];
   if (!c) return null;
   return (
     <View style={[badge.wrap, { backgroundColor: c.bg, borderWidth: 1, borderColor: c.color + '40' }]}>
@@ -92,7 +111,9 @@ function TempBadge({ temp }) {
 }
 
 const LeadRow = memo(function LeadRow({ item, leadId, onPress, onCallStart }) {
-  const sc = STATUS_CFG[item.status] || STATUS_CFG['New'];
+  const { colors } = useTheme();
+  const s = useMemo(() => createStyles(colors), [colors]);
+  const sc = getStatusCfg(colors)[item.status] || getStatusCfg(colors)['New'];
   const initials = (item.name || '?')
     .split(' ')
     .map(n => n[0])
@@ -118,7 +139,7 @@ const LeadRow = memo(function LeadRow({ item, leadId, onPress, onCallStart }) {
           )}
         </View>
         <View style={s.phoneRow}>
-          <Icon name="phone-lock" size={11} color={COLORS.textMuted} style={s.phoneIcon} />
+          <Icon name="phone-lock" size={11} color={colors.textMuted} style={s.phoneIcon} />
           <Text style={s.leadPhone}>{maskPhone(item.mobile)}</Text>
         </View>
         <View style={s.tagRow}>
@@ -133,10 +154,10 @@ const LeadRow = memo(function LeadRow({ item, leadId, onPress, onCallStart }) {
             <Icon
               name={item.remarkIsManual ? 'pencil' : 'bullhorn-variant-outline'}
               size={11}
-              color={item.remarkIsManual ? '#A78BFA' : COLORS.textMuted}
+              color={item.remarkIsManual ? colors.purpleLight : colors.textMuted}
               style={s.remarkIcon}
             />
-            <Text style={s.remark} numberOfLines={1}>"{item.remark}"</Text>
+            <Text style={s.remark}>"{item.remark}"</Text>
           </View>
         ) : null}
       </View>
@@ -158,6 +179,8 @@ export default function LeadsScreen() {
   const dispatch      = useDispatch();
   const navigation    = useNavigation();
   const route         = useRoute();
+  const { dark, colors } = useTheme();
+  const s = useMemo(() => createStyles(colors), [colors]);
   const filteredLeads = useSelector(selectFilteredLeads);
   const { loading, searchQuery, filterStatus, lastFetchedAt } = useSelector((s) => s.leads);
 
@@ -165,6 +188,9 @@ export default function LeadsScreen() {
   const [showSort,    setShowSort]    = useState(false);
   const [sortBy,      setSortBy]      = useState('date_desc');
   const [filterTemp,  setFilterTemp]  = useState('All');
+  // Set from the dashboard "Followups" card. When true, the list is narrowed to
+  // leads whose follow-up is due today or overdue (see isFollowUpDue).
+  const [followUpOnly, setFollowUpOnly] = useState(false);
 
   // FIX: Local search value keeps TextInput snappy.
   // Dispatch to Redux is debounced 300ms to avoid filter churn on every keystroke.
@@ -203,7 +229,16 @@ export default function LeadsScreen() {
   }, [dispatch]);
 
   useEffect(() => {
-    if (route.params?.filterStatus) {
+    // Deep-links from the dashboard cards:
+    //   New Leads  → { filterStatus: 'New' }
+    //   Followups  → { followUpOnly: true }
+    // The two are mutually exclusive; setting one clears the other so the list
+    // never shows a stale combination.
+    if (route.params?.followUpOnly) {
+      setFollowUpOnly(true);
+      dispatch(setFilterStatus('all'));
+    } else if (route.params?.filterStatus) {
+      setFollowUpOnly(false);
       dispatch(setFilterStatus(route.params.filterStatus));
     }
   }, [route.params]);
@@ -229,6 +264,9 @@ export default function LeadsScreen() {
 
   const displayed = React.useMemo(() => {
     let res = [...filteredLeads];
+    if (followUpOnly) {
+      res = res.filter(isFollowUpDue);
+    }
     if (filterTemp !== 'All') {
       res = res.filter(l => (l.Quality || l.temperature) === filterTemp);
     }
@@ -245,7 +283,7 @@ export default function LeadsScreen() {
       res.sort((a, b) => (a.status || '').localeCompare(b.status || ''));
     }
     return res;
-  }, [filteredLeads, sortBy, filterTemp]);
+  }, [filteredLeads, sortBy, filterTemp, followUpOnly]);
 
   // Stable renderItem — receives only stable refs; no new closures per call.
   const renderItem = useCallback(({ item }) => (
@@ -264,13 +302,14 @@ export default function LeadsScreen() {
     dispatch(setFilterStatus('all'));
     setFilterTemp('All');
     setSortBy('date_desc');
+    setFollowUpOnly(false);
   }, [dispatch, handleSearchClear]);
 
-  const hasActiveFilters = localSearch || filterStatus !== 'all' || filterTemp !== 'All';
+  const hasActiveFilters = localSearch || filterStatus !== 'all' || filterTemp !== 'All' || followUpOnly;
 
   return (
     <View style={s.root}>
-      <StatusBar barStyle="light-content" backgroundColor={COLORS.surface} />
+      <StatusBar barStyle={dark ? "light-content" : "dark-content"} backgroundColor={colors.surface} />
 
       <View style={s.header}>
         <View>
@@ -280,24 +319,32 @@ export default function LeadsScreen() {
           </View>
         </View>
         <View style={s.securityNote}>
-          <Icon name="phone-lock" size={12} color={COLORS.textMuted} />
+          <Icon name="phone-lock" size={12} color={colors.textMuted} />
           <Text style={s.securityTxt}>Numbers masked</Text>
         </View>
       </View>
 
+      {followUpOnly && (
+        <TouchableOpacity style={s.followUpBanner} onPress={clearAllFilters} activeOpacity={0.8}>
+          <Icon name="calendar-clock" size={14} color={colors.amber} />
+          <Text style={s.followUpBannerTxt}>Showing follow-ups due today or overdue</Text>
+          <Icon name="close-circle" size={15} color={colors.amber} />
+        </TouchableOpacity>
+      )}
+
       <View style={s.searchRow}>
         <View style={s.searchBox}>
-          <Icon name="magnify" size={16} color={COLORS.textMuted} style={s.searchIcon} />
+          <Icon name="magnify" size={16} color={colors.textMuted} style={s.searchIcon} />
           <TextInput
             style={s.searchInput}
             placeholder="Search name, campaign…"
-            placeholderTextColor={COLORS.textMuted}
+            placeholderTextColor={colors.textMuted}
             value={localSearch}
             onChangeText={handleSearchChange}
           />
           {localSearch ? (
             <TouchableOpacity onPress={handleSearchClear}>
-              <Icon name="close-circle" size={16} color={COLORS.textMuted} />
+              <Icon name="close-circle" size={16} color={colors.textMuted} />
             </TouchableOpacity>
           ) : null}
         </View>
@@ -305,13 +352,13 @@ export default function LeadsScreen() {
           style={[s.iconBtn, showFilters && s.iconBtnActive]}
           onPress={() => setShowFilters(!showFilters)}
         >
-          <Icon name="filter-variant" size={20} color={showFilters ? COLORS.blue : COLORS.textMuted} />
+          <Icon name="filter-variant" size={20} color={showFilters ? colors.blue : colors.textMuted} />
         </TouchableOpacity>
         <TouchableOpacity
           style={[s.iconBtn, showSort && s.iconBtnActive]}
           onPress={() => setShowSort(!showSort)}
         >
-          <Icon name="sort" size={20} color={showSort ? COLORS.blue : COLORS.textMuted} />
+          <Icon name="sort" size={20} color={showSort ? colors.blue : colors.textMuted} />
         </TouchableOpacity>
       </View>
 
@@ -380,7 +427,7 @@ export default function LeadsScreen() {
         refreshControl={
           <RefreshControl
             refreshing={loading} onRefresh={onRefresh}
-            tintColor={COLORS.blue} colors={[COLORS.blue]}
+            tintColor={colors.blue} colors={[colors.blue]}
           />
         }
         contentContainerStyle={s.listContent}
@@ -388,7 +435,7 @@ export default function LeadsScreen() {
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
           <View style={s.empty}>
-            <Icon name="account-search-outline" size={52} color={COLORS.border} />
+            <Icon name="account-search-outline" size={52} color={colors.border} />
             <Text style={s.emptyTitle}>
               {localSearch ? 'No results' : 'No leads yet'}
             </Text>
@@ -409,70 +456,78 @@ export default function LeadsScreen() {
   );
 }
 
-function Separator() { return <View style={s.sep} />; }
+function Separator() {
+  const { colors } = useTheme();
+  const s = useMemo(() => createStyles(colors), [colors]);
+  return <View style={s.sep} />;
+}
 
-const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: COLORS.bg },
+function createStyles(colors) {
+return StyleSheet.create({
+  root: { flex: 1, backgroundColor: colors.bg },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 20, paddingTop: 52, paddingBottom: 14,
-    backgroundColor: COLORS.surface,
-    borderBottomWidth: 1, borderBottomColor: COLORS.border,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
   },
-  headerTitle:    { fontSize: FONT.xl, fontWeight: '800', color: COLORS.textPrimary },
+  headerTitle:    { fontSize: FONT.xl, fontWeight: '800', color: colors.textPrimary },
   headerCountWrap: {
-    backgroundColor: COLORS.surfaceAlt, borderRadius: RADIUS.full,
+    backgroundColor: colors.surfaceAlt, borderRadius: RADIUS.full,
     paddingHorizontal: 10, paddingVertical: 3, alignSelf: 'flex-start', marginTop: 2,
   },
-  headerCount:  { fontSize: FONT.xs, color: COLORS.textMuted, fontWeight: '600' },
+  headerCount:  { fontSize: FONT.xs, color: colors.textMuted, fontWeight: '600' },
   securityNote: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  securityTxt:  { fontSize: 10, color: COLORS.textMuted, fontWeight: '600' },
+  securityTxt:  { fontSize: 10, color: colors.textMuted, fontWeight: '600' },
   searchRow:   { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
+  followUpBanner:    { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 10, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.amberBg, borderWidth: 1, borderColor: colors.amber + '55' },
+  followUpBannerTxt: { flex: 1, fontSize: FONT.sm, fontWeight: '600', color: colors.amberLight },
   searchBox:   {
     flex: 1, flexDirection: 'row', alignItems: 'center',
-    backgroundColor: COLORS.surface, borderRadius: RADIUS.md,
-    paddingHorizontal: 14, height: 44, borderWidth: 1, borderColor: COLORS.border,
+    backgroundColor: colors.surface, borderRadius: RADIUS.md,
+    paddingHorizontal: 14, height: 44, borderWidth: 1, borderColor: colors.border,
   },
   searchIcon:  { marginRight: 8 },
-  searchInput: { flex: 1, color: COLORS.textPrimary, fontSize: FONT.base },
+  searchInput: { flex: 1, color: colors.textPrimary, fontSize: FONT.base },
   iconBtn:     {
-    width: 44, height: 44, backgroundColor: COLORS.surface, borderRadius: RADIUS.md,
-    alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: COLORS.border,
+    width: 44, height: 44, backgroundColor: colors.surface, borderRadius: RADIUS.md,
+    alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border,
   },
-  iconBtnActive: { borderColor: COLORS.blue, backgroundColor: COLORS.blueBg },
-  filterArea:       { paddingHorizontal: 16, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: COLORS.border },
-  filterGroupLabel: { fontSize: FONT.xs, fontWeight: '700', color: COLORS.textMuted, letterSpacing: 1, marginBottom: 6 },
+  iconBtnActive: { borderColor: colors.blue, backgroundColor: colors.blueBg },
+  filterArea:       { paddingHorizontal: 16, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: colors.border },
+  filterGroupLabel: { fontSize: FONT.xs, fontWeight: '700', color: colors.textMuted, letterSpacing: 1, marginBottom: 6 },
   filterGroupLabelTop: { marginTop: 10 },
   filterRow:        { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip:             { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: COLORS.surface, borderRadius: RADIUS.full, borderWidth: 1, borderColor: COLORS.border },
-  chipActive:    { backgroundColor: COLORS.blueBg, borderColor: COLORS.blue },
-  chipTxt:       { color: COLORS.textSec, fontSize: FONT.sm, fontWeight: '600' },
-  chipTxtActive: { color: COLORS.blueLight },
+  chip:             { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: colors.surface, borderRadius: RADIUS.full, borderWidth: 1, borderColor: colors.border },
+  chipActive:    { backgroundColor: colors.blueBg, borderColor: colors.blue },
+  chipTxt:       { color: colors.textSec, fontSize: FONT.sm, fontWeight: '600' },
+  chipTxtActive: { color: colors.blueLight },
   clearBtn:      { marginTop: 8, alignSelf: 'flex-start' },
   clearBtnMt:    { marginTop: 16 },
-  clearBtnTxt:   { fontSize: FONT.sm, color: COLORS.red, fontWeight: '600' },
+  clearBtnTxt:   { fontSize: FONT.sm, color: colors.red, fontWeight: '600' },
   listContent: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 24 },
   leadCard: {
-    backgroundColor: COLORS.surface, borderRadius: RADIUS.lg, padding: 14,
+    backgroundColor: colors.surface, borderRadius: RADIUS.lg, padding: 14,
     flexDirection: 'row', alignItems: 'center',
-    borderWidth: 1, borderColor: COLORS.border, gap: 12,
+    borderWidth: 1, borderColor: colors.border, gap: 12,
   },
   avatar:       { width: 44, height: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
   avatarTxt:    { fontSize: 13, fontWeight: '800' },
   leadInfo:     { flex: 1, minWidth: 0 },
   leadNameRow:  { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 2 },
-  leadName:     { fontSize: FONT.md, fontWeight: '700', color: COLORS.textPrimary, flexShrink: 1 },
-  reassignBadge:{ fontSize: FONT.xs, color: COLORS.purple, fontWeight: '700' },
+  leadName:     { fontSize: FONT.md, fontWeight: '700', color: colors.textPrimary, flexShrink: 1 },
+  reassignBadge:{ fontSize: FONT.xs, color: colors.purple, fontWeight: '700' },
   phoneRow:     { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
   phoneIcon:    { marginRight: 4 },
-  leadPhone:    { fontSize: FONT.sm, color: COLORS.textMuted, fontFamily: 'monospace', letterSpacing: 1 },
+  leadPhone:    { fontSize: FONT.sm, color: colors.textMuted, fontFamily: 'monospace', letterSpacing: 1 },
   tagRow:       { flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginBottom: 4 },
-  leadCampaign: { fontSize: FONT.xs, color: COLORS.textSec, marginTop: 2 },
+  leadCampaign: { fontSize: FONT.xs, color: colors.textSec, marginTop: 2 },
   remarkRow:    { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
   remarkIcon:   { marginRight: 4 },
-  remark:       { fontSize: FONT.xs, color: COLORS.textSec, fontStyle: 'italic', flex: 1 },
+  remark:       { fontSize: FONT.xs, color: colors.textSec, fontStyle: 'italic', flex: 1 },
   sep:          { height: 8 },
   empty:      { alignItems: 'center', paddingTop: 80 },
-  emptyTitle: { fontSize: 17, fontWeight: '700', color: COLORS.textSec, marginTop: 14 },
-  emptySub:   { fontSize: FONT.base, color: COLORS.textMuted, marginTop: 5, textAlign: 'center', paddingHorizontal: 32 },
+  emptyTitle: { fontSize: 17, fontWeight: '700', color: colors.textSec, marginTop: 14 },
+  emptySub:   { fontSize: FONT.base, color: colors.textMuted, marginTop: 5, textAlign: 'center', paddingHorizontal: 32 },
 });
+}

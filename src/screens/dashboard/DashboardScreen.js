@@ -28,13 +28,14 @@ import { checkAllPermissions }          from '../../services/permissionsService'
 import { checkAndNotifyNewLeads, checkAndNotifyFollowUps, checkAndScheduleClockInReminder } from '../../services/notificationService';
 import { autoSetupRecordingSync }       from '../../services/recordingService';
 import { COLORS, RADIUS, FONT }         from '../../theme/tokens';
+import { useTheme }                     from '../../theme/ThemeContext';
 import AttendanceWidget                 from '../../components/AttendanceWidget';
 import NotificationPermissionBanner    from '../../components/NotificationPermissionBanner';
 
 const AUTO_SYNC_SETUP_KEY = 'crm_auto_sync_setup_done';
 
 // PERF FIX: Module-level cache so repeated AsyncStorage.getItem calls for this
-// key (useAutoSyncSetup hook + handleAutoSyncSetup button) become memory reads
+// key (useAutoSyncSetup hook) become memory reads
 // after the first access. Cleared to null on logout via clearAutoSyncCache().
 let _autoSyncSetupCache = null;
 async function isAutoSyncDone() {
@@ -70,6 +71,19 @@ function timeAgo(ms) {
   return hrs < 24 ? `${hrs}h ago` : `${Math.floor(hrs / 24)}d ago`;
 }
 
+// Returns true when a lead has a follow-up scheduled for today or earlier
+// (i.e. due today or overdue). Kept at module scope with no theme/color
+// dependency so it stays Hermes-safe and is reused by the "Followups" card
+// count here and the follow-up filter in LeadsScreen.
+function isFollowUpDue(lead) {
+  if (!lead?.followUpDate) return false;
+  const d = new Date(lead.followUpDate);
+  if (isNaN(d.getTime())) return false;
+  const endOfToday = new Date();
+  endOfToday.setHours(23, 59, 59, 999);
+  return d.getTime() <= endOfToday.getTime();
+}
+
 function computeKpi(leads) {
   const todayStr  = new Date().toDateString();
   const now       = new Date();
@@ -93,8 +107,10 @@ function computeKpi(leads) {
   let hot = 0, warm = 0, cold = 0, unclassified = 0;
   let todayLeads = 0, weekLeads = 0;
   let todayConverted = 0, todayFollowUp = 0;
+  let followUpDue = 0;
 
   for (const l of leads) {
+    if (isFollowUpDue(l)) followUpDue++;
     total++;
     const st = l.status;
     if      (st === 'Converted')       converted++;
@@ -128,6 +144,7 @@ function computeKpi(leads) {
     hot, warm, cold, unclassified,
     todayLeads, weekLeads,
     todayConverted, todayFollowUp,
+    followUpDue,
     weekData, weekLabels, maxBar,
     convRate: total > 0 ? Math.round((converted / total) * 100) : 0,
   };
@@ -161,7 +178,7 @@ function useAutoSyncSetup() {
           // Some permissions granted — remind them but don't block
           Alert.alert(
             '⚠️ Partial Setup',
-            'Some permissions were not granted. Auto sync may not work fully.\n\nTap "Auto Sync" on the dashboard to retry.',
+            'Some permissions were not granted. Auto sync may not work fully.\n\nYou can grant the missing permissions any time from your phone\'s Settings › Apps.',
             [{ text: 'OK' }],
           );
         }
@@ -181,6 +198,8 @@ function useAutoSyncSetup() {
 export default function DashboardScreen() {
   const navigation = useNavigation();
   const dispatch   = useDispatch();
+  const { dark, colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
 
   const leads         = useSelector(s => s.leads?.items ?? []);
   const loading       = useSelector(s => s.leads?.loading ?? false);
@@ -238,57 +257,17 @@ export default function DashboardScreen() {
 
   const kpi = useMemo(() => computeKpi(leads), [leads]);
 
-  // ── Manual "Set Up Auto Sync" handler (for the dashboard button)
-  const handleAutoSyncSetup = useCallback(async () => {
-    try {
-      // PERF FIX: use cached isAutoSyncDone() instead of raw AsyncStorage.getItem
-      const already = await isAutoSyncDone();
-      if (already) {
-        // Already set up — show current status
-        const perms = await checkAllPermissions();
-        const allOk = perms.callPhone && perms.readCallLog && perms.readStorage;
-        Alert.alert(
-          allOk ? '✅ Auto Sync Active' : '⚠️ Some Permissions Missing',
-          [
-            `Phone access: ${perms.callPhone   ? '✅' : '❌'}`,
-            `Call log:     ${perms.readCallLog ? '✅' : '❌'}`,
-            `Storage:      ${perms.readStorage ? '✅' : '❌'}`,
-            '',
-            allOk
-              ? 'Recordings are syncing automatically after each call.'
-              : 'Tap "Re-run Setup" to grant missing permissions.',
-          ].join('\n'),
-          [
-            { text: 'Close',       style: 'cancel' },
-            { text: 'Re-run Setup', onPress: () => runSetup() },
-          ],
-        );
-        return;
-      }
-      runSetup();
-    } catch {
-      runSetup();
-    }
-  }, []);
+  // Toggles the inline "Daily Report" summary panel under the action cards.
+  const [showReport, setShowReport] = React.useState(false);
 
-  const runSetup = useCallback(async () => {
-    const result = await autoSetupRecordingSync();
-    if (result.success) {
-      // PERF FIX: use cached markAutoSyncDone() — updates memory + AsyncStorage
-      await markAutoSyncDone();
-      Alert.alert(
-        '✅ Auto Sync Enabled',
-        `Recordings will sync automatically after each call.\n\nSave recordings to:\n${result.folderPath}`,
-        [{ text: 'Got it' }],
-      );
-    } else if (!result.success && result.partial) {
-      Alert.alert('⚠️ Partial Setup', 'Some permissions were denied. Try again from Settings.');
-    }
-  }, []);
+  // Deep-link handlers for the action cards.
+  const goNewLeads  = useCallback(() => navigation.navigate('Leads', { filterStatus: 'New' }), [navigation]);
+  const goFollowups = useCallback(() => navigation.navigate('Leads', { followUpOnly: true }), [navigation]);
+  const toggleReport = useCallback(() => setShowReport(v => !v), []);
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0F172A" />
+      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} backgroundColor={colors.surface} />
 
       {/* Header */}
       <View style={styles.header}>
@@ -300,44 +279,54 @@ export default function DashboardScreen() {
         </View>
         <TouchableOpacity style={styles.syncBtn} onPress={onRefresh} disabled={loading}>
           {loading
-            ? <ActivityIndicator size="small" color="#93C5FD" />
-            : <Icon name="refresh" size={20} color="#93C5FD" />
+            ? <ActivityIndicator size="small" color={colors.blueLight} />
+            : <Icon name="refresh" size={20} color={colors.blueLight} />
           }
         </TouchableOpacity>
       </View>
 
       <ScrollView
         contentContainerStyle={styles.scroll}
-        refreshControl={<RefreshControl refreshing={loading} onRefresh={onRefresh} tintColor="#93C5FD" />}
+        refreshControl={<RefreshControl refreshing={loading} onRefresh={onRefresh} tintColor={colors.blueLight} />}
         showsVerticalScrollIndicator={false}
       >
-        {/* Quick Actions Row */}
+        {/* Quick Actions Row — Daily Report · New Leads · Followups */}
         <View style={styles.quickRow}>
-          <TouchableOpacity
-            style={styles.quickBtn}
-            onPress={() => navigation.navigate('Recordings')}
-          >
-            <Icon name="microphone" size={20} color="#93C5FD" />
-            <Text style={styles.quickLabel}>Recordings</Text>
-          </TouchableOpacity>
-
-          {/* ── NEW: Auto Sync Setup button ── */}
-          <TouchableOpacity
-            style={[styles.quickBtn, styles.quickBtnHighlight]}
-            onPress={handleAutoSyncSetup}
-          >
-            <Icon name="sync" size={20} color="#4ADE80" />
-            <Text style={[styles.quickLabel, { color: '#4ADE80' }]}>Auto Sync</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.quickBtn}
-            onPress={() => navigation.navigate('Call Logs')}
-          >
-            <Icon name="phone-log" size={20} color="#93C5FD" />
-            <Text style={styles.quickLabel}>Call Logs</Text>
-          </TouchableOpacity>
+          <ActionCard
+            icon="chart-box-outline"
+            color="#22C55E"
+            value={showReport ? '▲' : '▼'}
+            label="Daily Report"
+            active={showReport}
+            onPress={toggleReport}
+          />
+          <ActionCard
+            icon="account-plus-outline"
+            color="#3B82F6"
+            value={kpi.newLeads}
+            label="New Leads"
+            onPress={goNewLeads}
+          />
+          <ActionCard
+            icon="calendar-clock"
+            color="#F59E0B"
+            value={kpi.followUpDue}
+            label="Followups"
+            onPress={goFollowups}
+          />
         </View>
+
+        {/* Inline Daily Report — today's snapshot, toggled by the card above */}
+        {showReport && (
+          <View style={styles.reportPanel}>
+            <Text style={styles.reportTitle}>Today's Summary</Text>
+            <View style={styles.reportRow}>
+              <ReportStat label="New Leads Today"  value={kpi.todayLeads}     color="#3B82F6" />
+              <ReportStat label="Follow-ups Due"   value={kpi.followUpDue}    color="#F59E0B" />
+              <ReportStat label="Converted Today"  value={kpi.todayConverted} color="#22C55E" />
+            </View>
+          </View>
+        )}
 
         {/* Attendance Widget */}
         <NotificationPermissionBanner />
@@ -393,7 +382,39 @@ export default function DashboardScreen() {
 }
 
 // ── Small components ──────────────────────────────────────────────────────────
+// Top-row action card: icon + value + label. Used for Daily Report (toggle),
+// New Leads (deep-link) and Followups (deep-link).
+function ActionCard({ icon, color, value, label, onPress, active }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  return (
+    <TouchableOpacity
+      style={[styles.actionCard, active && { borderColor: color, backgroundColor: color + '14' }]}
+      onPress={onPress}
+      activeOpacity={0.8}
+    >
+      <Icon name={icon} size={20} color={color} />
+      <Text style={[styles.actionValue, { color }]}>{value}</Text>
+      <Text style={styles.actionLabel}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+// Single stat inside the inline Daily Report panel.
+function ReportStat({ label, value, color }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  return (
+    <View style={styles.reportStat}>
+      <Text style={[styles.reportStatValue, { color }]}>{value}</Text>
+      <Text style={styles.reportStatLabel}>{label}</Text>
+    </View>
+  );
+}
+
 function KpiCard({ label, value, icon, color }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   return (
     <View style={[styles.kpiCard, { borderLeftColor: color }]}>
       <Icon name={icon} size={22} color={color} style={{ marginBottom: 6 }} />
@@ -404,6 +425,8 @@ function KpiCard({ label, value, icon, color }) {
 }
 
 function StatusChip({ label, count, color }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   return (
     <View style={[styles.chip, { borderColor: color + '40' }]}>
       <Text style={[styles.chipCount, { color }]}>{count}</Text>
@@ -413,35 +436,68 @@ function StatusChip({ label, count, color }) {
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
-const styles = StyleSheet.create({
-  container:        { flex: 1, backgroundColor: '#0D0F14' },
-  header:           { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 52, paddingBottom: 16, backgroundColor: '#1A1D27', borderBottomWidth: 1, borderBottomColor: '#262A38' },
-  greeting:         { fontSize: 22, fontWeight: '800', color: '#F0F2FA' },
-  subtitle:         { fontSize: 12, color: '#565C75', marginTop: 2 },
-  syncBtn:          { width: 40, height: 40, borderRadius: 20, backgroundColor: '#1E2236', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#262A38' },
+function createStyles(colors) {
+  return StyleSheet.create({
+  container:        { flex: 1, backgroundColor: colors.bg },
+  header:           { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 52, paddingBottom: 16, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
+  greeting:         { fontSize: 22, fontWeight: '800', color: colors.textPrimary },
+  subtitle:         { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  syncBtn:          { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.blueBg, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border },
   scroll:           { padding: 16, paddingBottom: 40 },
 
   quickRow:         { flexDirection: 'row', gap: 10, marginBottom: 16 },
-  quickBtn:         { flex: 1, backgroundColor: '#1A1D27', borderRadius: 12, alignItems: 'center', paddingVertical: 14, gap: 6, borderWidth: 1, borderColor: '#262A38' },
-  quickBtnHighlight:{ borderColor: '#166534', backgroundColor: '#052e16' },
-  quickLabel:       { fontSize: 11, fontWeight: '600', color: '#93C5FD' },
+  quickBtn:         { flex: 1, backgroundColor: colors.surface, borderRadius: 12, alignItems: 'center', paddingVertical: 14, gap: 6, borderWidth: 1, borderColor: colors.border },
+  quickBtnHighlight:{ borderColor: '#166534', backgroundColor: colors.greenBg },
+  quickLabel:       { fontSize: 11, fontWeight: '600', color: colors.blueLight },
 
-  kpiGrid:          { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 16 },
-  kpiCard:          { flex: 1, minWidth: '45%', backgroundColor: '#1A1D27', borderRadius: 14, padding: 14, borderWidth: 1, borderColor: '#262A38', borderLeftWidth: 3 },
-  kpiValue:         { fontSize: 26, fontWeight: '800', color: '#F0F2FA' },
-  kpiLabel:         { fontSize: 11, color: '#565C75', marginTop: 2 },
+  // Top-row action cards (Daily Report · New Leads · Followups)
+  actionCard:       { flex: 1, backgroundColor: colors.surface, borderRadius: 12, alignItems: 'center', paddingVertical: 14, gap: 4, borderWidth: 1, borderColor: colors.border, shadowColor: '#0F172A', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.08, shadowRadius: 6, elevation: 2 },
+  actionValue:      { fontSize: 22, fontWeight: '800', lineHeight: 26 },
+  actionLabel:      { fontSize: 11, fontWeight: '600', color: colors.textSec, textAlign: 'center' },
 
-  section:          { backgroundColor: '#1A1D27', borderRadius: 14, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: '#262A38' },
-  sectionTitle:     { fontSize: 14, fontWeight: '700', color: '#94A3B8', marginBottom: 12 },
+  // Inline Daily Report panel
+  reportPanel:      { backgroundColor: colors.surface, borderRadius: 14, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: colors.border },
+  reportTitle:      { fontSize: 14, fontWeight: '700', color: colors.textSec, marginBottom: 12 },
+  reportRow:        { flexDirection: 'row', gap: 10 },
+  reportStat:       { flex: 1, backgroundColor: colors.surfaceAlt, borderRadius: 12, paddingVertical: 14, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
+  reportStatValue:  { fontSize: 24, fontWeight: '800' },
+  reportStatLabel:  { fontSize: 10, color: colors.textMuted, marginTop: 4, textAlign: 'center' },
+
+  kpiGrid:          { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 16 },
+  kpiCard:          {
+    flex: 1,
+    minWidth: '45%',
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderLeftWidth: 3,
+    // Visible separation between adjacent cards — the surface/bg/border
+    // tokens are nearly the same shade in light mode, so without a shadow
+    // the 4 KPI cards visually blend into one block instead of reading as
+    // 4 distinct cards.
+    shadowColor:   '#0F172A',
+    shadowOffset:  { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius:  6,
+    elevation:     2,
+  },
+  kpiValue:         { fontSize: 26, fontWeight: '800', color: colors.textPrimary },
+  kpiLabel:         { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+
+  section:          { backgroundColor: colors.surface, borderRadius: 14, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: colors.border },
+  sectionTitle:     { fontSize: 14, fontWeight: '700', color: colors.textSec, marginBottom: 12 },
 
   barChart:         { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', height: 100 },
   barCol:           { flex: 1, alignItems: 'center', gap: 4 },
-  bar:              { width: 20, backgroundColor: '#3B82F6', borderRadius: 4 },
-  barLabel:         { fontSize: 10, color: '#565C75' },
-  barVal:           { fontSize: 10, color: '#94A3B8', fontWeight: '600' },
+  bar:              { width: 20, backgroundColor: colors.blue, borderRadius: 4 },
+  barLabel:         { fontSize: 10, color: colors.textMuted },
+  barVal:           { fontSize: 10, color: colors.textSec, fontWeight: '600' },
 
   statusRow:        { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip:             { borderRadius: 10, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 8, alignItems: 'center', minWidth: '22%' },
   chipCount:        { fontSize: 18, fontWeight: '800' },
-  chipLabel:        { fontSize: 10, color: '#565C75', marginTop: 2, textAlign: 'center' },
-});
+  chipLabel:        { fontSize: 10, color: colors.textMuted, marginTop: 2, textAlign: 'center' },
+  });
+}
