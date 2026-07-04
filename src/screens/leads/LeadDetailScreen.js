@@ -99,6 +99,15 @@ function InfoItem({ icon, label, value, full }) {
 const _autoSavedContactIds = new Set();
 
 // Session-scoped flags so account-setup alerts show at most once per app run.
+// Temperature quick-set options. Static hex colours (theme-independent) so this
+// safely stays at module scope; the translucent chip backgrounds read fine on
+// both dark and light. Keys map to the backend's Hot/Warm/Cold temperature field.
+const TEMP_OPTIONS = [
+  { key: 'Hot',  icon: 'fire',          color: '#EF4444', bg: 'rgba(239,68,68,0.14)' },
+  { key: 'Warm', icon: 'weather-sunny', color: '#F59E0B', bg: 'rgba(245,158,11,0.14)' },
+  { key: 'Cold', icon: 'snowflake',     color: '#3B82F6', bg: 'rgba(59,130,246,0.14)' },
+];
+
 const _contactsAlertShown = { noAccount: false, notOnDevice: false };
 
 export default function LeadDetailScreen() {
@@ -120,10 +129,27 @@ export default function LeadDetailScreen() {
   // immediately with no way to recover. We now fall back to fetching the lead
   // by id from the server, showing a loading state while it resolves.
   const [fetchedLead,   setFetchedLead]   = useState(null);
+  const [savingTemp,    setSavingTemp]    = useState(false);
   const [leadLoading,   setLeadLoading]   = useState(false);
   const [leadFetchFail, setLeadFetchFail] = useState(false);
 
   const lead = storeLead || fetchedLead;
+
+  // Quick-set Hot/Warm/Cold. Dispatches patchLead (PATCH /lead/:id { temperature }),
+  // which the store merges on fulfilment; we also update the locally-fetched copy so
+  // it reflects instantly when the lead was opened directly (not via the list).
+  const handleSetTemperature = async (temp) => {
+    if (savingTemp || (lead?.temperature || '').toLowerCase() === temp.toLowerCase()) return;
+    setSavingTemp(true);
+    try {
+      await dispatch(patchLead({ id: leadId, data: { temperature: temp } })).unwrap();
+      setFetchedLead((prev) => (prev ? { ...prev, temperature: temp } : prev));
+    } catch (e) {
+      Alert.alert('Update failed', typeof e === 'string' ? e : 'Could not update temperature. Please try again.');
+    } finally {
+      setSavingTemp(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -928,6 +954,32 @@ export default function LeadDetailScreen() {
             <InfoItem icon="flag"        label="Status"      value={lead.status} />
             <InfoItem icon="thermometer" label="Temperature" value={lead.temperature || '—'} />
           </View>
+
+          <View style={styles.divider} />
+          <View style={styles.tempSelectHeader}>
+            <Icon name="thermometer" size={15} color={colors.textMuted} />
+            <Text style={styles.tempSelectLabel}>Set Temperature</Text>
+            {savingTemp ? <ActivityIndicator size="small" color={colors.textMuted} style={{ marginLeft: 6 }} /> : null}
+          </View>
+          <View style={styles.tempChipRow}>
+            {TEMP_OPTIONS.map((opt) => {
+              const active = (lead.temperature || '').toLowerCase() === opt.key.toLowerCase();
+              return (
+                <TouchableOpacity
+                  key={opt.key}
+                  activeOpacity={0.8}
+                  disabled={savingTemp}
+                  onPress={() => handleSetTemperature(opt.key)}
+                  style={[styles.tempChip, active && { backgroundColor: opt.bg, borderColor: opt.color }]}
+                >
+                  <Icon name={opt.icon} size={15} color={active ? opt.color : colors.textMuted} />
+                  <Text style={[styles.tempChipTxt, active && { color: opt.color, fontWeight: '700' }]}>
+                    {opt.key}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
           {lead.remark ? (
             <>
               <View style={styles.divider} />
@@ -1235,6 +1287,12 @@ return StyleSheet.create({
   infoLabel:          { fontSize: 11, color: colors.textSec, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: '600' },
   infoValue:          { fontSize: 13, color: colors.textPrimary, fontWeight: '600' },
   divider:            { height: 1, backgroundColor: colors.border, marginVertical: 10 },
+
+  tempSelectHeader:   { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 },
+  tempSelectLabel:    { fontSize: 11, color: colors.textSec, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: '600' },
+  tempChipRow:        { flexDirection: 'row', gap: 8 },
+  tempChip:           { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceAlt },
+  tempChipTxt:        { fontSize: 13, color: colors.textMuted, fontWeight: '600' },
 
   callBigBtn:         { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.green, marginHorizontal: 16, marginBottom: 8, borderRadius: 14, paddingVertical: 14 },
   callBigBtnText:     { color: '#fff', fontSize: 15, fontWeight: '700' },

@@ -28,7 +28,8 @@ import api               from '../services/api';
 import { getDeviceInfo } from '../services/deviceInfoService';
 import { cancelClockInReminder } from '../services/notificationService';
 import { syncRecordings }        from '../services/recordingService';
-import { COLORS, RADIUS, FONT } from '../theme/tokens';
+import { RADIUS, FONT } from '../theme/tokens';
+import { useTheme } from '../theme/ThemeContext';
 import { isOnCall, subscribeToCallState } from '../services/callStateService';
 import moment from 'moment';
 
@@ -48,16 +49,24 @@ function fmtTime(d) {
 }
 
 // ── Status display config ─────────────────────────────────────────────────────
-const STATUS_STYLES = {
-  active    : { dot: COLORS.green,     label: 'Active',     chipBg: COLORS.greenBg,    chipText: COLORS.greenLight  },
-  on_break  : { dot: COLORS.amber,     label: 'On Break',   chipBg: COLORS.amberBg,    chipText: COLORS.amberLight  },
-  on_call   : { dot: COLORS.blue,      label: 'On Call',    chipBg: COLORS.blueBg,     chipText: COLORS.blueLight   },
-  idle      : { dot: COLORS.red,       label: 'Idle',       chipBg: COLORS.redBg,      chipText: COLORS.redLight    },
-  logged_out: { dot: COLORS.textMuted, label: 'Logged Out', chipBg: COLORS.surfaceAlt, chipText: COLORS.textMuted   },
-};
+const getStatusStyles = (colors) => ({
+  active    : { dot: colors.green,     label: 'Active',     chipBg: colors.greenBg,    chipText: colors.greenLight  },
+  on_break  : { dot: colors.amber,     label: 'On Break',   chipBg: colors.amberBg,    chipText: colors.amberLight  },
+  on_call   : { dot: colors.blue,      label: 'On Call',    chipBg: colors.blueBg,     chipText: colors.blueLight   },
+  idle      : { dot: colors.red,       label: 'Idle',       chipBg: colors.redBg,      chipText: colors.redLight    },
+  logged_out: { dot: colors.textMuted, label: 'Logged Out', chipBg: colors.surfaceAlt, chipText: colors.textMuted   },
+});
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function AttendanceWidget() {
+  // ── Theme (dark/light) ──────────────────────────────────────────────────
+  // Colours come from useTheme() so the widget follows the app's dark/light
+  // toggle. Styles + status palette are rebuilt via useMemo whenever the theme
+  // changes. Factories (createStyles / getStatusStyles) keep colour refs out of
+  // module scope, which Hermes requires.
+  const { colors } = useTheme();
+  const w            = useMemo(() => createStyles(colors), [colors]);
+  const STATUS_STYLES = useMemo(() => getStatusStyles(colors), [colors]);
   const [record,  setRecord]  = useState(null);
   const [loading, setLoading] = useState(true);
   const [clockingIn, setClockingIn] = useState(false);
@@ -753,7 +762,7 @@ export default function AttendanceWidget() {
   if (loading) {
     return (
       <View style={w.loadWrap}>
-        <ActivityIndicator color={COLORS.blue} />
+        <ActivityIndicator color={colors.blue} />
       </View>
     );
   }
@@ -866,11 +875,11 @@ export default function AttendanceWidget() {
 
       <View style={w.metaRow}>
         <View style={w.metaItem}>
-          <Icon name="login" size={12} color={COLORS.textMuted} />
+          <Icon name="login" size={12} color={colors.textMuted} />
           <Text style={w.metaLabel}>In: {fmtTime(record?.loginTime)}</Text>
         </View>
         <View style={w.metaItem}>
-          <Icon name="coffee-outline" size={12} color={COLORS.textMuted} />
+          <Icon name="coffee-outline" size={12} color={colors.textMuted} />
           <Text style={w.metaLabel}>Break: {breakStr}</Text>
         </View>
       </View>
@@ -879,11 +888,11 @@ export default function AttendanceWidget() {
       <View style={w.idealBox}>
         <View style={w.idealHeader}>
           <View style={w.idealHeaderLeft}>
-            <Icon name="clock-time-four-outline" size={13} color={COLORS.blueLight} />
+            <Icon name="clock-time-four-outline" size={13} color={colors.blueLight} />
             <Text style={w.idealTitle}>Ideal Working Time</Text>
           </View>
           <TouchableOpacity onPress={openIdealModal} style={w.idealEditBtn}>
-            <Icon name={idealTime || idealRemark ? 'pencil-outline' : 'plus'} size={13} color={COLORS.blueLight} />
+            <Icon name={idealTime || idealRemark ? 'pencil-outline' : 'plus'} size={13} color={colors.blueLight} />
             <Text style={w.idealEditTxt}>{idealTime || idealRemark ? 'Edit' : 'Add'}</Text>
           </TouchableOpacity>
         </View>
@@ -894,7 +903,7 @@ export default function AttendanceWidget() {
         )}
         {idealRemark ? (
           <View style={w.idealRemarkRow}>
-            <Icon name="message-reply-text-outline" size={12} color={COLORS.textMuted} style={{ marginTop: 1 }} />
+            <Icon name="message-reply-text-outline" size={12} color={colors.textMuted} style={{ marginTop: 1 }} />
             <Text style={w.idealRemarkTxt}>{idealRemark}</Text>
           </View>
         ) : null}
@@ -969,11 +978,11 @@ export default function AttendanceWidget() {
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
-const w = StyleSheet.create({
+const createStyles = (colors) => StyleSheet.create({
   loadWrap:     { padding: 24, alignItems: 'center' },
-  card:         { backgroundColor: COLORS.surface, borderRadius: RADIUS.lg, padding: 16, borderWidth: 1, borderColor: COLORS.border },
-  notClocked:   { fontSize: FONT.sm, color: COLORS.textMuted, marginBottom: 12 },
-  clockInBtn:   { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: COLORS.blue, borderRadius: RADIUS.md, paddingVertical: 10, paddingHorizontal: 16, alignSelf: 'flex-start' },
+  card:         { backgroundColor: colors.surface, borderRadius: RADIUS.lg, padding: 16, borderWidth: 1, borderColor: colors.border },
+  notClocked:   { fontSize: FONT.sm, color: colors.textMuted, marginBottom: 12 },
+  clockInBtn:   { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.blue, borderRadius: RADIUS.md, paddingVertical: 10, paddingHorizontal: 16, alignSelf: 'flex-start' },
   clockInTxt:   { color: '#fff', fontWeight: '700', fontSize: FONT.sm },
 
   // Request remote button
@@ -992,33 +1001,33 @@ const w = StyleSheet.create({
   meetingSubmitBtn:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#2563EB', borderRadius: 12, paddingVertical: 13 },
   meetingSubmitTxt:  { color: '#fff', fontSize: 14, fontWeight: '700' },
   topRow:       { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 10 },
-  elapsedLabel: { fontSize: FONT.xs, color: COLORS.textMuted, marginBottom: 2 },
-  elapsed:      { fontSize: 26, fontWeight: '800', color: COLORS.textPrimary, fontVariant: ['tabular-nums'] },
+  elapsedLabel: { fontSize: FONT.xs, color: colors.textMuted, marginBottom: 2 },
+  elapsed:      { fontSize: 26, fontWeight: '800', color: colors.textPrimary, fontVariant: ['tabular-nums'] },
   statusChip:   { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 5, borderRadius: RADIUS.full },
   statusDot:    { width: 7, height: 7, borderRadius: 4 },
   statusTxt:    { fontSize: FONT.xs, fontWeight: '700' },
   metaRow:      { flexDirection: 'row', gap: 16, marginBottom: 12 },
   metaItem:     { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  metaLabel:    { fontSize: FONT.xs, color: COLORS.textMuted },
+  metaLabel:    { fontSize: FONT.xs, color: colors.textMuted },
   btnRow:       { flexDirection: 'row', gap: 8 },
   btn:          { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, borderRadius: RADIUS.md, paddingVertical: 9 },
   btnTxt:       { color: '#fff', fontSize: FONT.sm, fontWeight: '700' },
-  btnGreen:     { backgroundColor: COLORS.green },
+  btnGreen:     { backgroundColor: colors.green },
   trackingBanner: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 7, marginBottom: 10, borderRadius: 8, backgroundColor: '#1C2A1A', borderWidth: 1, borderColor: '#34D39940' },
   trackingDot:    { width: 7, height: 7, borderRadius: 4, backgroundColor: '#34D399' },
   trackingTxt:    { fontSize: 11, color: '#34D399', fontWeight: '700' },
-  btnAmber:     { backgroundColor: COLORS.amber },
-  btnRed:       { backgroundColor: COLORS.red },
+  btnAmber:     { backgroundColor: colors.amber },
+  btnRed:       { backgroundColor: colors.red },
 
   // Ideal time + remark
-  idealBox:        { backgroundColor: COLORS.surfaceAlt, borderRadius: RADIUS.md, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: COLORS.border },
+  idealBox:        { backgroundColor: colors.surfaceAlt, borderRadius: RADIUS.md, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: colors.border },
   idealHeader:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
   idealHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  idealTitle:      { fontSize: FONT.xs, color: COLORS.textMuted, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.4 },
-  idealEditBtn:    { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 8, paddingVertical: 3, borderRadius: RADIUS.full, backgroundColor: COLORS.blueBg },
-  idealEditTxt:    { fontSize: FONT.xs, color: COLORS.blueLight, fontWeight: '700' },
-  idealTimeTxt:    { fontSize: FONT.md, color: COLORS.textPrimary, fontWeight: '700' },
-  idealEmptyTxt:   { fontSize: FONT.sm, color: COLORS.textMuted, fontStyle: 'italic' },
+  idealTitle:      { fontSize: FONT.xs, color: colors.textMuted, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.4 },
+  idealEditBtn:    { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 8, paddingVertical: 3, borderRadius: RADIUS.full, backgroundColor: colors.blueBg },
+  idealEditTxt:    { fontSize: FONT.xs, color: colors.blueLight, fontWeight: '700' },
+  idealTimeTxt:    { fontSize: FONT.md, color: colors.textPrimary, fontWeight: '700' },
+  idealEmptyTxt:   { fontSize: FONT.sm, color: colors.textMuted, fontStyle: 'italic' },
   idealRemarkRow:  { flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginTop: 6 },
-  idealRemarkTxt:  { flex: 1, fontSize: FONT.sm, color: COLORS.textSecondary || COLORS.textMuted, lineHeight: 18 },
+  idealRemarkTxt:  { flex: 1, fontSize: FONT.sm, color: colors.textSecondary || colors.textMuted, lineHeight: 18 },
 });
