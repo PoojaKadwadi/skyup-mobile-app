@@ -14,7 +14,7 @@ import { submitCallRemark, patchLead, fetchLeads }             from '../../store
 import { makePhoneCall, normalizePhone }           from '../../services/phoneService';
 import { getCallLogsForNumber }                    from '../../services/phoneService';
 import { getLeadCallLogs }                         from '../../api/callLogsApi';
-import { markLeadInvalid, getLeadActionSummary, getLeadById } from '../../api/leadsApi';
+import { markLeadInvalid, markNotInterested, getLeadActionSummary, getLeadById } from '../../api/leadsApi';
 import { triggerPostCallRecordingSync }            from '../../services/backgroundSyncService';
 import { syncCallLogs }                            from '../../api/callLogsApi';
 import CallButton                                  from '../../components/CallButton';
@@ -27,6 +27,11 @@ import { useTheme }                                from '../../theme/ThemeContex
 
 // Visit types offered when the agent logs a Client Meeting from the remark modal.
 const MEETING_TYPES = ['In-Person', 'Site Visit', 'Demo', 'Video Call', 'Phone Call'];
+
+// Lead status options — kept in sync with the website's UpdateStatusModal
+// (["New","In Progress","Converted","Not Interested"]). "Not Interested" runs the
+// backend reassignment/verification flow instead of a plain status patch.
+const STATUS_OPTIONS = ['New', 'In Progress', 'Converted', 'Not Interested'];
 
 const OUTCOMES = ['Answered', 'Not Answered', 'Busy', 'Switch Off', 'Call Back Later', 'Interested', 'Not Interested', 'Invalid', 'Client Meeting'];
 
@@ -130,6 +135,11 @@ export default function LeadDetailScreen() {
   // by id from the server, showing a loading state while it resolves.
   const [fetchedLead,   setFetchedLead]   = useState(null);
   const [savingTemp,    setSavingTemp]    = useState(false);
+  // ── Status quick-set state ────────────────────────────────────────────────
+  const [savingStatus,  setSavingStatus]  = useState(false);
+  const [niModalVisible, setNiModalVisible] = useState(false); // Not-Interested reason prompt
+  const [niReason,       setNiReason]       = useState('');
+  const [niSubmitting,   setNiSubmitting]   = useState(false);
   const [leadLoading,   setLeadLoading]   = useState(false);
   const [leadFetchFail, setLeadFetchFail] = useState(false);
 
@@ -148,6 +158,58 @@ export default function LeadDetailScreen() {
       Alert.alert('Update failed', typeof e === 'string' ? e : 'Could not update temperature. Please try again.');
     } finally {
       setSavingTemp(false);
+    }
+  };
+
+  // Quick-set lead status. New / In Progress / Converted patch instantly via
+  // PATCH /lead/:id { status }. "Not Interested" instead opens a reason prompt
+  // and runs the backend reassignment/verification flow (same as the website).
+  const handleSetStatus = async (status) => {
+    if (savingStatus) return;
+    if ((lead?.status || '') === status) return;
+
+    if (status === 'Not Interested') {
+      setNiReason('');
+      setNiModalVisible(true);
+      return;
+    }
+
+    setSavingStatus(true);
+    try {
+      await dispatch(patchLead({ id: leadId, data: { status } })).unwrap();
+      setFetchedLead((prev) => (prev ? { ...prev, status } : prev));
+    } catch (e) {
+      Alert.alert('Update failed', typeof e === 'string' ? e : 'Could not update status. Please try again.');
+    } finally {
+      setSavingStatus(false);
+    }
+  };
+
+  // Submit the Not-Interested reason → backend reassigns the lead for verification
+  // and drops it from this agent's panel, so we refresh the list and go back.
+  const submitNotInterested = async () => {
+    const reason = niReason.trim();
+    if (!reason) {
+      Alert.alert('Reason required', 'Please enter a reason before marking this lead Not Interested.');
+      return;
+    }
+    setNiSubmitting(true);
+    try {
+      const res = await markNotInterested(leadId, { remark: reason });
+      setNiModalVisible(false);
+      setNiReason('');
+      try { await dispatch(fetchLeads()).unwrap?.(); } catch {}
+      const who = res?.reassignedTo?.name;
+      const msg = res?.message
+        || (who
+          ? `Lead marked Not Interested and sent to ${who} for verification.`
+          : 'Lead marked Not Interested.');
+      Alert.alert('✓ Done', msg);
+      navigation.goBack();
+    } catch (e) {
+      Alert.alert('Failed', e?.response?.data?.message || e?.message || String(e));
+    } finally {
+      setNiSubmitting(false);
     }
   };
 
@@ -980,6 +1042,43 @@ export default function LeadDetailScreen() {
               );
             })}
           </View>
+
+          <View style={styles.divider} />
+          <View style={styles.tempSelectHeader}>
+            <Icon name="flag" size={15} color={colors.textMuted} />
+            <Text style={styles.tempSelectLabel}>Set Status</Text>
+            {savingStatus ? <ActivityIndicator size="small" color={colors.textMuted} style={{ marginLeft: 6 }} /> : null}
+          </View>
+          <View style={styles.statusChipRow}>
+            {STATUS_OPTIONS.map((s) => {
+              const active = (lead.status || '') === s;
+              const danger = s === 'Not Interested';
+              return (
+                <TouchableOpacity
+                  key={s}
+                  activeOpacity={0.8}
+                  disabled={savingStatus}
+                  onPress={() => handleSetStatus(s)}
+                  style={[
+                    styles.statusChip,
+                    active && (danger
+                      ? { backgroundColor: colors.dangerBg || 'rgba(220,38,38,0.12)', borderColor: colors.danger || '#DC2626' }
+                      : { backgroundColor: colors.blueBg || 'rgba(37,99,235,0.12)', borderColor: colors.blue || '#2563EB' }),
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.statusChipTxt,
+                      active && { color: danger ? (colors.danger || '#DC2626') : (colors.blue || '#2563EB'), fontWeight: '700' },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {s}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
           {lead.remark ? (
             <>
               <View style={styles.divider} />
@@ -1128,6 +1227,50 @@ export default function LeadDetailScreen() {
       </ScrollView>
 
       {/* ── Remark modal ────────────────────────────────────────────────────── */}
+      {/* ── Not-Interested reason prompt ─────────────────────────────────── */}
+      <Modal visible={niModalVisible} transparent animationType="fade" onRequestClose={() => !niSubmitting && setNiModalVisible(false)}>
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <TouchableOpacity
+            style={styles.modalDismissArea}
+            activeOpacity={1}
+            onPress={() => !niSubmitting && setNiModalVisible(false)}
+          />
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeaderRow}>
+              <Text style={styles.modalTitle}>Mark Not Interested</Text>
+              <TouchableOpacity onPress={() => !niSubmitting && setNiModalVisible(false)}>
+                <Icon name="close" size={22} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.niHint}>
+              This reassigns the lead to another agent for verification. A reason is required.
+            </Text>
+            <TextInput
+              style={styles.niInput}
+              value={niReason}
+              onChangeText={setNiReason}
+              placeholder="Reason / remark…"
+              placeholderTextColor={colors.textMuted}
+              multiline
+              editable={!niSubmitting}
+            />
+            <TouchableOpacity
+              style={[styles.niSubmitBtn, (!niReason.trim() || niSubmitting) && { opacity: 0.5 }]}
+              disabled={!niReason.trim() || niSubmitting}
+              onPress={submitNotInterested}
+              activeOpacity={0.85}
+            >
+              {niSubmitting
+                ? <ActivityIndicator size="small" color="#fff" />
+                : <Text style={styles.niSubmitTxt}>Confirm Not Interested</Text>}
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
       <Modal visible={showRemarkModal} transparent animationType="slide" onRequestClose={closeModal}>
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -1293,6 +1436,14 @@ return StyleSheet.create({
   tempChipRow:        { flexDirection: 'row', gap: 8 },
   tempChip:           { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceAlt },
   tempChipTxt:        { fontSize: 13, color: colors.textMuted, fontWeight: '600' },
+  statusChipRow:      { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
+  statusChip:         { flexGrow: 1, flexBasis: '22%', alignItems: 'center', justifyContent: 'center', paddingVertical: 9, paddingHorizontal: 6, borderRadius: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceAlt },
+  statusChipTxt:      { fontSize: 12, color: colors.textMuted, fontWeight: '600' },
+  modalHeaderRow:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  niHint:             { fontSize: 12, color: colors.textSec, marginBottom: 12, lineHeight: 17 },
+  niInput:            { minHeight: 80, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 12, fontSize: 14, color: colors.textPrimary, backgroundColor: colors.surfaceAlt, textAlignVertical: 'top', marginBottom: 14 },
+  niSubmitBtn:        { backgroundColor: colors.red || '#DC2626', borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
+  niSubmitTxt:        { color: '#fff', fontSize: 15, fontWeight: '700' },
 
   callBigBtn:         { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.green, marginHorizontal: 16, marginBottom: 8, borderRadius: 14, paddingVertical: 14 },
   callBigBtnText:     { color: '#fff', fontSize: 15, fontWeight: '700' },

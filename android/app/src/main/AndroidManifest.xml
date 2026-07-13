@@ -66,7 +66,8 @@
 
     <application
       android:name=".MainApplication"
-      android:label="@string/app_name"
+      android:label="SkyUp CRM"
+      tools:replace="android:label"
       android:icon="@mipmap/ic_launcher"
       android:roundIcon="@mipmap/ic_launcher"
       android:allowBackup="false"
@@ -77,7 +78,7 @@
 
       <activity
         android:name=".MainActivity"
-        android:label="@string/app_name"
+        android:label="SkyUp CRM"
         android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
         android:launchMode="singleTask"
         android:windowSoftInputMode="adjustResize"
