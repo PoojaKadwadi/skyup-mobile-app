@@ -107,5 +107,12 @@
         android:foregroundServiceType="dataSync|shortService"
         tools:replace="android:foregroundServiceType" />
 
+      <!-- Default icon used by FCM for system-tray notifications when the app is
+           backgrounded/killed. Points at the white monochrome ic_notification
+           vector so notifications show the SkyUp mark instead of a white blob. -->
+      <meta-data
+        android:name="com.google.firebase.messaging.default_notification_icon"
+        android:resource="@drawable/ic_notification" />
+
     </application>
 </manifest>

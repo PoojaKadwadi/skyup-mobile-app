@@ -586,21 +586,28 @@ export default function ClientMeetingScreen() {
               {filteredLeads.length === 0 ? (
                 <Text style={styles.leadEmptyText}>No clients found</Text>
               ) : (
-                filteredLeads.map(l => (
-                  <TouchableOpacity
-                    key={l.id}
-                    style={[styles.leadOption, selectedLeadId === l.id && styles.leadOptionActive]}
-                    onPress={() => { setSelectedLeadId(l.id); setShowPicker(false); setLeadSearch(''); }}
-                  >
-                    <View style={[styles.leadOptionDot, selectedLeadId === l.id && styles.leadOptionDotActive]} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.leadOptionName, selectedLeadId === l.id && { color: colors.greenLight }]}>
-                        {l.name}
-                      </Text>
-                      <Text style={styles.leadOptionPhone}>{l.mobile}</Text>
-                    </View>
-                  </TouchableOpacity>
-                ))
+                <ScrollView
+                  style={styles.leadOptionsScroll}
+                  nestedScrollEnabled
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator
+                >
+                  {filteredLeads.map(l => (
+                    <TouchableOpacity
+                      key={l.id}
+                      style={[styles.leadOption, selectedLeadId === l.id && styles.leadOptionActive]}
+                      onPress={() => { setSelectedLeadId(l.id); setShowPicker(false); setLeadSearch(''); }}
+                    >
+                      <View style={[styles.leadOptionDot, selectedLeadId === l.id && styles.leadOptionDotActive]} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.leadOptionName, selectedLeadId === l.id && { color: colors.greenLight }]}>
+                          {l.name}
+                        </Text>
+                        <Text style={styles.leadOptionPhone}>{l.mobile}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
               )}
             </View>
           )}
@@ -857,6 +864,7 @@ return StyleSheet.create({
   leadSearchBar:      { flexDirection: 'row', alignItems: 'center', padding: 10, borderBottomWidth: 1, borderBottomColor: colors.border },
   leadSearchInput:    { flex: 1, color: colors.textPrimary, fontSize: 13, padding: 0 },
   leadEmptyText:      { padding: 16, color: colors.textMuted, textAlign: 'center', fontSize: 13 },
+  leadOptionsScroll:  { maxHeight: 230 },
   leadOption:         { flexDirection: 'row', alignItems: 'center', padding: 12, borderBottomWidth: 1, borderBottomColor: colors.border, gap: 10 },
   leadOptionActive:   { backgroundColor: colors.blueBg },
   leadOptionDot:      { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.border },

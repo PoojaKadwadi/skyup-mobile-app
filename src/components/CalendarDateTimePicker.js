@@ -22,6 +22,7 @@
 import React, { useState, useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
+import { useTheme } from '../theme/ThemeContext';
 
 const WEEKDAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
 const MONTHS = [
@@ -57,6 +58,9 @@ function buildMonthMatrix(viewYear, viewMonth) {
 }
 
 export default function CalendarDateTimePicker({ value, onConfirm, onCancel, minDate }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   const seed = value ? new Date(value) : new Date();
   const today = startOfDay(new Date());
   const floor = minDate ? startOfDay(minDate) : today;
@@ -120,10 +124,10 @@ export default function CalendarDateTimePicker({ value, onConfirm, onCancel, min
         <Text style={styles.monthLabel}>{MONTHS[viewMonth]}, {viewYear}</Text>
         <View style={styles.navRow}>
           <TouchableOpacity style={styles.navBtn} onPress={() => goMonth(-1)}>
-            <Icon name="chevron-up" size={22} color="#93C5FD" />
+            <Icon name="chevron-up" size={22} color={colors.blueLight} />
           </TouchableOpacity>
           <TouchableOpacity style={styles.navBtn} onPress={() => goMonth(1)}>
-            <Icon name="chevron-down" size={22} color="#93C5FD" />
+            <Icon name="chevron-down" size={22} color={colors.blueLight} />
           </TouchableOpacity>
         </View>
       </View>
@@ -242,59 +246,61 @@ export default function CalendarDateTimePicker({ value, onConfirm, onCancel, min
 
 const CELL = 40;
 
-const styles = StyleSheet.create({
-  card:        { backgroundColor: '#0F172A', borderRadius: 16, padding: 14,
-                 borderWidth: 1, borderColor: '#1E293B', marginTop: 8 },
+function createStyles(colors) {
+  return StyleSheet.create({
+  card:        { backgroundColor: colors.surface, borderRadius: 16, padding: 14,
+                 borderWidth: 1, borderColor: colors.border, marginTop: 8 },
   header:      { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
-  monthLabel:  { fontSize: 16, fontWeight: '700', color: '#F1F5F9' },
+  monthLabel:  { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
   navRow:      { flexDirection: 'row', gap: 8 },
   navBtn:      { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center',
-                 backgroundColor: '#1E293B' },
+                 backgroundColor: colors.surfaceAlt },
 
   weekRow:     { flexDirection: 'row', marginBottom: 4 },
-  weekday:     { width: CELL, textAlign: 'center', fontSize: 12, fontWeight: '700', color: '#64748B' },
+  weekday:     { width: CELL, textAlign: 'center', fontSize: 12, fontWeight: '700', color: colors.textMuted },
 
   grid:        { flexDirection: 'row', flexWrap: 'wrap' },
   cell:        { width: CELL, height: CELL, alignItems: 'center', justifyContent: 'center', borderRadius: 10 },
-  cellSelected:{ backgroundColor: '#2563EB', borderWidth: 2, borderColor: '#1D4ED8' },
-  cellText:    { fontSize: 14, color: '#E2E8F0', fontWeight: '600' },
+  cellSelected:{ backgroundColor: colors.blue, borderWidth: 2, borderColor: colors.blueLight },
+  cellText:    { fontSize: 14, color: colors.textPrimary, fontWeight: '600' },
   cellTextSelected: { color: '#FFFFFF', fontWeight: '800' },
-  cellOut:     { color: '#475569', fontWeight: '400' },
-  cellDisabled:{ color: '#334155' },
-  cellToday:   { color: '#60A5FA' },
+  cellOut:     { color: colors.textMuted, fontWeight: '400' },
+  cellDisabled:{ color: colors.border },
+  cellToday:   { color: colors.blueLight },
 
   shortcutRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, marginBottom: 4,
                  paddingHorizontal: 4 },
-  shortcut:    { color: '#60A5FA', fontSize: 14, fontWeight: '700' },
+  shortcut:    { color: colors.blueLight, fontSize: 14, fontWeight: '700' },
 
-  timeTitle:   { color: '#94A3B8', fontSize: 11, fontWeight: '700', textTransform: 'uppercase',
+  timeTitle:   { color: colors.textSec, fontSize: 11, fontWeight: '700', textTransform: 'uppercase',
                  letterSpacing: 1.2, marginTop: 12, marginBottom: 8 },
   hourScroll:  { flexDirection: 'row' },
-  hourBtn:     { width: 40, height: 40, borderRadius: 10, backgroundColor: '#1E293B',
+  hourBtn:     { width: 40, height: 40, borderRadius: 10, backgroundColor: colors.surfaceAlt,
                  alignItems: 'center', justifyContent: 'center', marginRight: 8 },
-  hourBtnActive:{ backgroundColor: '#2563EB' },
-  hourText:    { color: '#E2E8F0', fontSize: 15, fontWeight: '700' },
+  hourBtnActive:{ backgroundColor: colors.blue },
+  hourText:    { color: colors.textPrimary, fontSize: 15, fontWeight: '700' },
   hourTextActive:{ color: '#FFFFFF' },
 
   minMeridiemRow:{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12 },
-  minuteBox:   { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1E293B', borderRadius: 10,
+  minuteBox:   { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceAlt, borderRadius: 10,
                  paddingHorizontal: 6 },
   stepBtn:     { width: 34, height: 34, alignItems: 'center', justifyContent: 'center' },
-  minuteText:  { color: '#F1F5F9', fontSize: 16, fontWeight: '800', minWidth: 34, textAlign: 'center' },
+  minuteText:  { color: colors.textPrimary, fontSize: 16, fontWeight: '800', minWidth: 34, textAlign: 'center' },
 
-  meridiemBox: { flexDirection: 'row', backgroundColor: '#1E293B', borderRadius: 10, overflow: 'hidden' },
+  meridiemBox: { flexDirection: 'row', backgroundColor: colors.surfaceAlt, borderRadius: 10, overflow: 'hidden' },
   meridiemBtn: { paddingHorizontal: 18, paddingVertical: 9 },
-  meridiemBtnActive: { backgroundColor: '#2563EB' },
-  meridiemText:{ color: '#94A3B8', fontSize: 14, fontWeight: '700' },
+  meridiemBtnActive: { backgroundColor: colors.blue },
+  meridiemText:{ color: colors.textSec, fontSize: 14, fontWeight: '700' },
   meridiemTextActive: { color: '#FFFFFF' },
 
-  preview:     { color: '#93C5FD', fontSize: 13, fontWeight: '700', textAlign: 'center', marginTop: 12 },
+  preview:     { color: colors.blueLight, fontSize: 13, fontWeight: '700', textAlign: 'center', marginTop: 12 },
 
   actions:     { flexDirection: 'row', gap: 10, marginTop: 14 },
-  cancelBtn:   { flex: 1, paddingVertical: 12, borderRadius: 12, borderWidth: 1, borderColor: '#334155',
+  cancelBtn:   { flex: 1, paddingVertical: 12, borderRadius: 12, borderWidth: 1, borderColor: colors.border,
                  alignItems: 'center' },
-  cancelText:  { color: '#94A3B8', fontSize: 14, fontWeight: '700' },
-  confirmBtn:  { flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: '#2563EB', alignItems: 'center' },
-  confirmBtnDisabled: { backgroundColor: '#1E3A5F' },
+  cancelText:  { color: colors.textSec, fontSize: 14, fontWeight: '700' },
+  confirmBtn:  { flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: colors.blue, alignItems: 'center' },
+  confirmBtnDisabled: { backgroundColor: colors.border },
   confirmText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
-});
+  });
+}

@@ -220,6 +220,17 @@ function formatLead(lead) {
     const displayRemark = lastManualRemark || sourceRemark;
     const remarkIsManual = !!lastManualRemark;
 
+    // INITIAL REMARK (campaign / lead-source remark). The backend now stores the
+    // creation-time remark in `initialRemark` (set once, never overwritten). For
+    // leads created before that field existed we fall back to `lead.remark` ONLY
+    // when there is no call history yet — in that case the top-level remark is
+    // still the original campaign remark (it only gets overwritten once an agent
+    // adds a call/meeting remark). For already-worked legacy leads the original
+    // campaign remark is unrecoverable, so we leave it blank rather than showing a
+    // later remark mislabelled as the initial one.
+    const initialRemark = (lead.initialRemark && String(lead.initialRemark).trim())
+      || (callHistory.length === 0 ? sourceRemark : '');
+
     return {
         id: String(lead._id),
         name: lead.name || 'Unknown',
@@ -236,6 +247,7 @@ function formatLead(lead) {
         _raw_date: lead.date || lead.createdAt || null,
         remark: displayRemark,
         remarkIsManual,
+        initialRemark,
         followUpDate: lead.followUpDate || null,
         temperature: lead.temperature || lead.Quality || null,
         Quality: lead.temperature || lead.Quality || null,

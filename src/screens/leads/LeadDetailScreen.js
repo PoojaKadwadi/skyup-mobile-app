@@ -8,7 +8,7 @@ import {
 // DateTimePickerAndroid.open() was crashing the Follow-Up button on every Android device.
 // Replaced with pure-JS date/time picker using built-in TextInput + View components.
 import { useDispatch, useSelector }                from 'react-redux';
-import { useNavigation, useRoute }                 from '@react-navigation/native';
+import { useNavigation, useRoute, useFocusEffect }                 from '@react-navigation/native';
 import Icon                                        from 'react-native-vector-icons/MaterialCommunityIcons';
 import { submitCallRemark, patchLead, fetchLeads, upsertLead }             from '../../store/slices/leadsSlice';
 import { makePhoneCall, normalizePhone }           from '../../services/phoneService';
@@ -140,8 +140,9 @@ export default function LeadDetailScreen() {
   const [niModalVisible, setNiModalVisible] = useState(false); // Not-Interested reason prompt
   const [niReason,       setNiReason]       = useState('');
   const [niSubmitting,   setNiSubmitting]   = useState(false);
-  // Collapse the CRM Call History (remarks) section by default; it expands on tap.
-  const [historyExpanded, setHistoryExpanded] = useState(false);
+  // Modal that lists ALL remarks (call history + the initial campaign remark).
+  // Opened by tapping the "Last Remark" row.
+  const [showAllRemarks, setShowAllRemarks] = useState(false);
   const [leadLoading,   setLeadLoading]   = useState(false);
   const [leadFetchFail, setLeadFetchFail] = useState(false);
 
@@ -242,6 +243,27 @@ export default function LeadDetailScreen() {
     return () => { cancelled = true; };
   }, [leadId, storeLead]);
 
+  // ── Refresh on focus ──────────────────────────────────────────────────────
+  // The detail page can go stale after the agent logs a Client Meeting (or any
+  // remark) on another screen — the backend updates the lead's `remark` and
+  // `meetingRemarks` but this screen still shows the cached copy. Re-fetch the
+  // lead every time the screen regains focus and push the fresh copy into the
+  // Redux store + local state so the "Last Remark" and history are always current.
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      if (!leadId) return;
+      getLeadById(leadId)
+        .then((data) => {
+          if (cancelled || !data) return;
+          dispatch(upsertLead(data));   // reconcile the store copy
+          setFetchedLead(data);         // and the local fallback copy
+        })
+        .catch(() => {});               // silent — keep showing cached data on failure
+      return () => { cancelled = true; };
+    }, [leadId, dispatch]),
+  );
+
   // ── Has this lead already been marked "Interested"? ─────────────────────────
   // If yes, we hide the "Interested" outcome chip so the agent can't pick it
   // again — preventing duplicate "Interested" entries on the same lead.
@@ -260,22 +282,54 @@ export default function LeadDetailScreen() {
   // PERF FIX (typing lag): build the CRM call-history list once per data change,
   // not on every keystroke in the remark box. Rendering this inline rebuilt the
   // whole list on each setRemark, which lagged typing on leads with long history.
-  const callHistoryView = useMemo(() => {
+  // ALL REMARKS list for the "Last Remark" popup — the full call-history
+  // (newest first) plus, at the very bottom, the ORIGINAL remark added when the
+  // lead was created on the campaign page (lead.initialRemark). Built once per
+  // data change, not on every keystroke in the remark box.
+  const allRemarksList = useMemo(() => {
     const ch = Array.isArray(lead?.callHistory) ? lead.callHistory : [];
-    if (ch.length === 0) return null;
-    return ch.slice().reverse().map((h, i) => (
-      <View key={i} style={styles.historyCard}>
+    const initial = (lead?.initialRemark || '').trim();
+
+    const cards = ch.slice().reverse().map((h, i) => (
+      <View key={`ch-${i}`} style={styles.historyCard}>
         <View style={styles.historyHeader}>
           <Text style={styles.historyAgent}>{h.userName || 'Agent'}</Text>
           <Text style={styles.historyDate}>{formatDateTime(h.calledAt)}</Text>
         </View>
-        {h.outcome && (
+        {h.outcome ? (
           <Text style={styles.historyOutcome}>Outcome: {h.outcome}</Text>
-        )}
+        ) : null}
         <Text style={styles.historyRemark}>{h.remark}</Text>
       </View>
     ));
-  }, [lead?.callHistory]);
+
+    // Append the initial campaign remark (avoid duplicating it if the earliest
+    // call-history entry is literally the same text).
+    const earliest = ch.length ? (ch[0]?.remark || '').trim() : '';
+    if (initial && initial !== earliest) {
+      cards.push(
+        <View key="initial" style={[styles.historyCard, styles.initialRemarkCard]}>
+          <View style={styles.historyHeader}>
+            <View style={styles.initialBadge}>
+              <Icon name="bullhorn-outline" size={11} color={colors.purpleLight} style={{ marginRight: 4 }} />
+              <Text style={styles.initialBadgeText}>Initial remark · from campaign</Text>
+            </View>
+          </View>
+          <Text style={styles.historyRemark}>{initial}</Text>
+        </View>,
+      );
+    }
+
+    if (cards.length === 0) {
+      return (
+        <View style={styles.historyEmptyWrap}>
+          <Icon name="note-off-outline" size={28} color={colors.textMuted} />
+          <Text style={styles.historyEmptyText}>No remarks yet for this lead</Text>
+        </View>
+      );
+    }
+    return cards;
+  }, [lead?.callHistory, lead?.initialRemark, styles, colors]);
 
   // FIX (primary bug): the remark modal used to be initialised to `postCall`,
   // so tapping "Call" in the leads list — which navigates here with
@@ -1188,7 +1242,23 @@ export default function LeadDetailScreen() {
           {lead.remark ? (
             <>
               <View style={styles.divider} />
-              <InfoItem icon="note-text-outline" label="Last Remark" value={lead.remark} full />
+              <TouchableOpacity
+                activeOpacity={0.7}
+                onPress={() => setShowAllRemarks(true)}
+                style={styles.lastRemarkRow}
+              >
+                <View style={styles.infoItemLeft}>
+                  <Icon name="note-text-outline" size={14} color={colors.textSec} style={{ marginRight: 6 }} />
+                  <Text style={styles.infoLabel}>Last Remark</Text>
+                  <View style={styles.remarksCountPill}>
+                    <Icon name="history" size={10} color={colors.blueLight} style={{ marginRight: 3 }} />
+                    <Text style={styles.remarksCountText}>
+                      View all{lead.callHistory?.length ? ` (${lead.callHistory.length})` : ''}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={styles.infoValue}>{lead.remark}</Text>
+              </TouchableOpacity>
             </>
           ) : null}
           {lead.followUpDate ? (
@@ -1322,34 +1392,42 @@ export default function LeadDetailScreen() {
           )}
         </View>
 
-        {lead.callHistory?.length > 0 && (
-          <View style={styles.section}>
-            <TouchableOpacity
-              style={styles.historyToggle}
-              activeOpacity={0.7}
-              onPress={() => setHistoryExpanded(v => !v)}
-            >
-              <Text style={styles.sectionTitle}>
-                CRM Call History ({lead.callHistory.length})
-              </Text>
-              <Icon
-                name={historyExpanded ? 'chevron-up' : 'chevron-down'}
-                size={20}
-                color={colors.textSec}
-              />
-            </TouchableOpacity>
-            {historyExpanded
-              ? callHistoryView
-              : (
-                <Text style={styles.historyHint}>
-                  Tap to view all {lead.callHistory.length} remark{lead.callHistory.length === 1 ? '' : 's'}
-                </Text>
-              )}
-          </View>
-        )}
-
         <View style={{ height: 40 }} />
       </ScrollView>
+
+      {/* ── All Remarks modal (opened from "Last Remark") ───────────────────── */}
+      <Modal
+        visible={showAllRemarks}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowAllRemarks(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <TouchableOpacity
+            style={styles.modalDismissArea}
+            activeOpacity={1}
+            onPress={() => setShowAllRemarks(false)}
+          />
+          <View style={styles.allRemarksCard}>
+            <View style={styles.modalHeaderRow}>
+              <Text style={styles.modalTitle}>All Remarks</Text>
+              <TouchableOpacity onPress={() => setShowAllRemarks(false)}>
+                <Icon name="close" size={22} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.allRemarksSub}>
+              Full remark history for {lead.name}, oldest campaign remark last.
+            </Text>
+            <ScrollView
+              style={styles.allRemarksScroll}
+              contentContainerStyle={{ paddingBottom: 8 }}
+              showsVerticalScrollIndicator
+            >
+              {allRemarksList}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {/* ── Remark modal ────────────────────────────────────────────────────── */}
       {/* ── Not-Interested reason prompt ─────────────────────────────────── */}
@@ -1617,6 +1695,25 @@ return StyleSheet.create({
   aiMetaChip:         { backgroundColor: '#2D2A55', color: colors.purpleLight, fontSize: 11, fontWeight: '700', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, overflow: 'hidden' },
   aiBasedOn:          { color: '#6B7280', fontSize: 10, marginLeft: 'auto' },
   historyRemark:      { fontSize: 13, color: colors.textPrimary, lineHeight: 18 },
+
+  // ── Last Remark row (tappable → opens All Remarks modal) ──
+  lastRemarkRow:      { paddingVertical: 2 },
+  remarksCountPill:   { flexDirection: 'row', alignItems: 'center', marginLeft: 'auto', backgroundColor: colors.blueBg, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3 },
+  remarksCountText:   { fontSize: 10, fontWeight: '700', color: colors.blueLight },
+
+  // ── All Remarks modal ──
+  allRemarksCard:     { backgroundColor: colors.surface, paddingHorizontal: 20, paddingTop: 20, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, borderColor: colors.border, paddingBottom: 28, maxHeight: '82%' },
+  allRemarksSub:      { fontSize: 12, color: colors.textMuted, marginBottom: 14 },
+  allRemarksScroll:   { flexGrow: 0 },
+
+  // ── Initial (campaign) remark card ──
+  initialRemarkCard:  { backgroundColor: colors.purpleBg + '30', borderColor: colors.purpleLight + '50' },
+  initialBadge:       { flexDirection: 'row', alignItems: 'center' },
+  initialBadgeText:   { fontSize: 11, fontWeight: '700', color: colors.purpleLight },
+
+  // ── Empty state inside the All Remarks modal ──
+  historyEmptyWrap:   { alignItems: 'center', paddingVertical: 30, gap: 8 },
+  historyEmptyText:   { fontSize: 13, color: colors.textMuted },
 
   notFound:           { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.bg },
   notFoundText:       { color: colors.textMuted, fontSize: 16, marginTop: 14, marginBottom: 14 },

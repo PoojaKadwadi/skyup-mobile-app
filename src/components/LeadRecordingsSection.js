@@ -1,13 +1,14 @@
 // src/components/LeadRecordingsSection.js
 
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
   ActivityIndicator, Alert, Platform, InteractionManager,
 } from 'react-native';
 import Icon         from 'react-native-vector-icons/MaterialCommunityIcons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useTheme } from '../theme/ThemeContext';
 
 import { uploadRecording, getLeadCallLogs } from '../api/callLogsApi';
 import { requestStoragePermission }         from '../services/permissionsService';
@@ -361,6 +362,9 @@ function formatSize(bytes) {
 // PERF FIX: uploadedSet is now passed from the parent (loaded once) instead of
 // each row independently calling AsyncStorage. This reduces N async reads to 1.
 function RecordingRow({ item, leadId, phoneNumber, uploadedSet }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   const fileMs  = item.modifiedAt ? new Date(item.modifiedAt).getTime() : 0;
   const fileKey = makeFileKey(item.name, normalizePhone(phoneNumber || ''), fileMs);
 
@@ -411,7 +415,7 @@ function RecordingRow({ item, leadId, phoneNumber, uploadedSet }) {
       ) : status === 'uploading' ? (
         <ActivityIndicator size="small" color="#7C3AED" style={{ paddingHorizontal: 12 }} />
       ) : status === 'checking' ? (
-        <ActivityIndicator size="small" color="#64748B" style={{ paddingHorizontal: 12 }} />
+        <ActivityIndicator size="small" color={colors.textMuted} style={{ paddingHorizontal: 12 }} />
       ) : (
         <TouchableOpacity
           style={[styles.uploadBtn, status === 'failed' && styles.uploadBtnFailed]}
@@ -433,6 +437,9 @@ function RecordingRow({ item, leadId, phoneNumber, uploadedSet }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 function LeadRecordingsSection({ lead }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   const [recordings, setRecordings] = useState([]);
   const [loading,    setLoading]    = useState(false);
   const [scanned,    setScanned]    = useState(false);
@@ -587,7 +594,7 @@ function LeadRecordingsSection({ lead }) {
 
       {scanned && !loading && recordings.length === 0 && (
         <View style={styles.emptyState}>
-          <Icon name="microphone-off" size={32} color="#334155" />
+          <Icon name="microphone-off" size={32} color={colors.textMuted} />
           <Text style={styles.emptyText}>No recordings found</Text>
           <Text style={styles.emptyHint}>
             Tap Rescan after a call, or check that your dialer saves recordings to storage.
@@ -598,31 +605,33 @@ function LeadRecordingsSection({ lead }) {
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(colors) {
+  return StyleSheet.create({
   section:         { paddingHorizontal: 16, marginBottom: 20 },
   sectionHeader:   { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10, gap: 8 },
-  sectionTitle:    { fontSize: 12, fontWeight: '700', color: '#64748B', textTransform: 'uppercase', letterSpacing: 1 },
-  sectionSub:      { fontSize: 11, color: '#475569', marginTop: 2 },
-  rescanBtn:       { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 9, backgroundColor: '#7C3AED', flexShrink: 0 },
+  sectionTitle:    { fontSize: 12, fontWeight: '700', color: colors.textSec, textTransform: 'uppercase', letterSpacing: 1 },
+  sectionSub:      { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  rescanBtn:       { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 9, backgroundColor: colors.purple, flexShrink: 0 },
   rescanBtnText:   { color: '#fff', fontSize: 11, fontWeight: '700' },
-  infoNote:        { flexDirection: 'row', gap: 8, backgroundColor: '#1E3A8A15', padding: 10, borderRadius: 10, borderWidth: 1, borderColor: '#2563EB30', marginBottom: 8, alignItems: 'center' },
-  infoText:        { flex: 1, color: '#93C5FD', fontSize: 12, lineHeight: 18 },
+  infoNote:        { flexDirection: 'row', gap: 8, backgroundColor: colors.blueBg, padding: 10, borderRadius: 10, borderWidth: 1, borderColor: colors.blue + '30', marginBottom: 8, alignItems: 'center' },
+  infoText:        { flex: 1, color: colors.blueLight, fontSize: 12, lineHeight: 18 },
   recList:         { gap: 8 },
-  recRow:          { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1E293B', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#334155', gap: 10 },
-  recIconWrap:     { width: 36, height: 36, borderRadius: 10, backgroundColor: '#4C1D9520', alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  recRow:          { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surfaceAlt, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: colors.border, gap: 10 },
+  recIconWrap:     { width: 36, height: 36, borderRadius: 10, backgroundColor: colors.purple + '20', alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
   recInfo:         { flex: 1 },
-  recName:         { fontSize: 13, fontWeight: '600', color: '#CBD5E1', lineHeight: 18 },
-  recMeta:         { fontSize: 11, color: '#475569', marginTop: 3 },
-  recMatchBadge:   { fontSize: 10, color: '#64748B', marginTop: 2, fontStyle: 'italic' },
-  uploadBtn:       { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#4C1D9520', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7, borderWidth: 1, borderColor: '#7C3AED40', flexShrink: 0 },
-  uploadBtnFailed: { borderColor: '#EF444440', backgroundColor: '#EF444410' },
-  uploadBtnText:   { color: '#A78BFA', fontSize: 12, fontWeight: '700' },
+  recName:         { fontSize: 13, fontWeight: '600', color: colors.textPrimary, lineHeight: 18 },
+  recMeta:         { fontSize: 11, color: colors.textMuted, marginTop: 3 },
+  recMatchBadge:   { fontSize: 10, color: colors.textMuted, marginTop: 2, fontStyle: 'italic' },
+  uploadBtn:       { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.purple + '20', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7, borderWidth: 1, borderColor: colors.purple + '40', flexShrink: 0 },
+  uploadBtnFailed: { borderColor: colors.red + '40', backgroundColor: colors.red + '10' },
+  uploadBtnText:   { color: colors.purpleLight, fontSize: 12, fontWeight: '700' },
   doneBadge:       { flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0 },
-  doneText:        { color: '#059669', fontSize: 12, fontWeight: '700' },
+  doneText:        { color: colors.green, fontSize: 12, fontWeight: '700' },
   emptyState:      { alignItems: 'center', paddingVertical: 20, gap: 6 },
-  emptyText:       { color: '#475569', fontSize: 13, fontWeight: '600' },
-  emptyHint:       { color: '#334155', fontSize: 12, textAlign: 'center', paddingHorizontal: 16, lineHeight: 18 },
-});
+  emptyText:       { color: colors.textMuted, fontSize: 13, fontWeight: '600' },
+  emptyHint:       { color: colors.textMuted, fontSize: 12, textAlign: 'center', paddingHorizontal: 16, lineHeight: 18 },
+  });
+}
 
 // PERF FIX (typing lag): memoize so this section does NOT re-render — and does
 // not re-run its file scan — every time the parent LeadDetailScreen re-renders
