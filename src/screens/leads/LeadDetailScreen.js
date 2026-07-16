@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Alert, Modal, ActivityIndicator, StatusBar,
-  KeyboardAvoidingView, Platform, AppState, Linking,
+  KeyboardAvoidingView, Platform, AppState, Linking, InteractionManager,
 } from 'react-native';
 // CRASH FIX: @react-native-community/datetimepicker NOT in bundle — removed import
 // DateTimePickerAndroid.open() was crashing the Follow-Up button on every Android device.
@@ -10,7 +10,7 @@ import {
 import { useDispatch, useSelector }                from 'react-redux';
 import { useNavigation, useRoute }                 from '@react-navigation/native';
 import Icon                                        from 'react-native-vector-icons/MaterialCommunityIcons';
-import { submitCallRemark, patchLead, fetchLeads }             from '../../store/slices/leadsSlice';
+import { submitCallRemark, patchLead, fetchLeads, upsertLead }             from '../../store/slices/leadsSlice';
 import { makePhoneCall, normalizePhone }           from '../../services/phoneService';
 import { getCallLogsForNumber }                    from '../../services/phoneService';
 import { getLeadCallLogs }                         from '../../api/callLogsApi';
@@ -140,26 +140,31 @@ export default function LeadDetailScreen() {
   const [niModalVisible, setNiModalVisible] = useState(false); // Not-Interested reason prompt
   const [niReason,       setNiReason]       = useState('');
   const [niSubmitting,   setNiSubmitting]   = useState(false);
-<<<<<<< HEAD
-=======
   // Collapse the CRM Call History (remarks) section by default; it expands on tap.
   const [historyExpanded, setHistoryExpanded] = useState(false);
->>>>>>> 6985285 (updated files)
   const [leadLoading,   setLeadLoading]   = useState(false);
   const [leadFetchFail, setLeadFetchFail] = useState(false);
 
   const lead = storeLead || fetchedLead;
 
-  // Quick-set Hot/Warm/Cold. Dispatches patchLead (PATCH /lead/:id { temperature }),
-  // which the store merges on fulfilment; we also update the locally-fetched copy so
-  // it reflects instantly when the lead was opened directly (not via the list).
+  // Quick-set Hot/Warm/Cold. OPTIMISTIC: update the UI (store item + local copy)
+  // instantly, then persist via PATCH /lead/:id in the background. If the persist
+  // fails we revert to the previous value so the chip never lies.
   const handleSetTemperature = async (temp) => {
     if (savingTemp || (lead?.temperature || '').toLowerCase() === temp.toLowerCase()) return;
+    const prevTemp = lead?.temperature || null;
     setSavingTemp(true);
+
+    // Instant UI
+    dispatch(upsertLead({ id: leadId, temperature: temp, Quality: temp }));
+    setFetchedLead((prev) => (prev ? { ...prev, temperature: temp, Quality: temp } : prev));
+
     try {
       await dispatch(patchLead({ id: leadId, data: { temperature: temp } })).unwrap();
-      setFetchedLead((prev) => (prev ? { ...prev, temperature: temp } : prev));
     } catch (e) {
+      // Revert on failure
+      dispatch(upsertLead({ id: leadId, temperature: prevTemp, Quality: prevTemp }));
+      setFetchedLead((prev) => (prev ? { ...prev, temperature: prevTemp, Quality: prevTemp } : prev));
       Alert.alert('Update failed', typeof e === 'string' ? e : 'Could not update temperature. Please try again.');
     } finally {
       setSavingTemp(false);
@@ -179,11 +184,18 @@ export default function LeadDetailScreen() {
       return;
     }
 
+    const prevStatus = lead?.status || null;
     setSavingStatus(true);
+
+    // Instant UI
+    dispatch(upsertLead({ id: leadId, status }));
+    setFetchedLead((prev) => (prev ? { ...prev, status } : prev));
+
     try {
       await dispatch(patchLead({ id: leadId, data: { status } })).unwrap();
-      setFetchedLead((prev) => (prev ? { ...prev, status } : prev));
     } catch (e) {
+      dispatch(upsertLead({ id: leadId, status: prevStatus }));
+      setFetchedLead((prev) => (prev ? { ...prev, status: prevStatus } : prev));
       Alert.alert('Update failed', typeof e === 'string' ? e : 'Could not update status. Please try again.');
     } finally {
       setSavingStatus(false);
@@ -265,7 +277,14 @@ export default function LeadDetailScreen() {
     ));
   }, [lead?.callHistory]);
 
-  const [showRemarkModal, setShowRemarkModal] = useState(postCall);
+  // FIX (primary bug): the remark modal used to be initialised to `postCall`,
+  // so tapping "Call" in the leads list — which navigates here with
+  // postCall:true — popped the remark modal INSTANTLY, on top of / instead of
+  // the dialer. The agent tapped call and within a second saw the remark popup
+  // rather than the option to call. The modal must NEVER open on navigation; it
+  // opens only after a genuine call actually ends (see the post-call detector
+  // effect below), so start it closed.
+  const [showRemarkModal, setShowRemarkModal] = useState(false);
   const [remark,          setRemark]          = useState('');
   const [outcome,         setOutcome]         = useState('');
   const [submitting,      setSubmitting]      = useState(false);
@@ -342,17 +361,110 @@ export default function LeadDetailScreen() {
   const callListenerRef  = React.useRef(null);
   const wentToBackground = React.useRef(false);
   const callPending      = React.useRef(false);
+  const remarkShownRef   = React.useRef(false); // modal shown once per call cycle
+  const backgroundAtRef  = React.useRef(0);
+  const callNumberRef    = React.useRef('');    // number of the in-flight call
+  const callStartedAtRef = React.useRef(0);
   // PERF FIX: track mount state so AppState listener never updates unmounted
   // component state or leaves a stale listener if user navigates away mid-call.
   const isMountedRef     = React.useRef(true);
 
+  // Minimum time the app must sit in TRUE background before we treat the return
+  // to foreground as "the call finished". This is what stops the remark popup
+  // from firing on transient interruptions that are NOT a real call:
+  //   • the dual-SIM "Call with SIM 1 / SIM 2" chooser (very common in India),
+  //   • the runtime CALL_PHONE permission dialog,
+  //   • pulling down the notification shade,
+  //   • the agent opening the dialer, glancing, and coming straight back.
+  // A real answered/attempted call always exceeds this.
+  const MIN_CALL_MS = 3500;
+
+  // Fire the post-call work: show the remark modal FIRST (so it feels instant),
+  // then sync call logs + recordings in the background off the interaction path.
+  const finishCall = React.useCallback((numberToCall, startedAt) => {
+    if (remarkShownRef.current || !isMountedRef.current) return;
+    remarkShownRef.current = true;
+
+    // Show the modal immediately — do NOT wait on any network/disk work.
+    setShowRemarkModal(true);
+
+    // Defer the heavy call-log read + uploads so they never block the modal
+    // animation or the JS thread while the agent starts typing the remark.
+    InteractionManager.runAfterInteractions(async () => {
+      try {
+        const logs = await getCallLogsForNumber(numberToCall);
+        if (logs.length > 0) await syncCallLogs(logs.slice(0, 5));
+      } catch {}
+      try { triggerPostCallRecordingSync(numberToCall, startedAt, lead?.name || ''); } catch {}
+    });
+  }, [lead?.name]);
+
+  // Arm a single AppState listener that watches for a genuine background→active
+  // round-trip (a real call) and then shows the remark modal. Registering this
+  // BEFORE the dialer opens guarantees the background transition is captured
+  // even when the dialer is launched by <CallButton> a tick earlier.
+  const armCallListener = React.useCallback((numberToCall, startedAt) => {
+    callNumberRef.current    = numberToCall;
+    callStartedAtRef.current = startedAt;
+    remarkShownRef.current   = false;
+    callPending.current      = true;
+
+    // If the dialer is already opening (postCall navigation, or CallButton
+    // fired openURL just before us), treat the current non-active state as the
+    // start of the background period so the timer is accurate.
+    if (AppState.currentState === 'background') {
+      wentToBackground.current = true;
+      backgroundAtRef.current  = startedAt;
+    } else {
+      wentToBackground.current = false;
+      backgroundAtRef.current  = 0;
+    }
+
+    callListenerRef.current?.remove();
+    callListenerRef.current = AppState.addEventListener('change', (nextState) => {
+      if (!callPending.current || !isMountedRef.current) {
+        callListenerRef.current?.remove();
+        callListenerRef.current = null;
+        return;
+      }
+
+      // Only a TRUE background counts as "left for a call". 'inactive' is the
+      // transient state used by SIM choosers / permission dialogs / the
+      // notification shade — ignoring it is what kills the false-trigger popup.
+      if (nextState === 'background') {
+        if (!wentToBackground.current) {
+          wentToBackground.current = true;
+          backgroundAtRef.current  = Date.now();
+        }
+        return;
+      }
+
+      if (nextState === 'active' && wentToBackground.current) {
+        const timeInBackground = Date.now() - backgroundAtRef.current;
+
+        // Too short → not a real call (chooser/dialog flicker or a quick bail
+        // out of the dialer). Reset and keep listening in case they call again.
+        if (timeInBackground < MIN_CALL_MS) {
+          wentToBackground.current = false;
+          backgroundAtRef.current  = 0;
+          return;
+        }
+
+        callPending.current      = false;
+        wentToBackground.current = false;
+        callListenerRef.current?.remove();
+        callListenerRef.current  = null;
+
+        finishCall(callNumberRef.current, callStartedAtRef.current);
+      }
+    });
+  }, [finishCall]);
+
   const handleCall = async (dialNumber) => {
-    // FIX: the big "Call" button is wired as onPress={handleCall}, so React
-    // Native passes a press EVENT object as the first arg — not a number. The
-    // old code did `if (!dialNumber)` to decide whether to open the dialer, but
-    // an event object is truthy, so the dialer was never opened and the button
-    // did nothing. <CallButton> passes a real string number. Distinguish the two:
-    // only treat the arg as a dialed number when it's actually a string/number.
+    // The big "Call" button is wired as onPress={handleCall}, so React Native
+    // passes a press EVENT object as the first arg — not a number. <CallButton>
+    // passes a real string number. Only treat the arg as a dialed number when
+    // it's actually a string/number.
     const passedNumber =
       (typeof dialNumber === 'string' || typeof dialNumber === 'number')
         ? String(dialNumber)
@@ -370,60 +482,17 @@ export default function LeadDetailScreen() {
       }
 
       const callStartedAt = Date.now();
-      wentToBackground.current = false;
-      callPending.current      = true;
-      let backgroundAt         = 0;
-      callListenerRef.current?.remove();
 
-      callListenerRef.current = AppState.addEventListener('change', async (nextState) => {
-        if (!callPending.current) return;
-        // PERF FIX: abort immediately if component unmounted to prevent
-        // state updates on an unmounted component and stale listener actions.
-        if (!isMountedRef.current) {
-          callListenerRef.current?.remove();
-          callListenerRef.current = null;
-          return;
-        }
-
-        if (nextState === 'background' || nextState === 'inactive') {
-          if (!wentToBackground.current) {
-            backgroundAt = Date.now();
-            wentToBackground.current = true;
-          }
-          return;
-        }
-
-        if (nextState === 'active' && wentToBackground.current) {
-          const timeInBackground = Date.now() - backgroundAt;
-          if (timeInBackground < 2000) {
-            wentToBackground.current = false;
-            backgroundAt = 0;
-            return;
-          }
-
-          callPending.current      = false;
-          wentToBackground.current = false;
-          callListenerRef.current?.remove();
-          callListenerRef.current = null;
-
-          try {
-            const logs = await getCallLogsForNumber(numberToCall);
-            if (logs.length > 0) await syncCallLogs(logs.slice(0, 5));
-          } catch {}
-
-          try { triggerPostCallRecordingSync(numberToCall, callStartedAt, lead.name || ''); } catch {}
-
-          setTimeout(() => setShowRemarkModal(true), 600);
-        }
-      });
+      // Arm the detector FIRST so no background transition is missed, then dial.
+      armCallListener(numberToCall, callStartedAt);
 
       const { Linking } = require('react-native');
       const { sanitizeForDial } = require('../../services/phoneService');
 
-      // FIX: open the dialer here whenever the number did NOT come from
-      // <CallButton> (i.e. the standalone "Call" button, where the arg is a
-      // press event). When CallButton supplied a real number, it already
-      // launched the dialer, so we must not open it a second time.
+      // Open the dialer here whenever the number did NOT come from <CallButton>
+      // (the standalone "Call" button passes a press event). When CallButton
+      // supplied a real number it already launched the dialer, so we must not
+      // open it a second time.
       if (!passedNumber) {
         const toDial = sanitizeForDial(numberToCall);
         if (!toDial) throw new Error('Invalid phone number');
@@ -437,6 +506,19 @@ export default function LeadDetailScreen() {
       Alert.alert('Call Failed', e.message);
     }
   };
+
+  // Post-call detector for arrivals via the leads list. Tapping "Call" on a
+  // list row opens the dialer AND navigates here with postCall:true. We must
+  // NOT show the remark modal now (that was the reported bug) — instead arm the
+  // same robust detector so the modal appears only after the real call ends.
+  React.useEffect(() => {
+    if (!postCall) return;
+    const number = lead?.mobile || lead?.primaryPhone || lead?.phone || '';
+    if (!number) return;
+    armCallListener(number, Date.now());
+    // Only run once, when the screen opens from a call tap.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [postCall, lead?.id]);
 
   React.useEffect(() => {
     isMountedRef.current = true;
@@ -667,67 +749,78 @@ export default function LeadDetailScreen() {
       return;
     }
 
-    setSubmitting(true);
+    const trimmed = remark.trim();
 
-    try {
-      await dispatch(submitCallRemark({
-        leadId,
-        remark:      remark.trim(),
-        outcome,
-        followUpDate: followUpDate || null,
-        document:    null,
-        recording:   null,
-      })).unwrap();
+    // ── Client Meeting: needs the awaited flow (creates a backend meeting and
+    // schedules local reminders, and the agent benefits from the confirmation).
+    if (isClientMeeting && followUpDate) {
+      setSubmitting(true);
+      try {
+        await dispatch(submitCallRemark({
+          leadId, remark: trimmed, outcome,
+          followUpDate: followUpDate || null, document: null, recording: null,
+        })).unwrap();
 
-      // ── Client Meeting: also create a meeting on the backend + remind ──────
-      // Mirrors ClientMeetingScreen: posts a meeting-remark and schedules a
-      // reminder-before + at-time notification for the chosen date/time.
-      if (isClientMeeting && followUpDate) {
         try {
           await postMeetingRemark(leadId, {
             meetingType,
-            outcome:      'Follow-Up Required',
-            remark:       remark.trim(),
-            location:     null,
+            outcome:  'Follow-Up Required',
+            remark:   trimmed,
+            location: null,
             followUpDate,
           }, null);
 
           await scheduleMeetingFollowUp({
-            id:           `${leadId}_${Date.parse(followUpDate)}`,
-            leadName:     lead?.name || 'Client',
+            id:       `${leadId}_${Date.parse(followUpDate)}`,
+            leadName: lead?.name || 'Client',
             followUpDate,
             meetingType,
-            location:     null,
+            location: null,
           });
         } catch (meetErr) {
-          // The call remark already saved; surface the meeting issue but don't
-          // lose the remark. The agent can retry from the Client Meeting screen.
           console.warn('[LeadDetail] Meeting create/notify failed:', meetErr.message);
+          closeModal();
           Alert.alert(
             'Remark saved — meeting not scheduled',
             'Your remark was saved, but the meeting reminder could not be set up. Please add the meeting from the Client Meeting screen.',
           );
-          closeModal();
           return;
         }
-      }
 
-      closeModal();
-      const extras = [
-        isClientMeeting && followUpDate && `Meeting: ${formatDateTime(followUpDate)} (${meetingType})`,
-        !isClientMeeting && followUpDate && `Follow-up: ${formatDateTime(followUpDate)}`,
-      ].filter(Boolean);
+        closeModal();
+        Alert.alert(
+          '✓ Saved',
+          `Meeting scheduled.\nMeeting: ${formatDateTime(followUpDate)} (${meetingType})\n\nYou'll be reminded before it starts.`,
+        );
+      } catch (e) {
+        setUploadProgress(null);
+        Alert.alert('Failed', e.toString());
+      } finally { setSubmitting(false); }
+      return;
+    }
 
-      Alert.alert(
-        '✓ Saved',
-        extras.length
-          ? `${isClientMeeting ? 'Meeting scheduled.' : 'Remark saved.'}\n${extras.join('\n')}\n\nYou'll be reminded before it starts.`
-          : 'Call remark saved to CRM',
-      );
-    } catch (e) {
-      setUploadProgress(null);
-      Alert.alert('Failed', e.toString());
-    } finally { setSubmitting(false); }
+    // ── Common path (a normal call remark) — OPTIMISTIC ───────────────────────
+    // PERF FIX (slow save): previously we awaited the network round-trip before
+    // closing the modal, so the agent stared at a spinner for the full latency
+    // of the request (worse on Render cold-starts / weak signal). Now we close
+    // the modal and reset instantly, then fire the save in the background. The
+    // store's submitCallRemark.fulfilled reducer appends the entry to the lead's
+    // callHistory when it lands, so the UI stays correct. On failure we surface
+    // a non-destructive alert so the agent can re-add it.
+    const followUp = followUpDate || null;
+    closeModal();
+
+    dispatch(submitCallRemark({
+      leadId, remark: trimmed, outcome,
+      followUpDate: followUp, document: null, recording: null,
+    }))
+      .unwrap()
+      .catch((e) => {
+        Alert.alert(
+          'Remark not saved',
+          `Your remark could not be saved:\n${e?.toString?.() || e}\n\nPlease open the lead and add it again.`,
+        );
+      });
   };
 
   if (!lead) {
@@ -923,30 +1016,38 @@ export default function LeadDetailScreen() {
     // Mark optimistically so a fast re-render doesn't double-fire; clear on
     // failure so a later open (after permission/account is fixed) can retry.
     _autoSavedContactIds.add(lead.id);
-    saveLeadToContacts(true).then((res) => {
-      if (res?.ok) return;
-      _autoSavedContactIds.delete(lead.id);
 
-      // Surface account-setup problems to the agent — but only once per app
-      // session per problem, so opening many leads doesn't spam alerts.
-      if (res?.reason === 'no-account-configured' && !_contactsAlertShown.noAccount) {
-        _contactsAlertShown.noAccount = true;
-        Alert.alert(
-          'Contacts Account Not Set',
-          'No contacts email is configured for your account, so leads can’t be auto-saved to your phone. Please ask your admin to set your “Contacts Email (Google account)” in the CRM.',
-        );
-      } else if (res?.reason === 'account-not-on-device' && !_contactsAlertShown.notOnDevice) {
-        _contactsAlertShown.notOnDevice = true;
-        Alert.alert(
-          'Add Your Contacts Account',
-          `Leads are set to auto-save into "${res.account}", but that Google account isn’t signed in on this phone. Add it in Settings → Accounts → Add account → Google, then reopen this lead.`,
-          [
-            { text: 'Later', style: 'cancel' },
-            { text: 'Open Settings', onPress: () => Linking.openSettings() },
-          ],
-        );
-      }
+    // PERF FIX: defer the contacts write until after the screen has finished
+    // rendering + settling its first interactions. The native contacts lookup +
+    // write is comparatively heavy and used to run during mount, competing with
+    // the first taps and making the screen feel sluggish right after opening.
+    const task = InteractionManager.runAfterInteractions(() => {
+      saveLeadToContacts(true).then((res) => {
+        if (res?.ok) return;
+        _autoSavedContactIds.delete(lead.id);
+
+        // Surface account-setup problems to the agent — but only once per app
+        // session per problem, so opening many leads doesn't spam alerts.
+        if (res?.reason === 'no-account-configured' && !_contactsAlertShown.noAccount) {
+          _contactsAlertShown.noAccount = true;
+          Alert.alert(
+            'Contacts Account Not Set',
+            'No contacts email is configured for your account, so leads can’t be auto-saved to your phone. Please ask your admin to set your “Contacts Email (Google account)” in the CRM.',
+          );
+        } else if (res?.reason === 'account-not-on-device' && !_contactsAlertShown.notOnDevice) {
+          _contactsAlertShown.notOnDevice = true;
+          Alert.alert(
+            'Add Your Contacts Account',
+            `Leads are set to auto-save into "${res.account}", but that Google account isn’t signed in on this phone. Add it in Settings → Accounts → Add account → Google, then reopen this lead.`,
+            [
+              { text: 'Later', style: 'cancel' },
+              { text: 'Open Settings', onPress: () => Linking.openSettings() },
+            ],
+          );
+        }
+      });
     });
+    return () => task?.cancel?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lead?.id]);
 
