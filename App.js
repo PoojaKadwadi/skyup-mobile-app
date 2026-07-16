@@ -56,6 +56,7 @@ import {
 } from './src/services/callStateService';
 
 import { drainOfflineQueue } from './src/services/callSyncService';
+import { warmUpBackend } from './src/services/api';
 
 import {
   requestContactsPermission,
@@ -146,6 +147,16 @@ function AppManager() {
   const fcmRefreshUnsub = useRef(null);
   // ✅ FIX — store unsubscribe fn for FCM foreground listener
   const fcmForegroundUnsub = useRef(null);
+
+  // PERF/UX: warm the Render free-tier backend the instant the app launches,
+  // independent of login. It sleeps after inactivity and takes 30–60s to
+  // cold-start; without this the first real request hits a sleeping server and
+  // times out at API_TIMEOUT (15s), making the app feel frozen on open. Firing
+  // this here (fire-and-forget) starts the wake-up while the user is still on
+  // the splash/login screen, so real requests land on an already-awake server.
+  useEffect(() => {
+    warmUpBackend();
+  }, []);
 
   useEffect(() => {
     if (user) {

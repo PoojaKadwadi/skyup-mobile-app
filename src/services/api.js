@@ -176,5 +176,27 @@ export async function checkHealth() {
   }
 }
 
+// ─── Warm-up ping ────────────────────────────────────────────────────────────
+// Render's free tier sleeps after inactivity and takes 30–60s to cold-start.
+// The FIRST real request would otherwise hit a sleeping server and time out at
+// API_TIMEOUT (15s) before it finishes waking — making the app feel frozen on
+// open. Fire this on app launch (fire-and-forget) so the server starts spinning
+// up while the user is still on the splash/login screen; by the time real
+// endpoints are hit it's already awake. Uses a long timeout + one retry
+// specifically to survive a cold start (unlike checkHealth's short 5s timeout).
+export async function warmUpBackend() {
+  const COLD_START_TIMEOUT = 60000; // 60s — long enough to outlast a full cold start
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await api.get('/health', { timeout: COLD_START_TIMEOUT });
+      dlog(`[WarmUp] ✅ Backend awake (attempt ${attempt})`);
+      return true;
+    } catch (e) {
+      dwarn(`[WarmUp] attempt ${attempt} failed:`, e?.message);
+    }
+  }
+  return false;
+}
+
 export const BASE_URL_EXPORT = BASE_URL;
 export default api;

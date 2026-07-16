@@ -140,6 +140,11 @@ export default function LeadDetailScreen() {
   const [niModalVisible, setNiModalVisible] = useState(false); // Not-Interested reason prompt
   const [niReason,       setNiReason]       = useState('');
   const [niSubmitting,   setNiSubmitting]   = useState(false);
+<<<<<<< HEAD
+=======
+  // Collapse the CRM Call History (remarks) section by default; it expands on tap.
+  const [historyExpanded, setHistoryExpanded] = useState(false);
+>>>>>>> 6985285 (updated files)
   const [leadLoading,   setLeadLoading]   = useState(false);
   const [leadFetchFail, setLeadFetchFail] = useState(false);
 
@@ -1218,8 +1223,27 @@ export default function LeadDetailScreen() {
 
         {lead.callHistory?.length > 0 && (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>CRM Call History</Text>
-            {callHistoryView}
+            <TouchableOpacity
+              style={styles.historyToggle}
+              activeOpacity={0.7}
+              onPress={() => setHistoryExpanded(v => !v)}
+            >
+              <Text style={styles.sectionTitle}>
+                CRM Call History ({lead.callHistory.length})
+              </Text>
+              <Icon
+                name={historyExpanded ? 'chevron-up' : 'chevron-down'}
+                size={20}
+                color={colors.textSec}
+              />
+            </TouchableOpacity>
+            {historyExpanded
+              ? callHistoryView
+              : (
+                <Text style={styles.historyHint}>
+                  Tap to view all {lead.callHistory.length} remark{lead.callHistory.length === 1 ? '' : 's'}
+                </Text>
+              )}
           </View>
         )}
 
@@ -1456,6 +1480,8 @@ return StyleSheet.create({
 
   section:            { paddingHorizontal: 16, marginTop: 8 },
   sectionTitle:       { fontSize: 11, fontWeight: '700', color: colors.textSec, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 },
+  historyToggle:      { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  historyHint:        { fontSize: 12, color: colors.textMuted, fontStyle: 'italic', marginTop: 2, marginBottom: 4 },
   noLogsText:         { fontSize: 12, color: colors.textMuted, fontStyle: 'italic', marginTop: 6 },
 
   loadLogsBtn:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceAlt, borderRadius: 12, paddingVertical: 11, borderWidth: 1, borderColor: colors.border },
