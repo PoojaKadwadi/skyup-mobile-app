@@ -290,7 +290,16 @@ export default function LeadDetailScreen() {
     const ch = Array.isArray(lead?.callHistory) ? lead.callHistory : [];
     const initial = (lead?.initialRemark || '').trim();
 
-    const cards = ch.slice().reverse().map((h, i) => (
+    // FIX: Show ONLY entries that carry a manually-typed remark. Call-history
+    // can contain pure call-log entries (a logged call with an outcome but no
+    // remark) — those were rendering as blank "call log" rows in the remarks
+    // popup. Keeping only entries whose remark is a non-empty string means the
+    // list shows every manually-added remark and nothing else.
+    const manualRemarks = ch.filter(
+      h => h && typeof h.remark === 'string' && h.remark.trim() !== '',
+    );
+
+    const cards = manualRemarks.slice().reverse().map((h, i) => (
       <View key={`ch-${i}`} style={styles.historyCard}>
         <View style={styles.historyHeader}>
           <Text style={styles.historyAgent}>{h.userName || 'Agent'}</Text>
@@ -303,10 +312,14 @@ export default function LeadDetailScreen() {
       </View>
     ));
 
-    // Append the initial campaign remark (avoid duplicating it if the earliest
-    // call-history entry is literally the same text).
-    const earliest = ch.length ? (ch[0]?.remark || '').trim() : '';
-    if (initial && initial !== earliest) {
+    // FIX: The initial campaign remark must ALWAYS be shown when it exists —
+    // it is the original lead-source remark and should stay available at the
+    // bottom of the list regardless of what call remarks were later added.
+    // (Previously it was hidden whenever it matched the earliest call remark,
+    // which made it vanish in the common case.) The "Initial remark · from
+    // campaign" badge visually distinguishes it even if the text coincides
+    // with a later remark.
+    if (initial) {
       cards.push(
         <View key="initial" style={[styles.historyCard, styles.initialRemarkCard]}>
           <View style={styles.historyHeader}>
