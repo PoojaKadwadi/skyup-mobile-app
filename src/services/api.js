@@ -128,7 +128,13 @@ function buildUserMessage(error) {
 
   switch (status) {
     case 400: return serverMsg || 'Invalid request. Please check your input.';
-    case 401: return 'Session expired. Please log in again.';
+    // A 401 on the LOGIN request means bad credentials (or the backend
+    // rejecting the account/device) — NOT an expired session. Prefer the
+    // server's own message ("Invalid email or password", etc.) so the login
+    // screen shows the real reason. Only fall back to the session-expired
+    // wording when the server sends no message, which is the case for a
+    // genuinely expired token on an already-authenticated request.
+    case 401: return serverMsg || 'Session expired. Please log in again.';
     case 403: return 'You do not have permission to do that.';
     case 404: return 'Resource not found.';
     case 422: return serverMsg || 'Validation failed.';

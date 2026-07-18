@@ -290,13 +290,23 @@ export default function LeadDetailScreen() {
     const ch = Array.isArray(lead?.callHistory) ? lead.callHistory : [];
     const initial = (lead?.initialRemark || '').trim();
 
-    // FIX: Show ONLY entries that carry a manually-typed remark. Call-history
-    // can contain pure call-log entries (a logged call with an outcome but no
-    // remark) — those were rendering as blank "call log" rows in the remarks
-    // popup. Keeping only entries whose remark is a non-empty string means the
-    // list shows every manually-added remark and nothing else.
+    // FIX: Show ONLY genuine manually-typed remarks — never call logs.
+    // Two kinds of entries live in callHistory:
+    //   • Manual agent remarks (from the remark modal) → have remark/outcome/
+    //     calledAt/userName and NO telephony fields.
+    //   • Synced phone call logs → carry callType/duration/timestamp (and may
+    //     even carry a remark string), and must NOT appear in the remarks list.
+    // So we require a non-empty remark AND the absence of any telephony
+    // metadata. If no remarks were ever added, this list stays empty (aside
+    // from the initial campaign remark below) instead of showing call logs.
+    const isCallLog = h =>
+      h.callType != null || h.duration != null || h.timestamp != null;
     const manualRemarks = ch.filter(
-      h => h && typeof h.remark === 'string' && h.remark.trim() !== '',
+      h =>
+        h &&
+        typeof h.remark === 'string' &&
+        h.remark.trim() !== '' &&
+        !isCallLog(h),
     );
 
     const cards = manualRemarks.slice().reverse().map((h, i) => (
@@ -343,6 +353,21 @@ export default function LeadDetailScreen() {
     }
     return cards;
   }, [lead?.callHistory, lead?.initialRemark, styles, colors]);
+
+  // Count of manually-added remarks (excludes synced call logs) — drives the
+  // "View all (N)" pill so the number matches what the remarks popup shows.
+  const manualRemarkCount = useMemo(() => {
+    const ch = Array.isArray(lead?.callHistory) ? lead.callHistory : [];
+    return ch.filter(
+      h =>
+        h &&
+        typeof h.remark === 'string' &&
+        h.remark.trim() !== '' &&
+        h.callType == null &&
+        h.duration == null &&
+        h.timestamp == null,
+    ).length;
+  }, [lead?.callHistory]);
 
   // FIX (primary bug): the remark modal used to be initialised to `postCall`,
   // so tapping "Call" in the leads list — which navigates here with
@@ -1266,7 +1291,7 @@ export default function LeadDetailScreen() {
                   <View style={styles.remarksCountPill}>
                     <Icon name="history" size={10} color={colors.blueLight} style={{ marginRight: 3 }} />
                     <Text style={styles.remarksCountText}>
-                      View all{lead.callHistory?.length ? ` (${lead.callHistory.length})` : ''}
+                      View all{manualRemarkCount ? ` (${manualRemarkCount})` : ''}
                     </Text>
                   </View>
                 </View>
