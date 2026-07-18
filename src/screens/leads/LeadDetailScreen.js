@@ -291,16 +291,32 @@ export default function LeadDetailScreen() {
     const initial = (lead?.initialRemark || '').trim();
 
     // FIX: Show ONLY genuine manually-typed remarks — never call logs.
-    // Two kinds of entries live in callHistory:
+    // Three kinds of entries can live in callHistory:
     //   • Manual agent remarks (from the remark modal) → have remark/outcome/
-    //     calledAt/userName and NO telephony fields.
-    //   • Synced phone call logs → carry callType/duration/timestamp (and may
-    //     even carry a remark string), and must NOT appear in the remarks list.
-    // So we require a non-empty remark AND the absence of any telephony
-    // metadata. If no remarks were ever added, this list stays empty (aside
-    // from the initial campaign remark below) instead of showing call logs.
+    //     calledAt/userName and NO telephony fields, and `outcome` is one of
+    //     the agent-selectable OUTCOMES below.
+    //   • Synced phone call logs (bulk history sync) → carry callType/
+    //     duration/timestamp fields directly.
+    //   • Auto-logged dialer entries (created server-side the instant the
+    //     agent taps Call from the app) → SAME shape as a manual remark
+    //     (remark/outcome/calledAt/userName, no telephony fields) but the
+    //     remark text is always the boilerplate "Outgoing Call from mobile
+    //     app" / "Incoming Call from mobile app" (optionally with a duration
+    //     suffix like "(8s)"), and the outcome is "Outgoing Call" / "Incoming
+    //     Call" / "Missed Call" — none of which an agent can pick manually.
+    //     These must be filtered out too, or every call the agent makes
+    //     shows up as a fake "remark" and buries the real ones.
+    // So we require a non-empty remark, absence of telephony metadata, AND
+    // that it isn't one of these auto-logged dialer entries.
+    const isAutoDialerEntry = h => {
+      const remarkText = typeof h.remark === 'string' ? h.remark.trim() : '';
+      if (/call from mobile app/i.test(remarkText)) return true;
+      const outcomeText = typeof h.outcome === 'string' ? h.outcome.trim() : '';
+      if (outcomeText && !OUTCOMES.includes(outcomeText)) return true;
+      return false;
+    };
     const isCallLog = h =>
-      h.callType != null || h.duration != null || h.timestamp != null;
+      h.callType != null || h.duration != null || h.timestamp != null || isAutoDialerEntry(h);
     const manualRemarks = ch.filter(
       h =>
         h &&
@@ -354,8 +370,10 @@ export default function LeadDetailScreen() {
     return cards;
   }, [lead?.callHistory, lead?.initialRemark, styles, colors]);
 
-  // Count of manually-added remarks (excludes synced call logs) — drives the
-  // "View all (N)" pill so the number matches what the remarks popup shows.
+  // Count of manually-added remarks (excludes synced call logs AND the
+  // auto-logged "Outgoing/Incoming Call from mobile app" dialer entries —
+  // see isAutoDialerEntry above) — drives the "View all (N)" pill so the
+  // number matches what the remarks popup shows.
   const manualRemarkCount = useMemo(() => {
     const ch = Array.isArray(lead?.callHistory) ? lead.callHistory : [];
     return ch.filter(
@@ -365,7 +383,9 @@ export default function LeadDetailScreen() {
         h.remark.trim() !== '' &&
         h.callType == null &&
         h.duration == null &&
-        h.timestamp == null,
+        h.timestamp == null &&
+        !/call from mobile app/i.test(h.remark.trim()) &&
+        (!h.outcome || OUTCOMES.includes(String(h.outcome).trim())),
     ).length;
   }, [lead?.callHistory]);
 
