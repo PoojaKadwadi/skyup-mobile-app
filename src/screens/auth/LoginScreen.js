@@ -28,7 +28,7 @@ import { COLORS, RADIUS, FONT }     from '../../theme/tokens';
 
 export default function LoginScreen() {
   const dispatch = useDispatch();
-  const { loading, error } = useSelector((s) => s.auth);
+  const { loading, error, errorField } = useSelector((s) => s.auth);
 
   const [email,    setEmail]    = useState('');
   const [password, setPassword] = useState('');
@@ -40,20 +40,36 @@ export default function LoginScreen() {
   const mountedRef     = useRef(true);   // true while component is mounted
   const isSubmitting   = useRef(false);  // prevents double-tap double-dispatch
 
+  // Counter incremented each time login is rejected — forces the error useEffect
+  // to re-run even when the error message string is unchanged (e.g. two wrong
+  // password attempts in a row both produce "Invalid credentials").
+  const [errorSeq, setErrorSeq] = useState(0);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
 
-  // ── Show Redux error as Alert ─────────────────────────────────────────────
+  // ── Show Redux error inline (field) + as Alert ────────────────────────────
   useEffect(() => {
     if (!error) return;
-    // Only show if still mounted — avoids stale Alert on unmounted screen
     if (!mountedRef.current) return;
-    Alert.alert('Login Failed', error, [
-      { text: 'OK', onPress: () => dispatch(clearError()) },
-    ]);
-  }, [error]);
+
+    // Wire errorField → highlight the specific input that's wrong.
+    // This makes "Invalid email or password" feel precise: if the backend says
+    // field="password", the password field gets a red border + inline message.
+    if (errorField === 'email') {
+      setEmailErr(error);
+    } else if (errorField === 'password') {
+      setPassErr(error);
+    } else {
+      // No specific field — show as Alert (covers network errors, server errors, etc.)
+      Alert.alert('Login Failed', error, [
+        { text: 'OK', onPress: () => dispatch(clearError()) },
+      ]);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [error, errorSeq]);
 
   // ── Validation ────────────────────────────────────────────────────────────
   const validate = () => {
@@ -84,17 +100,18 @@ export default function LoginScreen() {
 
     isSubmitting.current = true;
     try {
-      await dispatch(login({
+      const result = await dispatch(login({
         email:    email.trim().toLowerCase(),
         password,
       }));
-      // Navigation is handled by your root navigator watching auth state —
-      // no explicit navigate() call needed here.
+      // If the thunk was rejected, bump errorSeq so the error useEffect fires
+      // even when the same error string repeats (e.g. two wrong-password attempts).
+      if (result.meta && result.meta.requestStatus === 'rejected') {
+        if (mountedRef.current) setErrorSeq((n) => n + 1);
+      }
     } catch (err) {
-      // Dispatch itself should never throw (Redux Toolkit catches internally),
-      // but guard anyway so a bug here shows an Alert instead of crashing.
       if (mountedRef.current) {
-        Alert.alert('Error', err?.message || 'Something went wrong. Please try again.');
+        Alert.alert('Error', (err && err.message) ? err.message : 'Something went wrong. Please try again.');
       }
     } finally {
       isSubmitting.current = false;
@@ -139,7 +156,7 @@ export default function LoginScreen() {
                 placeholder="you@company.com"
                 placeholderTextColor={COLORS.textMuted}
                 value={email}
-                onChangeText={setEmail}
+                onChangeText={(v) => { setEmail(v); setEmailErr(''); dispatch(clearError()); }}
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -159,7 +176,7 @@ export default function LoginScreen() {
                 placeholder="••••••••"
                 placeholderTextColor={COLORS.textMuted}
                 value={password}
-                onChangeText={setPassword}
+                onChangeText={(v) => { setPassword(v); setPassErr(''); dispatch(clearError()); }}
                 secureTextEntry={!showPass}
                 returnKeyType="done"
                 onSubmitEditing={handleLogin}

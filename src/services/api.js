@@ -96,7 +96,14 @@ api.interceptors.response.use(
         message.toLowerCase().includes('no token') ||
         message.toLowerCase().includes('unauthorized');
 
-      if (isAuthError) {
+      // Only wipe stored session if this is NOT a login request. On the login
+      // endpoint a 401 means wrong credentials — there is no valid session to
+      // revoke. Wiping storage on a failed login attempt previously caused a
+      // ghost logout on the next app launch.
+      const url = error.config?.url || '';
+      const isLoginRequest = url.includes('/auth/login');
+
+      if (isAuthError && !isLoginRequest) {
         try {
           await AsyncStorage.removeItem('auth_token');
           await AsyncStorage.removeItem('auth_user');
