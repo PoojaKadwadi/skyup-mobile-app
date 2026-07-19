@@ -276,6 +276,7 @@ export default function AttendanceWidget() {
     const startTimers = () => {
       stopTimers();
       tick();
+      ping(); // fire immediately so the backend clears any stale 'idle' at once
       const tickInterval = isFocused ? 1000 : 10_000;
       tickRef.current = setInterval(tick, tickInterval);
       pingRef.current = setInterval(ping, 60_000);
@@ -304,6 +305,18 @@ export default function AttendanceWidget() {
             if (secs !== lastElapsedRef.current) { lastElapsedRef.current = secs; setElapsed(secs); }
           };
           tickRef.current = setInterval(tick, tickInterval);
+
+          // FIX: also restart the keep-alive ping on resume. Previously only the
+          // tick was restarted here, so after the first background→foreground
+          // cycle the app stopped pinging /attendance/ping entirely and the
+          // backend flagged the clocked-in user as 'idle' while they were still
+          // working. Fire one immediately, then resume the 60s interval.
+          const ping = async () => {
+            try { await api.post('/attendance/ping'); } catch { /* silent */ }
+          };
+          if (pingRef.current) clearInterval(pingRef.current);
+          ping();
+          pingRef.current = setInterval(ping, 60_000);
         }
       } else {
         if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
