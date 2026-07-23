@@ -120,17 +120,12 @@ export async function setupNotifications() {
         let granted = false;
 
         try {
-          const {
-            request,
-            PERMISSIONS,
-            RESULTS,
-          } = require('react-native-permissions');
-
-          const result = await request(
-            PERMISSIONS.ANDROID.POST_NOTIFICATIONS
+          const { PermissionsAndroid } = require('react-native');
+          const result = await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS
           );
 
-          granted = result === RESULTS.GRANTED;
+          granted = result === PermissionsAndroid.RESULTS.GRANTED;
         } catch {
           try {
             const settings = await notifee.requestPermission();

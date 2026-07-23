@@ -17,6 +17,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   View, Text, TouchableOpacity, StyleSheet,
   ActivityIndicator, Alert, AppState, Modal, TextInput, KeyboardAvoidingView, Platform,
+  PermissionsAndroid,
 } from 'react-native';
 import { useIsFocused }  from '@react-navigation/native';
 import { useSelector }   from 'react-redux';
@@ -31,6 +32,7 @@ import { syncRecordings }        from '../services/recordingService';
 import { RADIUS, FONT } from '../theme/tokens';
 import { useTheme } from '../theme/ThemeContext';
 import { isOnCall, subscribeToCallState } from '../services/callStateService';
+import { requestLocationPermission } from '../services/permissionsService';
 import moment from 'moment';
 
 const STALE_MS = 30 * 1000;
@@ -407,19 +409,11 @@ export default function AttendanceWidget() {
       // gate (it returns 400 if location is required).
       let locationPayload = {};
       try {
-        const { check, request, PERMISSIONS, RESULTS } = require('react-native-permissions');
-        const { Platform } = require('react-native');
-
-        const locPerm = Platform.OS === 'android'
-          ? PERMISSIONS.ANDROID.ACCESS_FINE_LOCATION
-          : PERMISSIONS.IOS.LOCATION_WHEN_IN_USE;
-
-        let status = await check(locPerm);
-        if (status === RESULTS.DENIED) {
-          status = await request(locPerm);
-        }
-
-        if (status === RESULTS.GRANTED) {
+        // Uses the centralized permissionsService (core PermissionsAndroid under
+        // the hood) instead of react-native-permissions, so the clock-in tap
+        // can never stall on that library's native module.
+        const granted = await requestLocationPermission();
+        if (granted) {
           locationPayload = await getLocationSafe();
         }
       } catch (locErr) {
@@ -481,13 +475,13 @@ export default function AttendanceWidget() {
 
   const sendLocationPing = useCallback(async () => {
     try {
-      const { check, PERMISSIONS, RESULTS } = require('react-native-permissions');
-      const { Platform } = require('react-native');
-      const locPerm = Platform.OS === 'android'
-        ? PERMISSIONS.ANDROID.ACCESS_FINE_LOCATION
-        : PERMISSIONS.IOS.LOCATION_WHEN_IN_USE;
-      const status = await check(locPerm);
-      if (status !== RESULTS.GRANTED) {
+      // Core PermissionsAndroid.check (boolean) — no react-native-permissions.
+      const granted =
+        Platform.OS !== 'android' ||
+        (await PermissionsAndroid.check(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        ));
+      if (!granted) {
         // Permission was revoked — stop tracking
         stopLocationTracking();
         return;

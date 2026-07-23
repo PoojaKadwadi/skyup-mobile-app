@@ -11,30 +11,23 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, { useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform, Linking } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Platform, Linking, PermissionsAndroid } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 
-let check, request, PERMISSIONS, RESULTS;
-try {
-  const rp = require('react-native-permissions');
-  check = rp.check; request = rp.request;
-  PERMISSIONS = rp.PERMISSIONS; RESULTS = rp.RESULTS;
-} catch {}
+const POST_NOTIF = PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS;
 
 export default function NotificationPermissionBanner() {
   const [status, setStatus] = useState(null); // null | 'denied' | 'blocked'
 
   useEffect(() => {
-    if (Platform.OS !== 'android' || Platform.Version < 33 || !check) return;
+    if (Platform.OS !== 'android' || Platform.Version < 33 || !POST_NOTIF) return;
     checkStatus();
   }, []);
 
   const checkStatus = async () => {
     try {
-      const result = await check(PERMISSIONS.ANDROID.POST_NOTIFICATIONS);
-      if (result === RESULTS.DENIED)  setStatus('denied');
-      if (result === RESULTS.BLOCKED) setStatus('blocked');
-      if (result === RESULTS.GRANTED) setStatus(null);
+      const granted = await PermissionsAndroid.check(POST_NOTIF);
+      setStatus(granted ? null : 'denied');
     } catch {}
   };
 
@@ -45,9 +38,10 @@ export default function NotificationPermissionBanner() {
       return;
     }
     try {
-      const result = await request(PERMISSIONS.ANDROID.POST_NOTIFICATIONS);
-      if (result === RESULTS.GRANTED) setStatus(null);
-      else setStatus('blocked');
+      const result = await PermissionsAndroid.request(POST_NOTIF);
+      if (result === PermissionsAndroid.RESULTS.GRANTED) setStatus(null);
+      else if (result === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN) setStatus('blocked');
+      else setStatus('denied');
     } catch {}
   };
 
