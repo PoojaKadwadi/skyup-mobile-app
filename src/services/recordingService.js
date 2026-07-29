@@ -246,14 +246,19 @@ function filenameMatchesName(filename, leadName) {
 function resolveLast4ToPhone(last4, fileMs, callLogs, preferPhone = null) {
   if (!last4 || last4.length !== 4) return null;
 
-  // 1. Direct match against the target number.
+  const WINDOW = 20 * 60 * 1000;
+
+  // 1. Direct match against the target number by LAST 4 DIGITS.
+  //    Recordings are commonly saved as "<name> <last4>" or "<last4>", so when
+  //    the filename's last-4 equals the lead's last-4 we attribute it to the
+  //    lead. (A filename that instead contains a DIFFERENT full number is still
+  //    caught and rejected later by the cross-check, so this stays accurate.)
   if (preferPhone) {
     const want = normalizePhone(preferPhone);
     if (want && want.slice(-4) === last4) return want;
   }
 
   // 2. Call-log match by suffix, disambiguated by time proximity.
-  const WINDOW = 20 * 60 * 1000;
   let best = null, minDiff = Infinity;
   for (const log of callLogs || []) {
     const norm = normalizePhone(log.phoneNumber || '');
@@ -567,10 +572,15 @@ export const syncRecordings = async (phoneNumber = null, sinceMs = 0, skipPhones
       if (normalizedArg && phone && phone !== normalizedArg) {
         const a = phone;
         const b = normalizedArg;
-        const sameLast4   = a.length >= 4 && b.length >= 4 && a.slice(-4) === b.slice(-4);
+        // NOTE: last-4 alone is deliberately NOT accepted here. Different numbers
+        // routinely share their last four digits, so a bare last-4 match let one
+        // lead's recording attach to another lead. Attribute to the target only
+        // on a strong signal: the filename carries the lead's NAME, or the two
+        // numbers share a 7+ digit suffix (i.e. same number differing only by
+        // country-code / prefix / leading zero).
         const suffixMatch = (a.length >= 7 && b.endsWith(a)) || (b.length >= 7 && a.endsWith(b));
 
-        if (nameMatched || sameLast4 || suffixMatch) {
+        if (nameMatched || suffixMatch) {
           // Same lead, different representation — attribute to the target so the
           // upload, dedup key and skipPhones check all use one canonical number.
           phone = normalizedArg;

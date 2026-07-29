@@ -41,6 +41,11 @@ export default function ClockInGate({ children }) {
   const lastRefreshMsRef = useRef(0);
   const REFRESH_THROTTLE_MS = 30_000;
 
+  // Last CONFIRMED clock state from the server (null = never confirmed yet).
+  // Used so a transient network error doesn't force the app into the wrong
+  // state and desync it from the web portal.
+  const knownStateRef = useRef(null);
+
   // ── Check attendance status ─────────────────────────────────────────────────
   const refresh = useCallback(async (force = false) => {
     // FIX: throttle — skip network call if we checked within the last 30s.
@@ -53,10 +58,20 @@ export default function ClockInGate({ children }) {
       const rec = res.data;
       // Clocked in = has a loginTime today and hasn't clocked out yet.
       const isIn = !!rec?.loginTime && !rec?.logoutTime;
+      knownStateRef.current = isIn;   // remember the confirmed state
       setClockedIn(isIn);
     } catch {
-      // On a transient error, fail open so a clocked-in employee isn't trapped.
-      setClockedIn(true);
+      // FIX (mobile↔web clock desync): the old code did setClockedIn(true) on
+      // ANY error, so a transient network blip made the mobile app show
+      // "clocked in" even after the employee had clocked OUT on the web portal.
+      // Instead, keep the last state the server actually confirmed. Only fail
+      // open on the very first check (state never confirmed) so a genuinely
+      // clocked-in employee is never trapped behind a startup network error.
+      if (knownStateRef.current === null) {
+        setClockedIn(true);
+      } else {
+        setClockedIn(knownStateRef.current);
+      }
     } finally {
       setChecking(false);
     }

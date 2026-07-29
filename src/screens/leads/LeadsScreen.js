@@ -24,7 +24,7 @@
 import React, { useEffect, useCallback, useMemo, useState, memo, useRef } from 'react';
 import {
   View, Text, FlatList, StyleSheet, TouchableOpacity,
-  TextInput, RefreshControl, StatusBar, InteractionManager,
+  TextInput, RefreshControl, StatusBar, InteractionManager, ActivityIndicator,
 } from 'react-native';
 import { useDispatch, useSelector }     from 'react-redux';
 import { useNavigation, useRoute,
@@ -434,22 +434,33 @@ export default function LeadsScreen() {
         ItemSeparatorComponent={Separator}
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
-          <View style={s.empty}>
-            <Icon name="account-search-outline" size={52} color={colors.border} />
-            <Text style={s.emptyTitle}>
-              {localSearch ? 'No results' : 'No leads yet'}
-            </Text>
-            <Text style={s.emptySub}>
-              {localSearch
-                ? `No match for "${localSearch}"`
-                : 'Your assigned leads appear here'}
-            </Text>
-            {hasActiveFilters && (
-              <TouchableOpacity onPress={clearAllFilters} style={[s.clearBtn, s.clearBtnMt]}>
-                <Text style={s.clearBtnTxt}>Clear filters</Text>
-              </TouchableOpacity>
-            )}
-          </View>
+          loading ? (
+            // Show a clear loading state during the fetch (the first load can
+            // take 30–60s while the free-tier backend wakes from cold start).
+            // Without this the screen showed "No leads yet" and looked frozen.
+            <View style={s.empty}>
+              <ActivityIndicator size="large" color={colors.blue} />
+              <Text style={s.emptyTitle}>Loading leads…</Text>
+              <Text style={s.emptySub}>This can take a moment on first load</Text>
+            </View>
+          ) : (
+            <View style={s.empty}>
+              <Icon name="account-search-outline" size={52} color={colors.border} />
+              <Text style={s.emptyTitle}>
+                {localSearch ? 'No results' : 'No leads yet'}
+              </Text>
+              <Text style={s.emptySub}>
+                {localSearch
+                  ? `No match for "${localSearch}"`
+                  : 'Your assigned leads appear here'}
+              </Text>
+              {hasActiveFilters && (
+                <TouchableOpacity onPress={clearAllFilters} style={[s.clearBtn, s.clearBtnMt]}>
+                  <Text style={s.clearBtnTxt}>Clear filters</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          )
         }
       />
     </View>

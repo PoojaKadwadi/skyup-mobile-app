@@ -40,9 +40,20 @@ export default function CallButton({ phoneNumber, onCallStart, size = 'normal' }
         return;
       }
 
-      // Notify the parent FIRST so it can arm its post-call detector BEFORE the
-      // app leaves the foreground — no background transition is ever missed.
-      onCallStart?.(phoneNumber);
+      // Notify the parent FIRST and WAIT for it to finish before opening the
+      // dialer. The parent's handler (handleCall) requests the call permission
+      // and arms the post-call detector; if we don't await it, the dialer opens
+      // while the permission dialog is still up and the AppState detector
+      // misfires — which showed the remark popup instead of the dial pad and
+      // left the screen stuck. Awaiting guarantees the order:
+      //   permission granted → detector armed → THEN dialer opens.
+      // For the leads-list path onCallStart just navigates (not a promise), so
+      // `await` resolves immediately and this is a no-op there.
+      try {
+        await onCallStart?.(phoneNumber);
+      } catch (startErr) {
+        console.warn('[CallButton] onCallStart failed:', startErr?.message);
+      }
 
       // canOpenURL for tel: can falsely return false on Android 11+ when the
       // dialer package isn't declared in <queries>; openURL handles tel:
