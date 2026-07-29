@@ -21,8 +21,29 @@ import apiClient from './apiClient';
 
 // ─── Read ─────────────────────────────────────────────────────────────────────
 
+// Render's free tier sleeps after inactivity and cold-starts in 30–60s. The
+// FIRST leads fetch after the app has been idle is the slowest thing the user
+// sees ("page speed issue"). Give the first page a long, cold-start-tolerant
+// timeout and one automatic retry so a sleeping backend doesn't surface as a
+// timeout error the user has to pull-to-refresh past. Subsequent pages use the
+// default timeout (by then the backend is already awake).
+const COLD_START_TIMEOUT = 60000; // 60s — long enough to outlast a full cold start
+
 export const getMyLeads = async() => {
-    const firstPage = await apiClient.get('/lead/my-leads?page=1&limit=200');
+    let firstPage;
+    try {
+        firstPage = await apiClient.get('/lead/my-leads?page=1&limit=200', {
+            timeout: COLD_START_TIMEOUT,
+        });
+    } catch (err) {
+        // One retry: a timeout/network error here is almost always the backend
+        // still waking. The first request usually warms it, so the retry lands.
+        const aborted = err.code === 'ECONNABORTED' || !err.response;
+        if (!aborted) throw err;
+        firstPage = await apiClient.get('/lead/my-leads?page=1&limit=200', {
+            timeout: COLD_START_TIMEOUT,
+        });
+    }
     const { leads: firstLeads, pages } = firstPage.data;
 
     // Single page — the common case, return immediately
@@ -212,10 +233,31 @@ function formatLead(lead) {
 
     // Decide which remark to SHOW and whether it's a manual agent remark or the
     // original lead-source (form/ad) remark, so the UI can mark them differently.
-    //   • If the latest call-history entry has a remark, that's an agent-typed
-    //     (manual) remark → prefer it and flag it manual.
+    //   • If the LATEST GENUINE agent-typed call-history entry has a remark,
+    //     prefer it and flag it manual.
     //   • Otherwise fall back to lead.remark, which is the source/form remark.
-    const lastManualRemark = lastCall && lastCall.remark ? String(lastCall.remark).trim() : '';
+    //
+    // FIX: the previous code took `callHistory[last].remark` unconditionally,
+    // but the last entry is usually an AUTO-LOGGED dialer entry (created the
+    // instant the agent taps Call) whose remark is the boilerplate
+    // "Outgoing/Incoming Call from mobile app". That made the leads list AND the
+    // Lead Detail "Last Remark" row show a call log instead of the real remark.
+    // Walk backwards to the newest entry that has a remark, is NOT a synced call
+    // log (no callType/duration/timestamp), and is NOT that boilerplate text.
+    const isCallLogEntry = h =>
+        !h ||
+        h.callType != null ||
+        h.duration != null ||
+        h.timestamp != null ||
+        (typeof h.remark === 'string' && /call from mobile app/i.test(h.remark));
+    let lastManualRemark = '';
+    for (let i = callHistory.length - 1; i >= 0; i--) {
+        const h = callHistory[i];
+        if (h && h.remark && String(h.remark).trim() !== '' && !isCallLogEntry(h)) {
+            lastManualRemark = String(h.remark).trim();
+            break;
+        }
+    }
     const sourceRemark = lead.remark ? String(lead.remark).trim() : '';
     const displayRemark = lastManualRemark || sourceRemark;
     const remarkIsManual = !!lastManualRemark;

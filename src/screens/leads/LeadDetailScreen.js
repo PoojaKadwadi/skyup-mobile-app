@@ -389,6 +389,40 @@ export default function LeadDetailScreen() {
     ).length;
   }, [lead?.callHistory]);
 
+  // FIX (Last Remark row): the summary line used to render `lead.remark`
+  // straight from the server, but the backend sets `lead.remark` to the text
+  // of the MOST RECENT call-history entry — which is usually an auto-logged
+  // "Outgoing/Incoming Call from mobile app" dialer entry, not a real remark.
+  // So every call the agent made showed up here as the "Last Remark". Derive
+  // it instead from the SAME filtered set the popup uses (newest genuine
+  // manual remark), falling back to the initial campaign remark, so the row
+  // never shows a call log. Uses the same isCallLog/isAutoDialerEntry rules.
+  const lastManualRemark = useMemo(() => {
+    const ch = Array.isArray(lead?.callHistory) ? lead.callHistory : [];
+    const isAuto = h => {
+      const remarkText = typeof h?.remark === 'string' ? h.remark.trim() : '';
+      if (/call from mobile app/i.test(remarkText)) return true;
+      const outcomeText = typeof h?.outcome === 'string' ? h.outcome.trim() : '';
+      if (outcomeText && !OUTCOMES.includes(outcomeText)) return true;
+      return false;
+    };
+    for (let i = ch.length - 1; i >= 0; i--) {
+      const h = ch[i];
+      if (
+        h &&
+        typeof h.remark === 'string' &&
+        h.remark.trim() !== '' &&
+        h.callType == null &&
+        h.duration == null &&
+        h.timestamp == null &&
+        !isAuto(h)
+      ) {
+        return h.remark.trim();
+      }
+    }
+    return (lead?.initialRemark || '').trim();
+  }, [lead?.callHistory, lead?.initialRemark]);
+
   // FIX (primary bug): the remark modal used to be initialised to `postCall`,
   // so tapping "Call" in the leads list — which navigates here with
   // postCall:true — popped the remark modal INSTANTLY, on top of / instead of
@@ -1297,7 +1331,7 @@ export default function LeadDetailScreen() {
               );
             })}
           </View>
-          {lead.remark ? (
+          {lastManualRemark ? (
             <>
               <View style={styles.divider} />
               <TouchableOpacity
@@ -1315,7 +1349,7 @@ export default function LeadDetailScreen() {
                     </Text>
                   </View>
                 </View>
-                <Text style={styles.infoValue}>{lead.remark}</Text>
+                <Text style={styles.infoValue}>{lastManualRemark}</Text>
               </TouchableOpacity>
             </>
           ) : null}
