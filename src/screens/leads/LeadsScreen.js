@@ -47,6 +47,11 @@ function maskPhone(phone) {
 
 const STATUS_FILTERS = ['all', 'New', 'In Progress', 'Converted', 'Not Interested'];
 
+// "Domain-wise" filter — matches the Industry tag agents set from the remark
+// modal on LeadDetailScreen.js (Lead.industry on the backend). 'All' = no
+// filter; 'Untagged' = leads with no industry set yet.
+const INDUSTRY_FILTERS = ['All', 'Real Estate', 'Healthcare', 'Education', 'E-commerce', 'Finance', 'Manufacturing', 'Hospitality', 'Other', 'Untagged'];
+
 // Returns true when a lead has a follow-up scheduled for today or earlier
 // (due today or overdue). Mirrors the same predicate in DashboardScreen so the
 // "Followups" card count and this filtered list always agree.
@@ -188,6 +193,7 @@ export default function LeadsScreen() {
   const [showSort,    setShowSort]    = useState(false);
   const [sortBy,      setSortBy]      = useState('date_desc');
   const [filterTemp,  setFilterTemp]  = useState('All');
+  const [filterIndustry, setFilterIndustry] = useState('All');
   // Set from the dashboard "Followups" card. When true, the list is narrowed to
   // leads whose follow-up is due today or overdue (see isFollowUpDue).
   const [followUpOnly, setFollowUpOnly] = useState(false);
@@ -270,6 +276,11 @@ export default function LeadsScreen() {
     if (filterTemp !== 'All') {
       res = res.filter(l => (l.Quality || l.temperature) === filterTemp);
     }
+    if (filterIndustry !== 'All') {
+      res = filterIndustry === 'Untagged'
+        ? res.filter(l => !l.industry)
+        : res.filter(l => l.industry === filterIndustry);
+    }
     // FIX: pre-compute sort keys before sorting so `new Date()` is called
     // once per item instead of O(n log n) times inside the comparator.
     // With 500 leads, the old approach called new Date() ~4,500 times per sort.
@@ -283,7 +294,7 @@ export default function LeadsScreen() {
       res.sort((a, b) => (a.status || '').localeCompare(b.status || ''));
     }
     return res;
-  }, [filteredLeads, sortBy, filterTemp, followUpOnly]);
+  }, [filteredLeads, sortBy, filterTemp, filterIndustry, followUpOnly]);
 
   // Stable renderItem — receives only stable refs; no new closures per call.
   const renderItem = useCallback(({ item }) => (
@@ -301,11 +312,12 @@ export default function LeadsScreen() {
     handleSearchClear();
     dispatch(setFilterStatus('all'));
     setFilterTemp('All');
+    setFilterIndustry('All');
     setSortBy('date_desc');
     setFollowUpOnly(false);
   }, [dispatch, handleSearchClear]);
 
-  const hasActiveFilters = localSearch || filterStatus !== 'all' || filterTemp !== 'All' || followUpOnly;
+  const hasActiveFilters = localSearch || filterStatus !== 'all' || filterTemp !== 'All' || filterIndustry !== 'All' || followUpOnly;
 
   return (
     <View style={s.root}>
@@ -387,6 +399,18 @@ export default function LeadsScreen() {
                 onPress={() => setFilterTemp(q)}
               >
                 <Text style={[s.chipTxt, filterTemp === q && s.chipTxtActive]}>{q}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <Text style={[s.filterGroupLabel, s.filterGroupLabelTop]}>INDUSTRY</Text>
+          <View style={s.filterRow}>
+            {INDUSTRY_FILTERS.map(ind => (
+              <TouchableOpacity
+                key={ind}
+                style={[s.chip, filterIndustry === ind && s.chipActive]}
+                onPress={() => setFilterIndustry(ind)}
+              >
+                <Text style={[s.chipTxt, filterIndustry === ind && s.chipTxtActive]}>{ind}</Text>
               </TouchableOpacity>
             ))}
           </View>

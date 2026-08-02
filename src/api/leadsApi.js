@@ -107,9 +107,10 @@ export const getLeadActionSummary = async(leadId, { refresh = false } = {}) => {
     return response.data;
 };
 
-export const addCallRemark = async(leadId, { remark, outcome, followUpDate }) => {
+export const addCallRemark = async(leadId, { remark, outcome, followUpDate, industry }) => {
     const payload = { remark, outcome };
     if (followUpDate) payload.followUpDate = followUpDate;
+    if (industry !== undefined) payload.industry = industry;
     const response = await apiClient.patch(`/lead/${leadId}`, payload);
     return response.data;
 };
@@ -120,11 +121,11 @@ export const addCallRemark = async(leadId, { remark, outcome, followUpDate }) =>
 // breaking the boundary string and causing a server-side parse failure.
 // fetch() derives Content-Type + boundary from the FormData automatically.
 export const addCallRemarkWithAttachments = async(
-    leadId, { remark, outcome, followUpDate, document, recording },
+    leadId, { remark, outcome, followUpDate, document, recording, industry },
 ) => {
     // If neither attachment is provided, fall back to the plain JSON patch
     if (!document && !recording) {
-        return addCallRemark(leadId, { remark, outcome, followUpDate });
+        return addCallRemark(leadId, { remark, outcome, followUpDate, industry });
     }
 
     const { BASE_URL } = require('../config/config');
@@ -164,6 +165,7 @@ export const addCallRemarkWithAttachments = async(
     form.append('remark', remark);
     form.append('outcome', outcome);
     if (followUpDate) form.append('followUpDate', followUpDate);
+    if (industry !== undefined) form.append('industry', industry);
 
     if (document) {
         const name = document.name || document.uri.split('/').pop();
@@ -284,9 +286,23 @@ function formatLead(lead) {
         email: lead.email || '',
         source: lead.source || 'Web Form',
         campaign: lead.campaign || '—',
+        industry: lead.industry || '',
         status: lead.status || 'New',
         date: lead.date,
-        _raw_date: lead.date || lead.createdAt || null,
+        // FIX (Leads list ordering): previously this was just lead.date — the
+        // ORIGINAL creation date, which never changes. A lead reassigned to
+        // this agent today, or one an agent just called, still had a
+        // months-old `date` and sank to the bottom of "Newest first" even
+        // though it's genuinely the most relevant lead to look at right now.
+        // Now it's the most recent of: creation date, or the last logged
+        // call/remark — whichever is later — so recently-active leads
+        // actually surface first, not just recently-created ones.
+        _raw_date: (() => {
+            const created = lead.date ? new Date(lead.date).getTime() : 0;
+            const lastCalledAt = lastCall?.calledAt ? new Date(lastCall.calledAt).getTime() : 0;
+            const mostRecent = Math.max(created, lastCalledAt);
+            return mostRecent > 0 ? new Date(mostRecent) : (lead.date || null);
+        })(),
         remark: displayRemark,
         remarkIsManual,
         initialRemark,

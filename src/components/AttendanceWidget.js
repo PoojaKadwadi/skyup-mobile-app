@@ -4,13 +4,24 @@
 //   1. Display clocked-in time, status chip, break time, clock/break buttons.
 //   2. Real-time sync via Socket.IO (att:<userId> room).
 //   3. Tick worked-time counter every 1s (focused) / 10s (background).
-//   4. Ping the server every 60s while active so it knows the app is alive.
+//   4. Ping the server every 60s while active so it knows the app is alive —
+//      this IS the idle detection: the backend's markIdleJob (every 2 min)
+//      marks anyone whose lastActivity is >5 min stale as "Idle". This ping
+//      is the only thing that keeps lastActivity fresh.
 //
-// What this widget does NOT do:
-//   Idle detection has been moved entirely to App.js (useGlobalIdleDetection).
-//   That hook covers every screen — Dashboard, Leads, LeadDetail, CallLogs,
-//   Profile — and also integrates with call-state detection. The widget simply
-//   reflects whatever status the backend reports via attendance:updated.
+// BUG FIX (this revision) — false "Idle" during real phone calls:
+//   The old comment here claimed idle detection had "moved to App.js
+//   (useGlobalIdleDetection)... and also integrates with call-state
+//   detection" — that hook does not exist anywhere in this codebase. What
+//   actually existed: the AppState listener below stopped the ping
+//   completely the instant the app backgrounded, with ZERO awareness of an
+//   active call — even though `isOnCall()` was already imported and
+//   available (it was only wired to the UI chip). Since taking a phone call
+//   is exactly when this app gets backgrounded, and calls routinely run
+//   longer than the 5-minute idle cutoff, agents were being auto-marked
+//   Idle while actively on a live call with a lead. Fixed by keeping the
+//   ping alive across backgrounding whenever a call is in progress (see the
+//   "Ping keep-alive across backgrounding" effect below).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
@@ -119,6 +130,24 @@ export default function AttendanceWidget() {
   const lastElapsedRef = useRef(0);
   const socketRef      = useRef(null);
 
+  // ── Shared keep-alive ping ──────────────────────────────────────────────
+  // Single definition reused by the tick effect, the AppState listener, and
+  // the call-state effect below, so all three agree on one pingRef instead
+  // of each maintaining their own duplicate timer.
+  const ping = useCallback(async () => {
+    try { await api.post('/attendance/ping'); } catch { /* silent */ }
+  }, []);
+
+  const startPing = useCallback(() => {
+    if (pingRef.current) return; // already running
+    ping();
+    pingRef.current = setInterval(ping, 60_000);
+  }, [ping]);
+
+  const stopPing = useCallback(() => {
+    if (pingRef.current) { clearInterval(pingRef.current); pingRef.current = null; }
+  }, []);
+
   // ── Initial fetch ─────────────────────────────────────────────────────────
   const fetchRecord = useCallback(async (force = false) => {
     if (!force && lastFetchedRef.current && Date.now() - lastFetchedRef.current < STALE_MS) return;
@@ -223,16 +252,30 @@ export default function AttendanceWidget() {
     setShowIdealModal(true);
   }, [idealTime, idealRemark]);
 
-  // ── Call-state chip sync ───────────────────────────────────────────────────
-  // Updates the "On Call" status chip when phone state changes.
-  // Idle detection itself lives in App.js — this is display only.
+  // ── Call-state chip sync + ping keep-alive across backgrounding ───────────
+  // Updates the "On Call" status chip AND, critically, keeps /attendance/ping
+  // firing if a call starts (or is already in progress) while the app is
+  // backgrounded — otherwise a call longer than 5 minutes gets the agent
+  // auto-marked "Idle" by the backend's markIdleJob mid-call. When the call
+  // ends while still backgrounded, ping reverts to normal (stops), so a
+  // genuinely idle backgrounded session still goes idle as expected.
   useEffect(() => {
-    setOnCall(isOnCall());
+    const applyCallState = (onACall) => {
+      setOnCall(onACall);
+      const rec = recordRef.current;
+      const clockedIn = rec?.loginTime && !rec?.logoutTime;
+      if (!clockedIn) return;
+      if (AppState.currentState !== 'active') {
+        if (onACall) startPing();
+        else stopPing();
+      }
+    };
+    applyCallState(isOnCall());
     const unsub = subscribeToCallState(({ state }) => {
-      setOnCall(state !== 'idle');
+      applyCallState(state !== 'idle');
     });
     return unsub;
-  }, []);
+  }, [startPing, stopPing]);
 
   // ── Tick + ping ────────────────────────────────────────────────────────────
   // PERF FIX: Removed `record` from deps. Previously every attendance:updated
@@ -266,22 +309,17 @@ export default function AttendanceWidget() {
       }
     };
 
-    const ping = async () => {
-      try { await api.post('/attendance/ping'); } catch { /* silent */ }
-    };
-
     const stopTimers = () => {
       if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
-      if (pingRef.current) { clearInterval(pingRef.current); pingRef.current = null; }
+      stopPing();
     };
 
     const startTimers = () => {
       stopTimers();
       tick();
-      ping(); // fire immediately so the backend clears any stale 'idle' at once
       const tickInterval = isFocused ? 1000 : 10_000;
       tickRef.current = setInterval(tick, tickInterval);
-      pingRef.current = setInterval(ping, 60_000);
+      startPing(); // fires immediately so the backend clears any stale 'idle' at once
     };
 
     if (AppState.currentState === 'active') {
@@ -289,7 +327,7 @@ export default function AttendanceWidget() {
     }
 
     return () => { stopTimers(); };
-  }, [isFocused]); // PERF FIX: record removed — reads via recordRef instead
+  }, [isFocused, startPing, stopPing]); // PERF FIX: record removed — reads via recordRef instead
 
   // ── AppState listener registered once (not inside tick useEffect) ──────────
   useEffect(() => {
@@ -308,25 +346,24 @@ export default function AttendanceWidget() {
           };
           tickRef.current = setInterval(tick, tickInterval);
 
-          // FIX: also restart the keep-alive ping on resume. Previously only the
-          // tick was restarted here, so after the first background→foreground
-          // cycle the app stopped pinging /attendance/ping entirely and the
-          // backend flagged the clocked-in user as 'idle' while they were still
-          // working. Fire one immediately, then resume the 60s interval.
-          const ping = async () => {
-            try { await api.post('/attendance/ping'); } catch { /* silent */ }
-          };
-          if (pingRef.current) clearInterval(pingRef.current);
-          ping();
-          pingRef.current = setInterval(ping, 60_000);
+          // Restart the keep-alive ping on resume — fire immediately so any
+          // stale 'idle' the backend applied while backgrounded (with no
+          // call in progress) clears right away.
+          startPing();
         }
       } else {
+        // BUG FIX: this used to unconditionally kill the ping the instant the
+        // app backgrounded — but backgrounding is exactly what happens when a
+        // real phone call starts, and calls routinely run past the 5-minute
+        // idle cutoff. Keep the ping running through backgrounding whenever
+        // a call is active (isOnCall(), refreshed live by the call-state
+        // effect above); only stop it for genuine backgrounded inactivity.
         if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
-        if (pingRef.current) { clearInterval(pingRef.current); pingRef.current = null; }
+        if (!isOnCall()) stopPing();
       }
     });
     return () => sub.remove();
-  }, []); // PERF FIX: registered exactly once
+  }, [startPing, stopPing]); // PERF FIX: registered exactly once
 
   // ── Actions ───────────────────────────────────────────────────────────────
   // Guards against double-taps / overlapping clock-in attempts. Without this,

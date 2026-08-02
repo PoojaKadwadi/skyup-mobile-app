@@ -1029,12 +1029,16 @@ export async function checkAndScheduleMeetingFollowUps(meetings) {
       }
     }
 
-    if (newlyScheduled.length > 0) {
-      // Keep only future entries to stop the set growing unbounded
-      const pruned = [...scheduledSet].filter((key) => {
-        const ts = parseInt(key.substring(key.lastIndexOf('_') + 1));
-        return !isNaN(ts) && ts > now;
-      });
+    // PERF FIX: this used to only prune when something NEW was scheduled —
+    // on days with no new meetings the past-due dedup keys just piled up in
+    // AsyncStorage forever (parsed + re-stringified on every check). Now it
+    // prunes every run, so the set never grows past "future entries only"
+    // regardless of whether anything new was added today.
+    const pruned = [...scheduledSet].filter((key) => {
+      const ts = parseInt(key.substring(key.lastIndexOf('_') + 1));
+      return !isNaN(ts) && ts > now;
+    });
+    if (pruned.length !== scheduledSet.size || newlyScheduled.length > 0) {
       await AsyncStorage.setItem(MEETING_NOTIFIED_KEY, JSON.stringify(pruned));
     }
 

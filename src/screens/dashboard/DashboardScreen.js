@@ -22,7 +22,7 @@ import AsyncStorage                     from '@react-native-async-storage/async-
 import { useDispatch, useSelector }     from 'react-redux';
 import { useNavigation, useFocusEffect }                from '@react-navigation/native';
 import Icon                             from 'react-native-vector-icons/MaterialCommunityIcons';
-import { fetchLeads }                   from '../../store/slices/leadsSlice';
+import { fetchLeads, isNotContacted }   from '../../store/slices/leadsSlice';
 import { triggerManualSync }            from '../../services/backgroundSyncService';
 import { checkAllPermissions }          from '../../services/permissionsService';
 import { checkAndNotifyNewLeads, checkAndNotifyFollowUps, checkAndScheduleClockInReminder } from '../../services/notificationService';
@@ -71,17 +71,42 @@ function timeAgo(ms) {
   return hrs < 24 ? `${hrs}h ago` : `${Math.floor(hrs / 24)}d ago`;
 }
 
-// Returns true when a lead has a follow-up scheduled for today or earlier
-// (i.e. due today or overdue). Kept at module scope with no theme/color
-// dependency so it stays Hermes-safe and is reused by the "Followups" card
-// count here and the follow-up filter in LeadsScreen.
+// Works out the follow-up date that actually governs a lead:
+//   • If an agent explicitly set followUpDate, that wins (auto: false).
+//   • Otherwise, a lead that's still "New" (not yet called) or "In Progress"
+//     automatically becomes a follow-up the day AFTER it was last touched —
+//     an untouched lead should never just sit there with no follow-up date
+//     and quietly fall off everyone's radar. Basis = last call time if the
+//     agent has called before, else the lead's creation date. (auto: true)
+// Kept at module scope with no theme/color dependency so it stays
+// Hermes-safe. Mirrored in LeadsScreen so the "Followups" card count and the
+// filtered list it opens always agree.
+function getEffectiveFollowUp(lead) {
+  if (lead?.followUpDate) {
+    const d = new Date(lead.followUpDate);
+    return isNaN(d.getTime()) ? null : { date: d, auto: false };
+  }
+  if (isNotContacted(lead) || lead?.status === 'In Progress') {
+    const basis = lead.lastCalledAt || lead._raw_date || lead.date;
+    if (!basis) return null;
+    const b = new Date(basis);
+    if (isNaN(b.getTime())) return null;
+    const due = new Date(b);
+    due.setDate(due.getDate() + 1);
+    due.setHours(0, 0, 0, 0);
+    return { date: due, auto: true };
+  }
+  return null;
+}
+
+// Returns true when a lead's effective follow-up (explicit or auto-assigned,
+// see getEffectiveFollowUp above) is today or earlier.
 function isFollowUpDue(lead) {
-  if (!lead?.followUpDate) return false;
-  const d = new Date(lead.followUpDate);
-  if (isNaN(d.getTime())) return false;
+  const info = getEffectiveFollowUp(lead);
+  if (!info) return false;
   const endOfToday = new Date();
   endOfToday.setHours(23, 59, 59, 999);
-  return d.getTime() <= endOfToday.getTime();
+  return info.date.getTime() <= endOfToday.getTime();
 }
 
 function computeKpi(leads) {
@@ -116,7 +141,12 @@ function computeKpi(leads) {
     if      (st === 'Converted')       converted++;
     else if (st === 'In Progress')     inProgress++;
     else if (st === 'Not Interested')  notInt++;
-    else if (st === 'New')             newLeads++;
+    // BUG FIX: was `st === 'New'`, but the backend's status string wasn't a
+    // reliable signal — most leads default to it, so the "New Leads" count
+    // (and the button it drives) showed nearly every lead. "New" now means
+    // "not yet contacted" — zero call history — matching the fix applied to
+    // the Leads screen's "New" filter.
+    if (isNotContacted(l))             newLeads++;
 
     const q = l.Quality || l.temperature;
     if      (q === 'Hot')  hot++;

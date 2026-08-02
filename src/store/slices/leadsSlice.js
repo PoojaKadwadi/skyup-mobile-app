@@ -38,11 +38,11 @@ export const patchLead = createAsyncThunk(
 // Optimistic remark — adds entry to callHistory locally, no refetch
 export const submitCallRemark = createAsyncThunk(
   'leads/submitCallRemark',
-  async ({ leadId, remark, outcome, followUpDate, document, recording }, { rejectWithValue }) => {
+  async ({ leadId, remark, outcome, followUpDate, document, recording, industry }, { rejectWithValue }) => {
     try {
-      await addCallRemarkWithAttachments(leadId, { remark, outcome, followUpDate, document, recording });
+      await addCallRemarkWithAttachments(leadId, { remark, outcome, followUpDate, document, recording, industry });
       return {
-        leadId, remark, outcome, followUpDate,
+        leadId, remark, outcome, followUpDate, industry,
         hasDocument:  !!document,
         hasRecording: !!recording,
       };
@@ -121,7 +121,7 @@ const leadsSlice = createSlice({
 
     // Optimistic remark — add to callHistory locally so count updates instantly
     builder.addCase(submitCallRemark.fulfilled, (state, action) => {
-      const { leadId, remark, outcome, followUpDate, hasDocument, hasRecording } = action.payload;
+      const { leadId, remark, outcome, followUpDate, industry, hasDocument, hasRecording } = action.payload;
       const idx = state.items.findIndex(l => l.id === leadId);
       if (idx !== -1) {
         const lead     = state.items[idx];
@@ -138,6 +138,7 @@ const leadsSlice = createSlice({
           remark,
           // If a follow-up date was set, surface it on the lead for UI display
           ...(followUpDate ? { followUpDate } : {}),
+          ...(industry !== undefined ? { industry } : {}),
           callHistory: [...(lead.callHistory || []), newEntry],
         };
       }

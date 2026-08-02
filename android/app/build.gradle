@@ -33,7 +33,17 @@ configurations.all {
             enable true
             reset()
             include "armeabi-v7a", "arm64-v8a"
-            universalApk false
+            // FIX: was false — this app's APK is also distributed for manual
+            // sideload via the backend's /download and /install routes (not
+            // just Play Store, which handles per-ABI delivery automatically).
+            // With only split APKs and no universal one, whoever runs the
+            // release build has to guess which employee's phone is 32-bit vs
+            // 64-bit before copying the right file to the backend. Enabling
+            // the universal APK produces a third file
+            // (app-universal-release.apk) that installs on either
+            // architecture, so /download always has one file that works for
+            // everyone.
+            universalApk true
         }
     }
 

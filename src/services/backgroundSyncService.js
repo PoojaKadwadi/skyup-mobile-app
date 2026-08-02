@@ -28,7 +28,7 @@ import NetInfo      from '@react-native-community/netinfo';
 import { AppState, InteractionManager } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { getCallLogsSince } from './phoneService';
+import { getCallLogsSince, normalizePhone, getWorkSimAccountId } from './phoneService';
 import { syncCallLogs }     from '../api/callLogsApi';
 import { syncRecordings }   from './recordingService';
 import { checkAndNotifyFollowUps } from './notificationService';
@@ -63,6 +63,43 @@ function getTodayMidnightMs() {
   istMidnightUTC.setUTCHours(0, 0, 0, 0);
   // Convert back to a real (UTC) instant.
   return istMidnightUTC.getTime() - IST_OFFSET_MS;
+}
+
+// ── Scope the bulk call-log sync to CRM-relevant numbers only ─────────────────
+// PRIVACY/SCOPE FIX: getCallLogsSince() reads the device's ENTIRE call log
+// (every personal call — family, friends, anyone) with no filtering by who
+// was called. Previously every one of those got uploaded to the company's
+// backend via syncCallLogs(), regardless of whether the number had anything
+// to do with a CRM lead. That's both a real privacy concern (an agent's
+// personal call metadata living in the employer's database) and unnecessary
+// load on MobileCallLog storage.
+//
+// This builds the set of phone numbers that actually belong to this agent's
+// assigned leads (mobile/primaryPhone/secondaryPhone), normalized the same
+// way the backend does, so the bulk sync can be filtered down to "particular
+// numbers" — i.e. leads — instead of the complete device call log.
+//
+// TRADE-OFF: the backend's "unmatched call → AI summarize as a possible new
+// lead" feature (summarizeUnmatchedCall) relies on unmatched numbers reaching
+// the server. Filtering here means a call from a genuinely new prospect (not
+// yet a lead in the CRM) will no longer be uploaded/detected that way. If you
+// want to keep that feature working, this filter needs to be relaxed to
+// "known lead numbers OR inbound calls" instead of dropping unmatched
+// outbound/inbound calls outright — flag if that's the case and I'll adjust.
+function getKnownLeadNumberSet() {
+  try {
+    const leads = store.getState()?.leads?.items || [];
+    const set = new Set();
+    for (const l of leads) {
+      for (const raw of [l.mobile, l.primaryPhone, l.secondaryPhone]) {
+        const norm = raw ? normalizePhone(raw) : null;
+        if (norm) set.add(norm);
+      }
+    }
+    return set;
+  } catch {
+    return new Set();
+  }
 }
 
 let syncInterval         = null;
@@ -176,8 +213,24 @@ const doSync = async ({ forceFullDay = false, fromForeground = false } = {}) => 
       ? todayMidnight
       : Math.max(await getTs(LAST_SYNC_KEY, now), todayMidnight);
 
-    const logs = await getCallLogsSince(lastLogSync);
-    console.log(`[Sync] Call logs since ${new Date(lastLogSync).toISOString()}: ${logs.length} found`);
+    // Primary scope: the employee's own registered work-SIM number — the
+    // actual number THEY use to call leads. If they haven't picked one yet
+    // (single-SIM phone, or just hasn't set it in Profile), workSimId is
+    // null and the query falls back to reading all SIMs on the device.
+    const workSimId = await getWorkSimAccountId();
+    const rawLogs = await getCallLogsSince(lastLogSync, workSimId);
+
+    // Secondary scope: only numbers matching a known CRM lead — see
+    // getKnownLeadNumberSet() above for why this exists and the trade-off
+    // with unmatched-call detection. Still applied even when a work SIM is
+    // set, since an agent could still place/receive a personal call on
+    // their work line.
+    const knownNumbers = getKnownLeadNumberSet();
+    const logs = knownNumbers.size > 0
+      ? rawLogs.filter(l => knownNumbers.has(normalizePhone(l.phoneNumber)))
+      : rawLogs; // no leads cached locally yet — don't silently drop everything
+
+    console.log(`[Sync] Call logs since ${new Date(lastLogSync).toISOString()}: ${rawLogs.length} found on device${workSimId ? ` (work SIM only)` : ' (all SIMs — no work SIM set)'}, ${logs.length} match a CRM lead`);
 
     if (logs.length > 0) {
       for (let i = 0; i < logs.length; i += LOG_BATCH_SIZE) {

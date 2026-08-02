@@ -11,6 +11,7 @@ import { checkAllPermissions, requestCallPermission,
          requestCallLogPermission, requestStoragePermission,
          requestLocationPermission }
   from '../../services/permissionsService';
+import { getAvailableSims, getWorkSimAccountId, setWorkSimAccountId } from '../../services/phoneService';
 import { triggerManualSync }        from '../../services/backgroundSyncService';
 import { getCustomRecordingPath, setCustomRecordingPath } from '../../services/recordingPathService';
 import { isAutoUploadEnabled, setAutoUpload } from '../../services/autoUploadService';
@@ -29,6 +30,12 @@ export default function ProfileScreen() {
   const styles = React.useMemo(() => createStyles(colors), [colors]);
 
   const [perms, setPerms] = React.useState({ callPhone: false, readCallLog: false, readStorage: false, readContacts: false, location: false });
+  // Work SIM (multi-SIM devices) — which of the phone's SIMs is the
+  // employee's registered work number, used to scope call-log sync so
+  // personal-SIM calls never get uploaded. See services/phoneService.js.
+  const [availableSims, setAvailableSims] = React.useState([]);
+  const [workSimId,     setWorkSimId]     = React.useState(null);
+  const [detectingSims, setDetectingSims] = React.useState(false);
   const [customPath,     setCustomPath]     = React.useState(null);   // saved folder
   const [browsedPath,    setBrowsedPath]    = React.useState(null);   // currently browsing
   const [browseEntries,  setBrowseEntries]  = React.useState([]);     // folder contents
@@ -42,7 +49,37 @@ export default function ProfileScreen() {
     checkAllPermissions().then(setPerms);
     getCustomRecordingPath().then(setCustomPath);
     isAutoUploadEnabled().then(setAutoUploadState).catch(() => {});
+    getWorkSimAccountId().then(setWorkSimId).catch(() => {});
   }, []);
+
+  // Scan recent call logs for distinct SIM identifiers, so the employee can
+  // pick which one is their work number. Requires Read Call Log permission
+  // (already needed for sync generally).
+  const handleDetectSims = async () => {
+    setDetectingSims(true);
+    try {
+      const sims = await getAvailableSims();
+      setAvailableSims(sims);
+      if (sims.length === 0) {
+        Alert.alert(
+          'No SIMs detected',
+          'Could not detect separate SIMs from recent call history — this usually means the phone only has one SIM, or no calls have been made yet on this device. If this is a dual-SIM phone, make a call or two, then try detecting again.',
+        );
+      }
+    } catch (e) {
+      Alert.alert('Failed', e?.message || 'Could not read call logs to detect SIMs.');
+    } finally {
+      setDetectingSims(false);
+    }
+  };
+
+  const handleSelectWorkSim = async (phoneAccountId) => {
+    // Tapping the already-selected SIM clears the selection (falls back to
+    // syncing all SIMs) — same toggle-off pattern used elsewhere in the app.
+    const next = workSimId === phoneAccountId ? null : phoneAccountId;
+    setWorkSimId(next);
+    await setWorkSimAccountId(next);
+  };
 
   // Toggle the auto-upload foreground service on/off and persist the choice.
   const handleAutoUploadToggle = async (next) => {
@@ -250,6 +287,46 @@ export default function ProfileScreen() {
               granted={perms.location}
               onRequest={() => requestPerm('location')}
             />
+          </View>
+        </View>
+
+        {/* Work SIM (multi-SIM devices) — scopes call-log sync to this number only */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Work SIM (Call Log Sync)</Text>
+          <View style={styles.infoCard}>
+            <Text style={{ fontSize: 12, color: '#8B92A9', marginBottom: 10 }}>
+              If your phone has two SIMs, pick which one is your work number.
+              Only calls made on that SIM will sync to the CRM — your personal
+              SIM's calls stay private. Leave unset if you only have one SIM.
+            </Text>
+            {availableSims.length === 0 ? (
+              <TouchableOpacity onPress={handleDetectSims} disabled={detectingSims} style={{ paddingVertical: 8 }}>
+                <Text style={{ color: '#2563EB', fontWeight: '600', fontSize: 13 }}>
+                  {detectingSims ? 'Detecting…' : '📱 Detect SIMs from recent calls'}
+                </Text>
+              </TouchableOpacity>
+            ) : (
+              <>
+                {availableSims.map((sim) => (
+                  <TouchableOpacity
+                    key={sim.phoneAccountId}
+                    onPress={() => handleSelectWorkSim(sim.phoneAccountId)}
+                    style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#F1F4FF' }}
+                  >
+                    <Text style={{ fontSize: 13, color: '#0F1117' }}>{sim.label}</Text>
+                    {workSimId === sim.phoneAccountId && <Icon name="check-circle" size={18} color="#22C55E" />}
+                  </TouchableOpacity>
+                ))}
+                <TouchableOpacity onPress={handleDetectSims} disabled={detectingSims} style={{ paddingVertical: 8 }}>
+                  <Text style={{ color: '#8B92A9', fontSize: 12 }}>{detectingSims ? 'Detecting…' : 'Re-detect SIMs'}</Text>
+                </TouchableOpacity>
+              </>
+            )}
+            {workSimId ? (
+              <Text style={{ fontSize: 11, color: '#22C55E', marginTop: 6 }}>✓ Syncing only your work SIM's calls</Text>
+            ) : (
+              <Text style={{ fontSize: 11, color: '#F59E0B', marginTop: 6 }}>⚠ No work SIM set — syncing calls from all SIMs on this device</Text>
+            )}
           </View>
         </View>
 

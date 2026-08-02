@@ -7,6 +7,7 @@
 //  4. Limits raised to 500 (retained from previous fix).
 
 import { Linking, Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   requestCallPermission,
   requestCallLogPermission,
@@ -54,6 +55,13 @@ function mapRawLogs(rawArray) {
     duration:    parseInt(log.duration || 0),
     timestamp:   log.timestamp || log.dateAdded || String(Date.now()),
     name:        log.name || log.cachedName || '',
+    // Multi-SIM identifiers — react-native-call-log already resolves these
+    // from Android's CallLog.Calls.PHONE_ACCOUNT_ID + SubscriptionManager;
+    // this file was just discarding them. Used to scope the bulk sync to the
+    // employee's own registered work-SIM number (see getWorkSimAccountId
+    // below), not their personal SIM if the phone has two.
+    phoneAccountId: log.phoneAccountId || null,
+    simDisplayName: log.simDisplayName || null,
   }));
 }
 
@@ -123,7 +131,10 @@ export const getDeviceCallLogs = async (limit = 200) => {
 };
 
 // ── Read call logs since a timestamp (sync use) ───────────────────────────────
-export const getCallLogsSince = async (sinceTimestamp) => {
+// @param {string} [phoneAccountId] - if provided, scopes the query to only
+//   this SIM/phone account (see getWorkSimAccountId). Omit to get all SIMs
+//   (previous behavior, unchanged for callers that don't pass it).
+export const getCallLogsSince = async (sinceTimestamp, phoneAccountId = null) => {
   if (Platform.OS !== 'android') return [];
   if (!CallLogs || typeof CallLogs.loadAll !== 'function') return [];
 
@@ -136,22 +147,80 @@ export const getCallLogsSince = async (sinceTimestamp) => {
     if (!granted) return [];
 
     try {
-      const raw = await CallLogs.loadAll({
-        limit:        '500',
-        minTimestamp: String(sinceMs),
-      });
+      const filter = { limit: '500', minTimestamp: String(sinceMs) };
+      if (phoneAccountId) filter.phoneAccountId = phoneAccountId;
+      const raw = await CallLogs.loadAll(filter);
       if (Array.isArray(raw)) return mapRawLogs(raw);
     } catch {
-      // minTimestamp not supported — fall through to JS filter.
+      // minTimestamp/phoneAccountId not supported on this device/version —
+      // fall through to JS filter.
     }
 
     const all = await getDeviceCallLogs(500);
-    return all.filter(log => parseInt(log.timestamp) > sinceMs);
+    let filtered = all.filter(log => parseInt(log.timestamp) > sinceMs);
+    if (phoneAccountId) {
+      filtered = filtered.filter(log => log.phoneAccountId === phoneAccountId);
+    }
+    return filtered;
   } catch (e) {
     console.error('[phoneService] getCallLogsSince error:', e.message);
     return [];
   }
 };
+
+// ── Work-SIM selection (multi-SIM devices) ────────────────────────────────────
+// An agent's phone may carry two SIMs — a personal number and a designated
+// "work" number they use to call leads. The bulk call-log sync should only
+// pick up calls made via the WORK SIM, not the personal one, even if the
+// personal SIM also happens to call a lead's number sometimes.
+//
+// phoneAccountId is device/OS-specific (not meaningful server-side), so the
+// chosen SIM is stored locally in AsyncStorage, per device.
+const WORK_SIM_KEY = 'crm_work_sim_account_id';
+
+export async function getWorkSimAccountId() {
+  try {
+    return await AsyncStorage.getItem(WORK_SIM_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export async function setWorkSimAccountId(phoneAccountId) {
+  try {
+    if (phoneAccountId) await AsyncStorage.setItem(WORK_SIM_KEY, phoneAccountId);
+    else await AsyncStorage.removeItem(WORK_SIM_KEY);
+  } catch { /* non-critical */ }
+}
+
+// Detect the SIMs available on this device by sampling recent call log
+// entries for their distinct phoneAccountId/simDisplayName pairs. The
+// underlying native package doesn't expose a dedicated "list SIMs" call, but
+// every loaded entry already carries this info, so a small recent sample is
+// enough to populate a picker (Settings/Profile screen).
+export async function getAvailableSims() {
+  if (Platform.OS !== 'android') return [];
+  if (!CallLogs || typeof CallLogs.loadAll !== 'function') return [];
+
+  try {
+    const granted = await requestCallLogPermission();
+    if (!granted) return [];
+
+    const raw = await CallLogs.loadAll({ limit: '100' }).catch(() => CallLogs.loadAll());
+    const logs = Array.isArray(raw) ? mapRawLogs(raw) : [];
+
+    const seen = new Map(); // phoneAccountId -> simDisplayName
+    for (const log of logs) {
+      if (log.phoneAccountId && !seen.has(log.phoneAccountId)) {
+        seen.set(log.phoneAccountId, log.simDisplayName || `SIM (${log.phoneAccountId.slice(-4)})`);
+      }
+    }
+    return Array.from(seen.entries()).map(([phoneAccountId, label]) => ({ phoneAccountId, label }));
+  } catch (e) {
+    console.error('[phoneService] getAvailableSims error:', e.message);
+    return [];
+  }
+}
 
 // ── Read call logs for a specific phone number ────────────────────────────────
 // FIX 3: Normalize both sides so "91XXXXXXXXXX" matches "XXXXXXXXXX"

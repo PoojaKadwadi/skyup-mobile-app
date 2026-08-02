@@ -33,6 +33,13 @@ const MEETING_TYPES = ['In-Person', 'Site Visit', 'Demo', 'Video Call', 'Phone C
 // backend reassignment/verification flow instead of a plain status patch.
 const STATUS_OPTIONS = ['New', 'In Progress', 'Converted', 'Not Interested'];
 
+// Industry tag — agent classifies which business/industry this lead belongs
+// to, independent of which ad campaign brought it in. Used as the
+// "domain-wise" filter on the Leads list and to scope Lead Nurture rules to
+// send an industry-appropriate WhatsApp template (see NurtureRule.trigger.industries
+// on the backend). Free-form field — this is a starting list, not a hard enum.
+const INDUSTRIES = ['Real Estate', 'Healthcare', 'Education', 'E-commerce', 'Finance', 'Manufacturing', 'Hospitality', 'Other'];
+
 const OUTCOMES = ['Answered', 'Not Answered', 'Busy', 'Switch Off', 'Call Back Later', 'Interested', 'Not Interested', 'Invalid', 'Client Meeting'];
 
 function maskPhone(phone) {
@@ -433,6 +440,7 @@ export default function LeadDetailScreen() {
   const [showRemarkModal, setShowRemarkModal] = useState(false);
   const [remark,          setRemark]          = useState('');
   const [outcome,         setOutcome]         = useState('');
+  const [industry,        setIndustry]        = useState('');
   const [submitting,      setSubmitting]      = useState(false);
   const [crmCallLogs,     setCrmCallLogs]     = useState([]);
   const [loadingLogs,     setLoadingLogs]     = useState(false);
@@ -533,6 +541,7 @@ export default function LeadDetailScreen() {
 
     // Show the modal immediately — do NOT wait on any network/disk work.
     setShowRemarkModal(true);
+    setIndustry(lead?.industry || '');
 
     // Defer the heavy call-log read + uploads so they never block the modal
     // animation or the JS thread while the agent starts typing the remark.
@@ -756,6 +765,7 @@ export default function LeadDetailScreen() {
     setShowRemarkModal(false);
     setRemark('');
     setOutcome('');
+    setIndustry('');
     setFollowUpDate(null);
     setPickerTempDate(new Date());
     setShowDatePicker(false);
@@ -903,7 +913,7 @@ export default function LeadDetailScreen() {
       setSubmitting(true);
       try {
         await dispatch(submitCallRemark({
-          leadId, remark: trimmed, outcome,
+          leadId, remark: trimmed, outcome, industry,
           followUpDate: followUpDate || null, document: null, recording: null,
         })).unwrap();
 
@@ -957,7 +967,7 @@ export default function LeadDetailScreen() {
     closeModal();
 
     dispatch(submitCallRemark({
-      leadId, remark: trimmed, outcome,
+      leadId, remark: trimmed, outcome, industry,
       followUpDate: followUp, document: null, recording: null,
     }))
       .unwrap()
@@ -1371,7 +1381,7 @@ export default function LeadDetailScreen() {
 
         <TouchableOpacity
           style={styles.remarkBtn}
-          onPress={() => setShowRemarkModal(true)}
+          onPress={() => { setShowRemarkModal(true); setIndustry(lead?.industry || ''); }}
           activeOpacity={0.8}
         >
           <Icon name="pencil-plus-outline" size={18} color={colors.purple} style={{ marginRight: 8 }} />
@@ -1609,6 +1619,23 @@ export default function LeadDetailScreen() {
                     <Text style={[styles.outcomeChipText, outcome === o && styles.outcomeChipTextActive]}>{o}</Text>
                   </TouchableOpacity>
                 ))}
+            </View>
+
+            {/* Industry tag (optional) — "domain-wise" classification so this
+                lead can be filtered by industry on the Leads list, and so
+                Lead Nurture rules can send an industry-appropriate template.
+                Not required — leave unset if the industry isn't clear yet. */}
+            <Text style={styles.modalLabel}>Industry <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text></Text>
+            <View style={styles.outcomeRow}>
+              {INDUSTRIES.map(ind => (
+                <TouchableOpacity
+                  key={ind}
+                  style={[styles.outcomeChip, industry === ind && styles.outcomeChipActive]}
+                  onPress={() => setIndustry(industry === ind ? '' : ind)}
+                >
+                  <Text style={[styles.outcomeChipText, industry === ind && styles.outcomeChipTextActive]}>{ind}</Text>
+                </TouchableOpacity>
+              ))}
             </View>
 
             <Text style={styles.modalLabel}>Remark *</Text>
