@@ -311,9 +311,9 @@ export default function ProfileScreen() {
                   <TouchableOpacity
                     key={sim.phoneAccountId}
                     onPress={() => handleSelectWorkSim(sim.phoneAccountId)}
-                    style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#F1F4FF' }}
+                    style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border }}
                   >
-                    <Text style={{ fontSize: 13, color: '#0F1117' }}>{sim.label}</Text>
+                    <Text style={{ fontSize: 13, color: colors.text }}>{sim.label}</Text>
                     {workSimId === sim.phoneAccountId && <Icon name="check-circle" size={18} color="#22C55E" />}
                   </TouchableOpacity>
                 ))}

@@ -64,6 +64,16 @@ export const getMyLeads = async() => {
     return allLeads.map(formatLead);
 };
 
+// ── Delta fetch — only leads modified since a given timestamp ─────────────────
+// Used by the stale-check refresh instead of a full re-download.
+// Returns { leads: FormattedLead[], delta: true } — the store upserts each one.
+export const getLeadsDelta = async (since) => {
+    const isoSince = new Date(since).toISOString();
+    const res = await apiClient.get(`/lead/my-leads?since=${encodeURIComponent(isoSince)}`);
+    const leads = res.data?.leads || [];
+    return leads.map(formatLead);
+};
+
 export const getLeadById = async(id) => {
     const response = await apiClient.get(`/lead/${id}`);
     return formatLead(response.data);
@@ -289,19 +299,14 @@ function formatLead(lead) {
         industry: lead.industry || '',
         status: lead.status || 'New',
         date: lead.date,
-        // FIX (Leads list ordering): previously this was just lead.date — the
-        // ORIGINAL creation date, which never changes. A lead reassigned to
-        // this agent today, or one an agent just called, still had a
-        // months-old `date` and sank to the bottom of "Newest first" even
-        // though it's genuinely the most relevant lead to look at right now.
-        // Now it's the most recent of: creation date, or the last logged
-        // call/remark — whichever is later — so recently-active leads
-        // actually surface first, not just recently-created ones.
+        // FIX: store as numeric timestamp (ms) not a Date object.
+        // Date objects are non-serializable in Redux — after state rehydration
+        // they become ISO strings, and +(isoString) = NaN → sort breaks.
         _raw_date: (() => {
             const created = lead.date ? new Date(lead.date).getTime() : 0;
             const lastCalledAt = lastCall?.calledAt ? new Date(lastCall.calledAt).getTime() : 0;
             const mostRecent = Math.max(created, lastCalledAt);
-            return mostRecent > 0 ? new Date(mostRecent) : (lead.date || null);
+            return mostRecent > 0 ? mostRecent : created;
         })(),
         remark: displayRemark,
         remarkIsManual,

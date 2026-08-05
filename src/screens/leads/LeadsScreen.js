@@ -31,7 +31,7 @@ import { useNavigation, useRoute,
          useFocusEffect }               from '@react-navigation/native';
 import Icon                             from 'react-native-vector-icons/MaterialCommunityIcons';
 import {
-  fetchLeads, selectFilteredLeads,
+  fetchLeads, fetchLeadsDelta, selectFilteredLeads,
   setSearchQuery, setFilterStatus,
 } from '../../store/slices/leadsSlice';
 import CallButton                    from '../../components/CallButton';
@@ -208,13 +208,19 @@ export default function LeadsScreen() {
   // firing a full network fetch on every tab switch. Now: only re-fetches
   // when data is genuinely stale. InteractionManager defers the network
   // call until the slide-in animation is done — prevents frame drops.
-  const STALE_MS = 2 * 60 * 1000;
+  const STALE_MS = 5 * 60 * 1000;
   useFocusEffect(
     useCallback(() => {
       const isStale = !lastFetchedAt || (Date.now() - lastFetchedAt > STALE_MS);
       if (!isStale) return;
       const task = InteractionManager.runAfterInteractions(() => {
-        dispatch(fetchLeads());
+        // Delta fetch: if we already have leads, only download what changed.
+        // Full fetch: first load or something went wrong with delta.
+        if (lastFetchedAt) {
+          dispatch(fetchLeadsDelta(lastFetchedAt));
+        } else {
+          dispatch(fetchLeads());
+        }
       });
       return () => task.cancel();
     }, [lastFetchedAt])
@@ -234,20 +240,24 @@ export default function LeadsScreen() {
     dispatch(setSearchQuery(''));
   }, [dispatch]);
 
-  useEffect(() => {
-    // Deep-links from the dashboard cards:
-    //   New Leads  → { filterStatus: 'New' }
-    //   Followups  → { followUpOnly: true }
-    // The two are mutually exclusive; setting one clears the other so the list
-    // never shows a stale combination.
-    if (route.params?.followUpOnly) {
-      setFollowUpOnly(true);
-      dispatch(setFilterStatus('all'));
-    } else if (route.params?.filterStatus) {
-      setFollowUpOnly(false);
-      dispatch(setFilterStatus(route.params.filterStatus));
-    }
-  }, [route.params]);
+  useFocusEffect(
+    useCallback(() => {
+      // Deep-links from the dashboard cards:
+      //   New Leads  → { filterStatus: 'New' }
+      //   Followups  → { followUpOnly: true }
+      // Use useFocusEffect (not useEffect) so re-navigating to an already-mounted
+      // Leads tab also applies the params — useEffect only fires on param change,
+      // but if Leads is already the active tab the params object reference may not
+      // change, silently ignoring the navigation.
+      if (route.params?.followUpOnly) {
+        setFollowUpOnly(true);
+        dispatch(setFilterStatus('all'));
+      } else if (route.params?.filterStatus) {
+        setFollowUpOnly(false);
+        dispatch(setFilterStatus(route.params.filterStatus));
+      }
+    }, [route.params?.followUpOnly, route.params?.filterStatus])
+  );
 
   const onRefresh = useCallback(() => { dispatch(fetchLeads()); }, [dispatch]);
 

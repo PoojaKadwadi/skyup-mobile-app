@@ -209,10 +209,18 @@ export async function getAvailableSims() {
     const raw = await CallLogs.loadAll({ limit: '100' }).catch(() => CallLogs.loadAll());
     const logs = Array.isArray(raw) ? mapRawLogs(raw) : [];
 
-    const seen = new Map(); // phoneAccountId -> simDisplayName
+    const seen = new Map(); // phoneAccountId -> label
+    let simIndex = 1;
     for (const log of logs) {
       if (log.phoneAccountId && !seen.has(log.phoneAccountId)) {
-        seen.set(log.phoneAccountId, log.simDisplayName || `SIM (${log.phoneAccountId.slice(-4)})`);
+        // Prefer the display name from the OS. If unavailable (common on some
+        // Samsung/Xiaomi devices where simDisplayName is null), fall back to
+        // "SIM 1", "SIM 2" etc. — clearer than just showing the raw account ID.
+        const label = log.simDisplayName
+          ? log.simDisplayName
+          : `SIM ${simIndex}`;
+        seen.set(log.phoneAccountId, label);
+        simIndex++;
       }
     }
     return Array.from(seen.entries()).map(([phoneAccountId, label]) => ({ phoneAccountId, label }));

@@ -22,7 +22,7 @@ import AsyncStorage                     from '@react-native-async-storage/async-
 import { useDispatch, useSelector }     from 'react-redux';
 import { useNavigation, useFocusEffect }                from '@react-navigation/native';
 import Icon                             from 'react-native-vector-icons/MaterialCommunityIcons';
-import { fetchLeads, isNotContacted }   from '../../store/slices/leadsSlice';
+import { fetchLeads, fetchLeadsDelta, isNotContacted }   from '../../store/slices/leadsSlice';
 import { triggerManualSync }            from '../../services/backgroundSyncService';
 import { checkAllPermissions }          from '../../services/permissionsService';
 import { checkAndNotifyNewLeads, checkAndNotifyFollowUps, checkAndScheduleClockInReminder } from '../../services/notificationService';
@@ -251,12 +251,19 @@ export default function DashboardScreen() {
   // Replaced bare useEffect (fired on every mount) with useFocusEffect + 2-min
   // stale threshold. This matches the pattern already used in LeadsScreen and
   // prevents a full network round-trip every time the user switches tabs.
-  const STALE_MS = 2 * 60 * 1000;
+  const STALE_MS = 5 * 60 * 1000;
   useFocusEffect(
     useCallback(() => {
       const task = InteractionManager.runAfterInteractions(() => {
         const isStale = !lastFetchedAt || (Date.now() - lastFetchedAt > STALE_MS);
-        if (isStale) dispatch(fetchLeads());
+        if (isStale) {
+          // Delta fetch when we already have data — only download what changed
+          if (lastFetchedAt) {
+            dispatch(fetchLeadsDelta(lastFetchedAt));
+          } else {
+            dispatch(fetchLeads());
+          }
+        }
 
         // Schedule (or cancel) clock-in reminder based on today's attendance.
         // Wrapped in an async IIFE because runAfterInteractions callback cannot be async.

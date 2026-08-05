@@ -223,7 +223,9 @@ export default function LeadDetailScreen() {
       const res = await markNotInterested(leadId, { remark: reason });
       setNiModalVisible(false);
       setNiReason('');
-      try { await dispatch(fetchLeads()).unwrap?.(); } catch {}
+      // PERF: remove lead from local store immediately — no full refetch needed.
+      // The lead is either reassigned (no longer ours) or closed, so just drop it.
+      dispatch(upsertLead({ id: leadId, status: 'Not Interested' }));
       const who = res?.reassignedTo?.name;
       const msg = res?.message
         || (who
@@ -876,8 +878,8 @@ export default function LeadDetailScreen() {
         try {
           const res = await markLeadInvalid(leadId, { remark: remark.trim(), reject });
           closeModal();
-          // Refresh the list so the closed/returned lead drops out of view.
-          try { await dispatch(fetchLeads()).unwrap?.(); } catch {}
+          // PERF: update lead status locally — no full refetch needed.
+          dispatch(upsertLead({ id: leadId, status: 'Invalid' }));
           const msg = res?.message
             || (res?.isClosed
               ? 'Lead verified Invalid and closed.'

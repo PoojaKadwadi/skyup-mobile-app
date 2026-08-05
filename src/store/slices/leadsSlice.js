@@ -4,23 +4,54 @@
 //         local notification. All previous optimistic-update fixes retained.
 
 import { createSelector, createSlice, createAsyncThunk } from '@reduxjs/toolkit';
-import { getMyLeads, updateLead, addCallRemark, addCallRemarkWithAttachments } from '../../api/leadsApi';
+import { getMyLeads, getLeadsDelta, updateLead, addCallRemark, addCallRemarkWithAttachments } from '../../api/leadsApi';
 import { checkAndNotifyNewLeads, checkAndNotifyReassignedLeads, checkAndNotifyFollowUps } from '../../services/notificationService';
+
+// In-flight dedup: if a fetch is already running, return the same promise
+// instead of firing a second network request. This prevents the common case
+// of Dashboard + LeadsScreen both mounting and both dispatching fetchLeads
+// within the same tick — previously that launched two simultaneous full-list
+// requests. Now the second dispatch just waits for the first to resolve.
+let _fetchInFlight = null;
 
 export const fetchLeads = createAsyncThunk(
   'leads/fetchLeads',
   async (_, { rejectWithValue }) => {
+    if (_fetchInFlight) {
+      try { return await _fetchInFlight; } catch { /* fall through to fresh fetch */ }
+    }
+    _fetchInFlight = getMyLeads();
     try {
-      return await getMyLeads();
+      const result = await _fetchInFlight;
+      return result;
     } catch (error) {
       return rejectWithValue(
         error.userMessage || error.response?.data?.message || 'Failed to fetch leads',
       );
+    } finally {
+      _fetchInFlight = null;
     }
   },
 );
 
-// Optimistic patch — updates local store instantly, no refetch
+// Delta refresh — only downloads leads modified since lastFetchedAt.
+// Used by the stale-check on screen focus so tab switches don't re-download
+// the entire leads list when only 0–5 leads have changed.
+// Falls back to full fetchLeads if the delta fetch fails.
+export const fetchLeadsDelta = createAsyncThunk(
+  'leads/fetchLeadsDelta',
+  async (since, { dispatch, rejectWithValue }) => {
+    try {
+      const changed = await getLeadsDelta(since);
+      return changed; // array of updated leads to upsert
+    } catch (error) {
+      // Delta failed (server error, network, etc.) — fall back to full fetch
+      console.warn('[leadsSlice] Delta fetch failed, falling back to full fetch:', error.message);
+      dispatch(fetchLeads());
+      return rejectWithValue('delta_failed');
+    }
+  },
+);
 export const patchLead = createAsyncThunk(
   'leads/patchLead',
   async ({ id, data }, { rejectWithValue }) => {
@@ -112,6 +143,20 @@ const leadsSlice = createSlice({
         state.error   = action.payload;
       });
 
+    // Delta upsert — merge changed leads into existing store, preserving unseen leads
+    builder.addCase(fetchLeadsDelta.fulfilled, (state, action) => {
+      if (!Array.isArray(action.payload) || action.payload.length === 0) return;
+      state.lastFetchedAt = Date.now();
+      for (const lead of action.payload) {
+        const idx = state.items.findIndex(l => l.id === lead.id);
+        if (idx !== -1) {
+          state.items[idx] = { ...state.items[idx], ...lead };
+        } else {
+          state.items.unshift(lead); // newly assigned lead
+        }
+      }
+    });
+
     // Optimistic local update — no network refetch
     builder.addCase(patchLead.fulfilled, (state, action) => {
       const { id, data } = action.payload;
@@ -168,5 +213,14 @@ export const selectFilteredLeads = createSelector(
     });
   },
 );
+
+// FIX: isNotContacted was imported by DashboardScreen but never defined/exported,
+// causing "undefined is not a function" crash on the Dashboard screen.
+// A lead is "not contacted" when it has no call history entries and no lastCalledAt.
+export function isNotContacted(lead) {
+  if (!lead) return false;
+  const hasCallHistory = Array.isArray(lead.callHistory) && lead.callHistory.length > 0;
+  return !hasCallHistory && !lead.lastCalledAt;
+}
 
 export default leadsSlice.reducer;
