@@ -102,6 +102,32 @@ async function getAuthToken() {
   try { return await AsyncStorage.getItem('auth_token'); } catch { return null; }
 }
 
+// Create a new lead directly from the meeting screen (new client mode).
+// Uses the authenticated employee's create-lead route so the lead lands in
+// their own pipeline and is immediately selectable.
+async function createNewLead(name, mobile, email, remark) {
+  const token = await getAuthToken();
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+  const body = {
+    name:   name.trim(),
+    mobile: mobile.trim(),
+    source: 'Client Meeting',
+    status: 'New',
+    ...(email?.trim() ? { email: email.trim() } : {}),
+    ...(remark?.trim() ? { remark: remark.trim() } : {}),
+  };
+  const res = await fetch(`${BASE_URL}/lead`, {
+    method: 'POST', headers, body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.message || `HTTP ${res.status}`);
+  return data._id || data.id || data.lead?._id;
+}
+
 async function postMeetingRemark(leadId, payload, mediaFile) {
   const token = await getAuthToken();
 
@@ -228,6 +254,15 @@ export default function ClientMeetingScreen() {
   const [leadSearch,     setLeadSearch]     = useState('');
   const [selectedLeadId, setSelectedLeadId] = useState('');
   const [showPicker,     setShowPicker]     = useState(false);
+
+  // ── New Client mode — agent enters client details directly without needing
+  // an existing lead. On submit, a new lead is created first, then the meeting
+  // remark is attached to it. This is the most common field scenario.
+  const [newClientMode,  setNewClientMode]  = useState(false);
+  const [newClientName,  setNewClientName]  = useState('');
+  const [newClientPhone, setNewClientPhone] = useState('');
+  const [newClientEmail, setNewClientEmail] = useState('');
+  const [newClientNote,  setNewClientNote]  = useState('');
 
   // PERF: memoize so the full leads array isn't re-filtered/re-searched on
   // every render (every keystroke elsewhere, every state change). Recomputes
@@ -452,13 +487,31 @@ export default function ClientMeetingScreen() {
 
   // ── Submit ────────────────────────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
-    if (!selectedLeadId) { Alert.alert('Required', 'Please select a lead.'); return; }
-    if (!outcome)        { Alert.alert('Required', 'Please select a visit outcome.'); return; }
-    if (!notes.trim())   { Alert.alert('Required', 'Please enter meeting notes.'); return; }
+    if (!outcome)      { Alert.alert('Required', 'Please select a visit outcome.'); return; }
+    if (!notes.trim()) { Alert.alert('Required', 'Please enter meeting notes.'); return; }
+
+    // New Client mode — validate and create the lead first
+    if (newClientMode) {
+      if (!newClientName.trim())  { Alert.alert('Required', 'Please enter the client name.'); return; }
+      if (!newClientPhone.trim()) { Alert.alert('Required', 'Please enter a phone number.'); return; }
+    } else {
+      if (!selectedLeadId) { Alert.alert('Required', 'Please select a client.'); return; }
+    }
 
     setSubmitting(true);
+    let targetLeadId = selectedLeadId;
+
     try {
-      await postMeetingRemark(selectedLeadId, {
+      // In new-client mode, create the lead first then attach the meeting remark
+      if (newClientMode) {
+        targetLeadId = await createNewLead(
+          newClientName, newClientPhone, newClientEmail,
+          newClientNote || notes.trim(),
+        );
+        if (!targetLeadId) throw new Error('Lead creation did not return an ID');
+      }
+
+      await postMeetingRemark(targetLeadId, {
         meetingType: visitType,
         outcome,
         remark:      notes.trim(),
@@ -467,30 +520,37 @@ export default function ClientMeetingScreen() {
       }, mediaFile);
 
       // Refresh history
-      const updated = await fetchMeetingRemarks(selectedLeadId);
+      const updated = await fetchMeetingRemarks(targetLeadId);
       setPastMeetings(updated);
 
-      // Schedule meeting follow-up notifications (reminder before + at time)
-      // for the just-saved visit, and reconcile any other upcoming follow-ups.
       if (followUpDate) {
         scheduleMeetingFollowUp({
-          id:           `${selectedLeadId}_${Date.parse(followUpDate)}`,
-          leadName:     selectedLead?.name || 'Client',
+          id:           `${targetLeadId}_${Date.parse(followUpDate)}`,
+          leadName:     newClientMode ? newClientName : (selectedLead?.name || 'Client'),
           followUpDate,
           meetingType:  visitType,
           location:     location.trim() || null,
         }).catch(() => {});
       }
-      // Re-scan all this lead's meeting remarks so reminders survive app restarts.
       checkAndScheduleMeetingFollowUps(
         (updated || []).map(m => ({
-          id:          `${selectedLeadId}_${Date.parse(m.followUpDate || '')}`,
-          leadName:    selectedLead?.name || 'Client',
+          id:          `${targetLeadId}_${Date.parse(m.followUpDate || '')}`,
+          leadName:    newClientMode ? newClientName : (selectedLead?.name || 'Client'),
           followUpDate: m.followUpDate,
           meetingType: m.meetingType,
           location:    m.location,
         })),
       ).catch(() => {});
+
+      // If new-client mode, switch to the newly created lead's view
+      if (newClientMode && targetLeadId) {
+        setSelectedLeadId(targetLeadId);
+        setNewClientMode(false);
+        setNewClientName('');
+        setNewClientPhone('');
+        setNewClientEmail('');
+        setNewClientNote('');
+      }
 
       // Reset form (keep lead & visit type for quick follow-on entries)
       setOutcome('');
@@ -499,13 +559,15 @@ export default function ClientMeetingScreen() {
       setMediaFile(null);
       setFollowUpDate(null);
 
-      Alert.alert('✓ Visit Logged', 'Client meeting recorded successfully.');
+      Alert.alert('✓ Visit Logged', newClientMode
+        ? 'New client added and meeting recorded successfully.'
+        : 'Client meeting recorded successfully.');
     } catch (e) {
       Alert.alert('Save Failed', e.message || 'Could not save the meeting.');
     } finally {
       setSubmitting(false);
     }
-  }, [selectedLeadId, visitType, outcome, notes, location, mediaFile, followUpDate]);
+  }, [selectedLeadId, newClientMode, newClientName, newClientPhone, newClientEmail, newClientNote, visitType, outcome, notes, location, mediaFile, followUpDate]);
 
   // ─────────────────────────────────────────────────────────────────────────
   return (
@@ -533,11 +595,68 @@ export default function ClientMeetingScreen() {
           showsVerticalScrollIndicator={false}
         >
 
+          {/* ── Client Mode Toggle ─────────────────────────────────────────── */}
+          <View style={styles.clientModeRow}>
+            <TouchableOpacity
+              style={[styles.clientModeBtn, !newClientMode && styles.clientModeBtnActive]}
+              onPress={() => setNewClientMode(false)}
+            >
+              <Icon name="account-search-outline" size={14} color={!newClientMode ? colors.blue : colors.textMuted} style={{ marginRight: 5 }} />
+              <Text style={[styles.clientModeBtnText, !newClientMode && { color: colors.blue }]}>Existing Client</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.clientModeBtn, newClientMode && styles.clientModeBtnActive]}
+              onPress={() => { setNewClientMode(true); setSelectedLeadId(''); setShowPicker(false); }}
+            >
+              <Icon name="account-plus-outline" size={14} color={newClientMode ? colors.green : colors.textMuted} style={{ marginRight: 5 }} />
+              <Text style={[styles.clientModeBtnText, newClientMode && { color: colors.green }]}>New Client</Text>
+            </TouchableOpacity>
+          </View>
+
           {/* ── Lead Selector ──────────────────────────────────────────────── */}
           <Text style={styles.sectionTitle}>
             <Icon name="account-outline" size={13} color={colors.textSec} />  CLIENT  *
           </Text>
 
+          {newClientMode ? (
+            <View style={styles.newClientForm}>
+              <TextInput
+                style={styles.newClientInput}
+                placeholder="Client Name *"
+                placeholderTextColor={colors.textMuted}
+                value={newClientName}
+                onChangeText={setNewClientName}
+                autoCapitalize="words"
+              />
+              <TextInput
+                style={styles.newClientInput}
+                placeholder="Phone Number *"
+                placeholderTextColor={colors.textMuted}
+                value={newClientPhone}
+                onChangeText={setNewClientPhone}
+                keyboardType="phone-pad"
+              />
+              <TextInput
+                style={styles.newClientInput}
+                placeholder="Email (optional)"
+                placeholderTextColor={colors.textMuted}
+                value={newClientEmail}
+                onChangeText={setNewClientEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+              />
+              <TextInput
+                style={[styles.newClientInput, { minHeight: 60 }]}
+                placeholder="Initial note / lead source (optional)"
+                placeholderTextColor={colors.textMuted}
+                value={newClientNote}
+                onChangeText={setNewClientNote}
+                multiline
+                textAlignVertical="top"
+              />
+            </View>
+          ) : (
+            <>
           <TouchableOpacity
             style={[styles.leadBtn, selectedLead && styles.leadBtnSelected]}
             onPress={() => setShowPicker(v => !v)}
@@ -610,6 +729,8 @@ export default function ClientMeetingScreen() {
                 </ScrollView>
               )}
             </View>
+          )}
+            </>
           )}
 
           {/* ── Visit Type ─────────────────────────────────────────────────── */}
@@ -835,6 +956,16 @@ return StyleSheet.create({
   jsPickerCancelText:  { color: colors.textSec, fontSize: 14, fontWeight: '600' },
   jsPickerConfirm:     { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, backgroundColor: colors.blue },
   jsPickerConfirmText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  // Client mode toggle
+  clientModeRow:      { flexDirection: 'row', gap: 8, marginBottom: 4, marginTop: 16 },
+  clientModeBtn:      { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 10, borderRadius: 10, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  clientModeBtnActive:{ borderColor: colors.blue, backgroundColor: colors.blueBg },
+  clientModeBtnText:  { fontSize: 12, fontWeight: '700', color: colors.textMuted },
+
+  // New client form
+  newClientForm:      { gap: 8 },
+  newClientInput:     { backgroundColor: colors.surfaceAlt, borderRadius: 10, padding: 12, color: colors.textPrimary, fontSize: 13, borderWidth: 1, borderColor: colors.border },
+
   root:               { flex: 1, backgroundColor: colors.bg },
 
   // Header

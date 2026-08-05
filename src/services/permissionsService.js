@@ -176,6 +176,14 @@ export const requestWriteContactsPermission = async () => {
 // ── Request location (fine + coarse) ─────────────────────────────────────────
 export const requestLocationPermission = async () => {
   if (Platform.OS !== 'android') return true;
+
+  // CHECK FIRST — if already granted skip the dialog entirely.
+  // On Samsung/Xiaomi, requestMultiple on already-granted permissions can
+  // return 'denied' (dialog dismissed), falsely blocking location from being sent.
+  const alreadyFine   = await checkOne(P.ACCESS_FINE_LOCATION);
+  const alreadyCoarse = await checkOne(P.ACCESS_COARSE_LOCATION);
+  if (alreadyFine || alreadyCoarse) return true;
+
   const results = await requestMany([
     P.ACCESS_FINE_LOCATION,
     P.ACCESS_COARSE_LOCATION,
@@ -188,7 +196,7 @@ export const requestLocationPermission = async () => {
   if (fine === R.NEVER_ASK_AGAIN || coarse === R.NEVER_ASK_AGAIN) {
     promptOpenSettings(
       'Location Permission Required',
-      'Location access was denied. Please enable "Location" permission in your device Settings to use check-in and geo-tagging features.',
+      'Location access was permanently denied. Please enable "Location" in your device Settings.',
     );
   }
   return false;

@@ -446,10 +446,12 @@ export default function AttendanceWidget() {
       // gate (it returns 400 if location is required).
       let locationPayload = {};
       try {
-        // Uses the centralized permissionsService (core PermissionsAndroid under
-        // the hood) instead of react-native-permissions, so the clock-in tap
-        // can never stall on that library's native module.
-        const granted = await requestLocationPermission();
+        // CHECK FIRST — if permission is already granted, skip the dialog.
+        // requestLocationPermission can return false when dismissed even if on.
+        const { PermissionsAndroid } = require('react-native');
+        const alreadyFine   = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION).catch(() => false);
+        const alreadyCoarse = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION).catch(() => false);
+        const granted = alreadyFine || alreadyCoarse || await requestLocationPermission();
         if (granted) {
           locationPayload = await getLocationSafe();
         }

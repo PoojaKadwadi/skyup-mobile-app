@@ -152,35 +152,39 @@ export default function ClockInGate({ children }) {
     try {
       let locationPayload = {};
       try {
+        const { PermissionsAndroid } = require('react-native');
         const { requestLocationPermission } = require('../services/permissionsService');
-        const granted = await requestLocationPermission();
+        // CHECK FIRST — permission may already be granted. requestLocationPermission
+        // can return false if dialog is dismissed, even when permission is on.
+        const alreadyFine   = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION).catch(() => false);
+        const alreadyCoarse = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION).catch(() => false);
+        const granted = alreadyFine || alreadyCoarse || await requestLocationPermission();
         if (granted) {
           const Geolocation = require('@react-native-community/geolocation').default
             || require('@react-native-community/geolocation');
           try {
             Geolocation.setRNConfiguration({ skipPermissionRequests: true, locationProvider: 'auto' });
           } catch (_) { /* older lib */ }
-          // FIX: GPS timeout reduced 12s → 5s and maximumAge 10s → 60s.
-          // With maximumAge=60000 the OS returns a cached GPS fix instantly
-          // (no satellite round-trip) when the device already has a recent
-          // fix. The 12s timeout was the main reason clock-in felt slow —
-          // the button spun for up to 12 seconds before submitting.
-          // A hard 6s Promise.race() wrapper ensures we never block longer
-          // than that even if the Geolocation callback stalls entirely.
+          // maximumAge:120s — use cached GPS fix instantly (no satellite round-trip).
+          // accuracy sent to backend so geofence tolerance is calibrated correctly.
           const posPromise = new Promise((resolve, reject) => {
             Geolocation.getCurrentPosition(resolve, reject, {
-              enableHighAccuracy: false, timeout: 5000, maximumAge: 60000,
+              enableHighAccuracy: false, timeout: 8000, maximumAge: 120000,
             });
           });
           const pos = await Promise.race([
             posPromise,
-            new Promise(resolve => setTimeout(() => resolve(null), 6000)),
+            new Promise(resolve => setTimeout(() => resolve(null), 9000)),
           ]).catch(() => null);
           if (pos?.coords) {
-            locationPayload = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+            locationPayload = {
+              latitude:  pos.coords.latitude,
+              longitude: pos.coords.longitude,
+              accuracy:  pos.coords.accuracy,
+            };
           }
         }
-      } catch { /* location optional */ }
+      } catch { /* location optional — clock-in proceeds without it */ }
 
       await api.post('/attendance/clock-in', locationPayload);
       await refresh(true); // force=true — bypass throttle after user action

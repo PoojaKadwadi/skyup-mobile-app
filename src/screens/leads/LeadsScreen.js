@@ -45,7 +45,7 @@ function maskPhone(phone) {
   return digits.slice(0, 2) + '•••••' + digits.slice(-2);
 }
 
-const STATUS_FILTERS = ['all', 'New', 'In Progress', 'Converted', 'Not Interested'];
+const STATUS_FILTERS = ['all', 'New', 'In Progress', 'Interest', 'Converted', 'Not Interested'];
 
 // "Domain-wise" filter — matches the Industry tag agents set from the remark
 // modal on LeadDetailScreen.js (Lead.industry on the backend). 'All' = no
@@ -69,6 +69,7 @@ function getStatusCfg(colors) {
     'New':            { dot: colors.blue,  bg: colors.blueBg,  text: colors.blueLight  },
     'In Progress':    { dot: colors.amber, bg: colors.amberBg, text: colors.amberLight },
     'Converted':      { dot: colors.green, bg: colors.greenBg, text: colors.greenLight },
+    'Interest':       { dot: colors.green, bg: colors.greenBg, text: colors.greenLight },
     'Not Interested': { dot: colors.red,   bg: colors.redBg,   text: colors.redLight   },
   };
 }
@@ -454,10 +455,12 @@ export default function LeadsScreen() {
         keyExtractor={keyExtractor}
         renderItem={renderItem}
         getItemLayout={getItemLayout}
-        initialNumToRender={10}
-        maxToRenderPerBatch={10}
-        windowSize={5}
+        initialNumToRender={8}
+        maxToRenderPerBatch={8}
+        updateCellsBatchingPeriod={50}
+        windowSize={7}
         removeClippedSubviews={true}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         refreshControl={
           <RefreshControl
             refreshing={loading} onRefresh={onRefresh}
