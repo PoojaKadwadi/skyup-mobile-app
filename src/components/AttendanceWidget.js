@@ -44,6 +44,7 @@ import { RADIUS, FONT } from '../theme/tokens';
 import { useTheme } from '../theme/ThemeContext';
 import { isOnCall, subscribeToCallState } from '../services/callStateService';
 import { requestLocationPermission } from '../services/permissionsService';
+import * as LocationTracking from '../services/locationTrackingService';
 import moment from 'moment';
 
 const STALE_MS = 30 * 1000;
@@ -91,12 +92,9 @@ export default function AttendanceWidget() {
   const [showMeetingModal, setShowMeetingModal] = useState(false);
 
   // ── Live location tracking state ──────────────────────────────────────────
-  // Active when: clientMeetingPermission granted + company tracking enabled.
-  // locationTrackingRef holds the setInterval handle so we can clear it.
+  // Tracking is now managed by locationTrackingService (module-level, stable).
   // trackingConfigRef holds { enabled, intervalMinutes } fetched after clock-in.
-  const locationTrackingRef  = useRef(null);
   const trackingConfigRef    = useRef({ enabled: false, intervalMinutes: 15 });
-  const [isTracking, setIsTracking] = useState(false);
 
   // Office geofence (fetched after clock-in). When the employee is clocked in
   // and moves OUTSIDE this radius, field-work location tracking auto-starts —
@@ -503,60 +501,10 @@ export default function AttendanceWidget() {
   }, [getLocationSafe]);
 
   // ── Live location tracking helpers ──────────────────────────────────────
-  const stopLocationTracking = useCallback(() => {
-    if (locationTrackingRef.current) {
-      clearInterval(locationTrackingRef.current);
-      locationTrackingRef.current = null;
-      setIsTracking(false);
-      console.log('[AttendanceWidget] Location tracking stopped');
-    }
-  }, []);
-
-  const sendLocationPing = useCallback(async () => {
-    try {
-      // Core PermissionsAndroid.check (boolean) — no react-native-permissions.
-      const granted =
-        Platform.OS !== 'android' ||
-        (await PermissionsAndroid.check(
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-        ));
-      if (!granted) {
-        // Permission was revoked — stop tracking
-        stopLocationTracking();
-        return;
-      }
-      const Geo = require('@react-native-community/geolocation');
-      Geo.getCurrentPosition(
-        async (pos) => {
-          try {
-            await api.post('/attendance/location-ping', {
-              latitude:  pos.coords.latitude,
-              longitude: pos.coords.longitude,
-              accuracy:  pos.coords.accuracy,
-            });
-            console.log('[AttendanceWidget] Location ping sent', pos.coords.latitude, pos.coords.longitude);
-          } catch (e) {
-            console.warn('[AttendanceWidget] Location ping failed:', e.message);
-          }
-        },
-        (err) => console.warn('[AttendanceWidget] Geolocation error:', err.message),
-        { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }
-      );
-    } catch (e) {
-      console.warn('[AttendanceWidget] sendLocationPing error:', e.message);
-    }
-  }, [stopLocationTracking]);
-
-  const startLocationTracking = useCallback(async (intervalMinutes = 15) => {
-    stopLocationTracking(); // clear any existing interval first
-    const ms = Math.max(5, intervalMinutes) * 60 * 1000;
-
-    // Send first ping immediately, then on interval
-    sendLocationPing();
-    locationTrackingRef.current = setInterval(sendLocationPing, ms);
-    setIsTracking(true);
-    console.log(`[AttendanceWidget] Location tracking started — ping every ${intervalMinutes} min`);
-  }, [sendLocationPing, stopLocationTracking]);
+  // RAM FIX: GPS tracking moved to locationTrackingService (module-level stable
+  // function — no closure recreation on re-render). These are thin wrappers.
+  const stopLocationTracking  = useCallback(() => LocationTracking.stop(),  []);
+  const startLocationTracking = useCallback((intervalMinutes = 15) => LocationTracking.start(intervalMinutes), []);
 
   // Haversine distance in metres (mirror of the backend geofence check).
   const distanceMetres = useCallback((lat1, lon1, lat2, lon2) => {
@@ -902,7 +850,7 @@ export default function AttendanceWidget() {
 
   return (
     <View style={w.card}>
-      {isTracking && (
+      {LocationTracking.isRunning() && (
         <View style={w.trackingBanner}>
           <View style={w.trackingDot} />
           <Text style={w.trackingTxt}>📍 Location sharing active</Text>

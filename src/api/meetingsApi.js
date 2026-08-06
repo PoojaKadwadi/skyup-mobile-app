@@ -12,11 +12,12 @@
 //   • Bearer token pulled from AsyncStorage('auth_token').
 // ─────────────────────────────────────────────────────────────────────────────
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL } from '../config/config';
+// S-1: token read from the Keychain-backed store, not plaintext AsyncStorage.
+import { getToken } from '../services/tokenStorage';
 
 async function getAuthToken() {
-  try { return await AsyncStorage.getItem('auth_token'); } catch { return null; }
+  try { return await getToken(); } catch { return null; }
 }
 
 // Create a meeting remark for a lead.

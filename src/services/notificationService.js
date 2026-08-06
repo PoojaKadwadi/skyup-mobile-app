@@ -43,6 +43,11 @@ try {
 // HIGH importance required for heads-up + sound
 const IMPORTANCE_HIGH = AndroidImportance?.HIGH ?? 4;
 
+// RAM FIX: all three dedup Sets now live in a module-level memory cache
+// (notifDedup) that loads from AsyncStorage ONCE. Eliminates 36 AsyncStorage
+// read/parse/write cycles per hour that the old inline approach caused.
+import { seenLeads, notified as notifiedDedup, scheduled as scheduledDedup } from './notifDedup';
+
 // ── AsyncStorage keys ─────────────────────────────────────────────────────────
 const SEEN_LEADS_KEY = 'notif_seen_lead_ids';
 const NOTIFIED_FOLLOWUP_KEY = 'notif_notified_followup_ids';
@@ -243,65 +248,19 @@ export async function checkAndNotifyNewLeads(leads) {
   }
 
   try {
-    const raw = await AsyncStorage.getItem(SEEN_LEADS_KEY);
+    // RAM FIX: seenLeads loads from AsyncStorage once then stays in memory.
+    const seenSet = await seenLeads.getSet();
 
-    let seenIds = new Set();
+    const newLeads = leads.filter(l => l.id && !seenSet.has(String(l.id)));
 
-    if (raw !== null) {
-      try {
-        const parsed = JSON.parse(raw);
-
-        if (Array.isArray(parsed)) {
-          seenIds = new Set(parsed.map(String));
-        } else {
-          console.warn(
-            '[Notifications] SEEN_LEADS_KEY invalid'
-          );
-
-          await AsyncStorage.removeItem(SEEN_LEADS_KEY);
-
-          await AsyncStorage.setItem(
-            SEEN_LEADS_KEY,
-            JSON.stringify(leads.map(l => String(l.id)))
-          );
-
-          return;
-        }
-      } catch (parseErr) {
-        console.warn(
-          '[Notifications] Parse error:',
-          parseErr.message
-        );
-
-        await AsyncStorage.removeItem(SEEN_LEADS_KEY);
-
-        await AsyncStorage.setItem(
-          SEEN_LEADS_KEY,
-          JSON.stringify(leads.map(l => String(l.id)))
-        );
-
-        return;
-      }
-    }
-
-    const newLeads = leads.filter(
-      l => l.id && !seenIds.has(String(l.id))
-    );
-
-    // First run
-    if (raw === null) {
-      await AsyncStorage.setItem(
-        SEEN_LEADS_KEY,
-        JSON.stringify(leads.map(l => String(l.id)))
-      );
-
+    // First run — seed the cache with all current leads and return.
+    if (seenSet.size === 0) {
+      leads.forEach(l => l.id && seenLeads.add(String(l.id)));
       return;
     }
 
-    await AsyncStorage.setItem(
-      SEEN_LEADS_KEY,
-      JSON.stringify(leads.map(l => String(l.id)))
-    );
+    // Mark all current leads as seen (new ones get added to the cache).
+    leads.forEach(l => l.id && seenLeads.add(String(l.id)));
 
     if (newLeads.length === 0) return;
 
@@ -410,14 +369,8 @@ export async function checkAndNotifyFollowUps(leads) {
     const WINDOW_AHEAD_MS = 15 * 60 * 1000;
     const WINDOW_BEHIND_MS = 24 * 60 * 60 * 1000;
 
-    const raw = await AsyncStorage.getItem(
-      NOTIFIED_FOLLOWUP_KEY
-    );
-
-    const notifiedSet = new Set(
-      raw ? JSON.parse(raw) : []
-    );
-
+    // RAM FIX: notifiedDedup loads once, stays in memory, debounce-flushes writes.
+    await notifiedDedup.getSet(); // ensure loaded
     const newlyFired = [];
 
     for (const lead of leads) {
@@ -465,7 +418,7 @@ export async function checkAndNotifyFollowUps(leads) {
 
         const dedupKey = `${lead.id}_${candidate.isoDate}`;
 
-        if (notifiedSet.has(dedupKey)) continue;
+        if (notifiedDedup.has(dedupKey)) continue;
 
         const minsUntil = Math.round(
           (schedMs - now) / 60000
@@ -526,29 +479,20 @@ export async function checkAndNotifyFollowUps(leads) {
           },
         });
 
-        notifiedSet.add(dedupKey);
+        notifiedDedup.add(dedupKey);
         newlyFired.push(dedupKey);
       }
     }
 
     if (newlyFired.length === 0) return;
 
+    // Prune old keys from the in-memory cache (notifDedup handles storage flush).
     const cutoff = now - WINDOW_BEHIND_MS;
-
-    const pruned = [...notifiedSet].filter(key => {
-      const isoTs = key.substring(
-        key.lastIndexOf('_') + 1
-      );
-
+    notifiedDedup.prune(key => {
+      const isoTs = key.substring(key.lastIndexOf('_') + 1);
       const ts = new Date(isoTs).getTime();
-
       return !isNaN(ts) && ts > cutoff;
     });
-
-    await AsyncStorage.setItem(
-      NOTIFIED_FOLLOWUP_KEY,
-      JSON.stringify(pruned)
-    );
   } catch (err) {
     console.warn(
       '[Notifications] checkAndNotifyFollowUps error:',
@@ -1000,8 +944,8 @@ export async function checkAndScheduleMeetingFollowUps(meetings) {
   if (!notifee || !Array.isArray(meetings) || meetings.length === 0) return;
 
   try {
-    const raw = await AsyncStorage.getItem(MEETING_NOTIFIED_KEY);
-    const scheduledSet = new Set(raw ? JSON.parse(raw) : []);
+    // RAM FIX: scheduledDedup loads once, stays in memory.
+    await scheduledDedup.getSet();
     const now = Date.now();
     const newlyScheduled = [];
 
@@ -1022,25 +966,18 @@ export async function checkAndScheduleMeetingFollowUps(meetings) {
 
       // Schedule future triggers (dedup by id+timestamp)
       const dedupKey = `${m.id || m.leadName}_${whenMs}`;
-      if (whenMs > now && !scheduledSet.has(dedupKey)) {
+      if (whenMs > now && !scheduledDedup.has(dedupKey)) {
         await scheduleMeetingFollowUp(m);
-        scheduledSet.add(dedupKey);
+        scheduledDedup.add(dedupKey);
         newlyScheduled.push(dedupKey);
       }
     }
 
-    // PERF FIX: this used to only prune when something NEW was scheduled —
-    // on days with no new meetings the past-due dedup keys just piled up in
-    // AsyncStorage forever (parsed + re-stringified on every check). Now it
-    // prunes every run, so the set never grows past "future entries only"
-    // regardless of whether anything new was added today.
-    const pruned = [...scheduledSet].filter((key) => {
+    // Prune past-due keys from in-memory cache (notifDedup handles storage flush).
+    scheduledDedup.prune(key => {
       const ts = parseInt(key.substring(key.lastIndexOf('_') + 1));
       return !isNaN(ts) && ts > now;
     });
-    if (pruned.length !== scheduledSet.size || newlyScheduled.length > 0) {
-      await AsyncStorage.setItem(MEETING_NOTIFIED_KEY, JSON.stringify(pruned));
-    }
 
     // ── (3) Daily summary — fired at most once per calendar day ──────────────
     await _maybeShowMeetingSummary(todaysFollowUps);

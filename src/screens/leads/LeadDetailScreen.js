@@ -10,7 +10,7 @@ import {
 import { useDispatch, useSelector }                from 'react-redux';
 import { useNavigation, useRoute, useFocusEffect }                 from '@react-navigation/native';
 import Icon                                        from 'react-native-vector-icons/MaterialCommunityIcons';
-import { submitCallRemark, patchLead, fetchLeads, upsertLead }             from '../../store/slices/leadsSlice';
+import { submitCallRemark, patchLead, fetchLeads, upsertLead, getFullLeadFromCache } from '../../store/slices/leadsSlice';
 import { makePhoneCall, normalizePhone }           from '../../services/phoneService';
 import { getCallLogsForNumber }                    from '../../services/phoneService';
 import { getLeadCallLogs }                         from '../../api/callLogsApi';
@@ -131,16 +131,16 @@ export default function LeadDetailScreen() {
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   const storeLead = useSelector((s) => s.leads.items.find(l => l.id === leadId));
-  // Admin-configured Google account email that leads should auto-save into on
-  // this employee's device. Set per-employee in the CRM; null when unset.
   const contactAccountEmail = useSelector((s) => s.auth?.user?.contactAccountEmail || '');
 
-  // FIX: the screen used to read the lead ONLY from the Redux store. If the
-  // lead wasn't cached (opened from a notification, after a post-call navigate,
-  // or after the list refreshed and dropped it) it showed "Lead not found"
-  // immediately with no way to recover. We now fall back to fetching the lead
-  // by id from the server, showing a loading state while it resolves.
-  const [fetchedLead,   setFetchedLead]   = useState(null);
+  // RAM FIX: Redux now stores slim leads (no callHistory/scheduledCalls).
+  // Read the FULL lead (with callHistory) from the module-level cache that
+  // leadsSlice populates on every fetch. Falls back to a network fetch only
+  // when the cache is empty — e.g. screen opened from a notification before
+  // the list has loaded.
+  const cachedFullLead = getFullLeadFromCache(leadId);
+
+  const [fetchedLead,   setFetchedLead]   = useState(cachedFullLead || null);
   const [savingTemp,    setSavingTemp]    = useState(false);
   // ── Status quick-set state ────────────────────────────────────────────────
   const [savingStatus,  setSavingStatus]  = useState(false);
@@ -153,7 +153,9 @@ export default function LeadDetailScreen() {
   const [leadLoading,   setLeadLoading]   = useState(false);
   const [leadFetchFail, setLeadFetchFail] = useState(false);
 
-  const lead = storeLead || fetchedLead;
+  // Prefer the full cached lead (has callHistory); slim Redux lead is the
+  // fallback while the detail screen hasn't loaded the full object yet.
+  const lead = fetchedLead || storeLead;
 
   // Quick-set Hot/Warm/Cold. OPTIMISTIC: update the UI (store item + local copy)
   // instantly, then persist via PATCH /lead/:id in the background. If the persist
@@ -242,7 +244,14 @@ export default function LeadDetailScreen() {
 
   useEffect(() => {
     let cancelled = false;
-    if (storeLead || !leadId) return;            // store has it — nothing to do
+    // If we have a full lead from the cache (populated by leadsSlice on fetch),
+    // use it immediately — no network call needed.
+    const cached = getFullLeadFromCache(leadId);
+    if (cached) {
+      setFetchedLead(cached);
+      return;
+    }
+    if (storeLead || !leadId) return;    // slim Redux lead is enough for now
     setLeadLoading(true);
     setLeadFetchFail(false);
     getLeadById(leadId)

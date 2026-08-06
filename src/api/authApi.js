@@ -4,8 +4,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import api          from '../services/api';
 import { getPublicIP } from '../services/ipService'; // ✅ use the shared service, not inline copy
+// S-1: token persistence moved to the Keychain-backed store.
+import { setToken, removeToken, getToken } from '../services/tokenStorage';
+import crash from '../services/crashReporting';
 
-const TOKEN_KEY = 'auth_token';
 const USER_KEY  = 'auth_user';
 const IS_DEV    = __DEV__;
 
@@ -89,11 +91,15 @@ export async function loginUser(email, password) {
     );
   }
 
-  // Save auth data — user is now logged in
+  // Save auth data — user is now logged in.
+  // S-1: token → Keychain (setToken); non-sensitive user object stays in AsyncStorage.
   await Promise.allSettled([
-    AsyncStorage.setItem(TOKEN_KEY, token),
-    AsyncStorage.setItem(USER_KEY,  JSON.stringify(user)),
+    setToken(token),
+    AsyncStorage.setItem(USER_KEY, JSON.stringify(user)),
   ]);
+
+  // R-2: attach the user id to crash reports so field issues are traceable.
+  crash.setUser(user?._id || user?.id);
 
   // ✅ FIX: Send IP as fire-and-forget AFTER login succeeds.
   //    Uses PATCH /auth/update-device instead of re-calling POST /auth/login,
@@ -114,7 +120,7 @@ export async function loginUser(email, password) {
 
 export async function logoutUser() {
   await Promise.allSettled([
-    AsyncStorage.removeItem(TOKEN_KEY),
+    removeToken(),                       // S-1: clear Keychain token
     AsyncStorage.removeItem(USER_KEY),
   ]);
 }
@@ -124,7 +130,7 @@ export async function logoutUser() {
 export async function getStoredUser() {
   try {
     const [token, userJson] = await Promise.all([
-      AsyncStorage.getItem(TOKEN_KEY),
+      getToken(),                        // S-1: read Keychain token
       AsyncStorage.getItem(USER_KEY),
     ]);
     if (!token || !userJson) return null;

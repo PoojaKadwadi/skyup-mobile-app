@@ -31,6 +31,10 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL, API_TIMEOUT, IS_DEV } from '../config/config';
+// S-1: token now lives in the Keychain, not plaintext AsyncStorage.
+import { getToken, removeToken } from './tokenStorage';
+// R-2: safe crash/telemetry reporter (no-op until the native module is linked).
+import crash from './crashReporting';
 
 // PERF FIX: dev-only logger. Calls compile away to nothing when IS_DEV=false
 // (no string concatenation, no bridge crossing). Use these instead of
@@ -55,9 +59,9 @@ const api = axios.create({
 // ─── Request interceptor ─────────────────────────────────────────────────────
 api.interceptors.request.use(
   async (config) => {
-    // Attach auth token
+    // Attach auth token (S-1: read from the Keychain-backed store)
     try {
-      const token = await AsyncStorage.getItem('auth_token');
+      const token = await getToken();
       if (token) {
         config.headers.Authorization = `Bearer ${token}`;
       }
@@ -105,7 +109,7 @@ api.interceptors.response.use(
 
       if (isAuthError && !isLoginRequest) {
         try {
-          await AsyncStorage.removeItem('auth_token');
+          await removeToken();                       // S-1: clear Keychain token
           await AsyncStorage.removeItem('auth_user');
         } catch { /* ignore */ }
       }
@@ -113,6 +117,13 @@ api.interceptors.response.use(
 
     error.userMessage = buildUserMessage(error);
     dwarn(`[API ✗] ${error.userMessage}`, error.response?.data);
+
+    // R-2: report server errors and network failures (not expected 4xx auth/
+    // validation responses) so recurring backend/connectivity problems surface
+    // in crash reporting instead of being silently swallowed.
+    if (!status || status >= 500) {
+      crash.recordError(error, `API ${error.config?.method?.toUpperCase() || ''} ${error.config?.url || ''}`);
+    }
     return Promise.reject(error);
   },
 );

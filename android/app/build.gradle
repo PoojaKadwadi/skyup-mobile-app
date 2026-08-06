@@ -24,8 +24,11 @@ configurations.all {
         applicationId "com.skyupcrm"
         minSdkVersion 24
         targetSdkVersion 35
-        versionCode 1
-        versionName "1.0"
+        // B-2: bump versionCode on EVERY release (ideally from CI). Play Store
+        // rejects an upload whose versionCode isn't strictly higher than the
+        // installed build, so a stuck versionCode blocks user updates.
+        versionCode 2
+        versionName "1.0.1"
     }
 
     splits {
@@ -67,7 +70,29 @@ configurations.all {
     buildTypes {
         debug { signingConfig signingConfigs.debug }
         release {
-            signingConfig project.hasProperty('MYAPP_RELEASE_STORE_FILE') ? signingConfigs.release : signingConfigs.debug
+            // S-3: NEVER silently fall back to the public debug key for a release
+            // build. A debug-signed release APK cannot update over a real release
+            // install and is trivially re-signable. If the release keystore is
+            // configured, use it; otherwise FAIL the build — but only when a
+            // release APK/bundle is actually being assembled, so debug builds and
+            // IDE sync still work without the release keystore present.
+            if (project.hasProperty('MYAPP_RELEASE_STORE_FILE')) {
+                signingConfig signingConfigs.release
+            } else {
+                gradle.taskGraph.whenReady { graph ->
+                    def assemblingRelease = graph.allTasks.any {
+                        def n = it.name.toLowerCase()
+                        n.contains('assemblerelease') || n.contains('bundlerelease') || n.contains('packagerelease')
+                    }
+                    if (assemblingRelease) {
+                        throw new GradleException(
+                            "Release keystore not configured. Set MYAPP_RELEASE_STORE_FILE, " +
+                            "MYAPP_RELEASE_STORE_PASSWORD, MYAPP_RELEASE_KEY_ALIAS and " +
+                            "MYAPP_RELEASE_KEY_PASSWORD (e.g. in ~/.gradle/gradle.properties) " +
+                            "before running assembleRelease / bundleRelease.")
+                    }
+                }
+            }
             minifyEnabled enableProguardInReleaseBuilds
             shrinkResources enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"

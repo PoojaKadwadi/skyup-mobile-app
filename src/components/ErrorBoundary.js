@@ -25,6 +25,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import React from 'react';
 import { View, Text, TouchableOpacity, ScrollView, StyleSheet } from 'react-native';
+// R-2: report render crashes to Crashlytics (safe no-op until native module linked).
+import crash from '../services/crashReporting';
 
 export default class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -45,8 +47,9 @@ export default class ErrorBoundary extends React.Component {
       info?.componentStack,
     );
     this.setState({ info });
-    // If you later add crashlytics, report here:
-    // try { require('@react-native-firebase/crashlytics').default().recordError(error); } catch {}
+    // R-2: report the render crash + component stack to Crashlytics.
+    crash.log(`ErrorBoundary componentStack: ${info?.componentStack || 'n/a'}`);
+    crash.recordError(error, 'ErrorBoundary render crash');
   }
 
   handleReset = () => {

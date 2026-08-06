@@ -9,7 +9,8 @@
     "start:clean": "react-native start --reset-cache",
     "build:android": "cd android && ./gradlew assembleRelease",
     "build:android:debug": "cd android && ./gradlew assembleDebug",
-    "clean:android": "cd android && ./gradlew clean"
+    "clean:android": "cd android && ./gradlew clean",
+    "test": "jest"
   },
   "dependencies": {
     "@babel/code-frame": "^7.29.0",
@@ -20,6 +21,7 @@
     "@react-native-community/geolocation": "^3.4.0",
     "@react-native-community/netinfo": "^11.3.2",
     "@react-native-firebase/app": "^20.0.0",
+    "@react-native-firebase/crashlytics": "^20.0.0",
     "@react-native-firebase/messaging": "^20.0.0",
     "@react-navigation/bottom-tabs": "^6.5.20",
     "@react-navigation/native": "^6.1.17",
@@ -32,7 +34,6 @@
     "react-native": "0.73.6",
     "react-native-call-log": "^3.0.0",
     "react-native-document-picker": "^9.3.1",
-    "react-native-encrypted-storage": "^4.0.3",
     "react-native-fs": "^2.20.0",
     "react-native-gesture-handler": "^2.16.1",
     "react-native-keychain": "^8.2.0",

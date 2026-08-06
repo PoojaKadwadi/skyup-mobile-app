@@ -1,8 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  S-2: Cleartext (HTTP) is DENIED everywhere by base-config. Production traffic
+  is HTTPS (onrender.com), so this is correct for release. The domain-config
+  below re-permits cleartext ONLY for local development hosts, so `npm run
+  android` against a backend running on your PC still works:
+    • 10.0.2.2  → the Android emulator's alias for the host machine's localhost
+    • localhost / 127.0.0.1 → on-device local servers / adb reverse
+  Remove the domain-config block entirely if you never point the app at a
+  local HTTP backend.
+-->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">10.0.2.2</domain>
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+    </domain-config>
 </network-security-config>
