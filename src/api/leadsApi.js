@@ -36,31 +36,38 @@ export const getMyLeads = async() => {
             timeout: COLD_START_TIMEOUT,
         });
     } catch (err) {
-        // One retry: a timeout/network error here is almost always the backend
-        // still waking. The first request usually warms it, so the retry lands.
+        // One retry on timeout/network error — backend may still be waking.
         const aborted = err.code === 'ECONNABORTED' || !err.response;
         if (!aborted) throw err;
         firstPage = await apiClient.get('/lead/my-leads?page=1&limit=200', {
             timeout: COLD_START_TIMEOUT,
         });
     }
-    const { leads: firstLeads, pages } = firstPage.data;
+
+    // NOTE: backend removed `pages` and `total` from the response to avoid
+    // countDocuments() on every load. Instead it returns `hasMore: true` when
+    // there are leads beyond the current page (fetches limit+1, slices to limit).
+    const { leads: firstLeads, hasMore } = firstPage.data;
 
     // Single page — the common case, return immediately
-    if (!pages || pages <= 1) {
+    if (!hasMore) {
         return firstLeads.map(formatLead);
     }
 
-    // More than 200 leads: fetch remaining pages in parallel
-    const remaining = await Promise.all(
-        Array.from({ length: pages - 1 }, (_, i) =>
-            apiClient
-            .get(`/lead/my-leads?page=${i + 2}&limit=200`)
-            .then(r => r.data.leads || [])
-        )
-    );
+    // More leads exist — fetch remaining pages sequentially until hasMore=false.
+    // Sequential (not parallel) because we don't know the total page count.
+    const allLeads = [...firstLeads];
+    let page = 2;
+    let more = true;
+    while (more) {
+        const res  = await apiClient.get(`/lead/my-leads?page=${page}&limit=200`);
+        const data = res.data;
+        allLeads.push(...(data.leads || []));
+        more = !!data.hasMore;
+        page++;
+        if (page > 50) break; // safety cap — 50 pages × 200 = 10,000 leads
+    }
 
-    const allLeads = [firstLeads, ...remaining].flat();
     return allLeads.map(formatLead);
 };
 
@@ -117,10 +124,11 @@ export const getLeadActionSummary = async(leadId, { refresh = false } = {}) => {
     return response.data;
 };
 
-export const addCallRemark = async(leadId, { remark, outcome, followUpDate, industry }) => {
+export const addCallRemark = async(leadId, { remark, outcome, followUpDate, industry, service }) => {
     const payload = { remark, outcome };
     if (followUpDate) payload.followUpDate = followUpDate;
     if (industry !== undefined) payload.industry = industry;
+    if (service  !== undefined) payload.service  = service;
     const response = await apiClient.patch(`/lead/${leadId}`, payload);
     return response.data;
 };
@@ -131,11 +139,11 @@ export const addCallRemark = async(leadId, { remark, outcome, followUpDate, indu
 // breaking the boundary string and causing a server-side parse failure.
 // fetch() derives Content-Type + boundary from the FormData automatically.
 export const addCallRemarkWithAttachments = async(
-    leadId, { remark, outcome, followUpDate, document, recording, industry },
+    leadId, { remark, outcome, followUpDate, document, recording, industry, service },
 ) => {
     // If neither attachment is provided, fall back to the plain JSON patch
     if (!document && !recording) {
-        return addCallRemark(leadId, { remark, outcome, followUpDate, industry });
+        return addCallRemark(leadId, { remark, outcome, followUpDate, industry, service });
     }
 
     const { BASE_URL } = require('../config/config');
@@ -176,6 +184,7 @@ export const addCallRemarkWithAttachments = async(
     form.append('outcome', outcome);
     if (followUpDate) form.append('followUpDate', followUpDate);
     if (industry !== undefined) form.append('industry', industry);
+    if (service  !== undefined) form.append('service',  service);
 
     if (document) {
         const name = document.name || document.uri.split('/').pop();
@@ -315,7 +324,7 @@ function formatLead(lead) {
         temperature: lead.temperature || lead.Quality || null,
         Quality: lead.temperature || lead.Quality || null,
         agent: (lead.user && lead.user.name) || 'Unknown',
-        company: lead.company,
+        company: lead.company ? String(lead.company) : '',
         callHistory,
         scheduledCalls: Array.isArray(lead.scheduledCalls) ? lead.scheduledCalls : [],
         reassignCount: lead.reassignCount || 0,

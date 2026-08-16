@@ -31,14 +31,22 @@ const MEETING_TYPES = ['In-Person', 'Site Visit', 'Demo', 'Video Call', 'Phone C
 // Lead status options — kept in sync with the website's UpdateStatusModal
 // (["New","In Progress","Converted","Not Interested"]). "Not Interested" runs the
 // backend reassignment/verification flow instead of a plain status patch.
-const STATUS_OPTIONS = ['New', 'In Progress', 'Converted', 'Not Interested'];
+const STATUS_OPTIONS = ['New', 'In Progress', 'Interested', 'Converted', 'Not Interested'];
 
-// Industry tag — agent classifies which business/industry this lead belongs
-// to, independent of which ad campaign brought it in. Used as the
-// "domain-wise" filter on the Leads list and to scope Lead Nurture rules to
-// send an industry-appropriate WhatsApp template (see NurtureRule.trigger.industries
-// on the backend). Free-form field — this is a starting list, not a hard enum.
-const INDUSTRIES = ['Real Estate', 'Healthcare', 'Education', 'E-commerce', 'Finance', 'Manufacturing', 'Hospitality', 'Other'];
+// ── Lead Nurture — industry/service classification ────────────────────────────
+// Values MUST match templateNameResolver.js exactly — they become part of the
+// MSG91 template name slug (e.g. "real_estate_crm_awareness_v1").
+// Only shown for company 6a22662b7aea6e4034f44aae.
+const NURTURE_COMPANY_ID = '6a22662b7aea6e4034f44aae';
+const INDUSTRIES = [
+  'Healthcare', 'Education', 'Real Estate', 'Logistics', 'Finance',
+  'IT Solutions', 'Digital Marketing', 'Construction', 'Local Business',
+  'Interior Designers', 'Professional Services',
+];
+const SERVICES = [
+  'SEO', 'Paid Ads', 'Website Design & Development', 'AI Automation',
+  'CRM', 'Video Editing', 'Graphic Design', 'Social Media Marketing',
+];
 
 const OUTCOMES = ['Answered', 'Not Answered', 'Busy', 'Switch Off', 'Call Back Later', 'Interested', 'Not Interested', 'Invalid', 'Client Meeting'];
 
@@ -452,6 +460,8 @@ export default function LeadDetailScreen() {
   const [remark,          setRemark]          = useState('');
   const [outcome,         setOutcome]         = useState('');
   const [industry,        setIndustry]        = useState('');
+  const [service,         setService]         = useState('');
+  const [statusUpdate,    setStatusUpdate]    = useState(''); // optional status change from remark modal
   const [submitting,      setSubmitting]      = useState(false);
   const [crmCallLogs,     setCrmCallLogs]     = useState([]);
   const [loadingLogs,     setLoadingLogs]     = useState(false);
@@ -553,6 +563,8 @@ export default function LeadDetailScreen() {
     // Show the modal immediately — do NOT wait on any network/disk work.
     setShowRemarkModal(true);
     setIndustry(lead?.industry || '');
+    setService(lead?.service   || '');
+    setStatusUpdate('');
 
     // Defer the heavy call-log read + uploads so they never block the modal
     // animation or the JS thread while the agent starts typing the remark.
@@ -924,7 +936,7 @@ export default function LeadDetailScreen() {
       setSubmitting(true);
       try {
         await dispatch(submitCallRemark({
-          leadId, remark: trimmed, outcome, industry,
+          leadId, remark: trimmed, outcome, industry, service,
           followUpDate: followUpDate || null, document: null, recording: null,
         })).unwrap();
 
@@ -975,10 +987,27 @@ export default function LeadDetailScreen() {
     // callHistory when it lands, so the UI stays correct. On failure we surface
     // a non-destructive alert so the agent can re-add it.
     const followUp = followUpDate || null;
+
+    // ── Optimistic status update ───────────────────────────────────────────────
+    // If the agent also changed the lead status from the remark modal, apply it
+    // locally right away so the UI reflects it instantly. The patchLead call
+    // below persists it to the backend (and triggers nurture sequence).
+    if (statusUpdate && statusUpdate !== lead?.status) {
+      dispatch(upsertLead({ id: leadId, status: statusUpdate }));
+      setFetchedLead(prev => prev ? { ...prev, status: statusUpdate } : prev);
+      dispatch(patchLead({ id: leadId, data: { status: statusUpdate } }))
+        .unwrap()
+        .catch(() => {
+          // Revert on failure
+          dispatch(upsertLead({ id: leadId, status: lead?.status }));
+          setFetchedLead(prev => prev ? { ...prev, status: lead?.status } : prev);
+        });
+    }
+
     closeModal();
 
     dispatch(submitCallRemark({
-      leadId, remark: trimmed, outcome, industry,
+      leadId, remark: trimmed, outcome, industry, service,
       followUpDate: followUp, document: null, recording: null,
     }))
       .unwrap()
@@ -1632,22 +1661,65 @@ export default function LeadDetailScreen() {
                 ))}
             </View>
 
-            {/* Industry tag (optional) — "domain-wise" classification so this
-                lead can be filtered by industry on the Leads list, and so
-                Lead Nurture rules can send an industry-appropriate template.
-                Not required — leave unset if the industry isn't clear yet. */}
-            <Text style={styles.modalLabel}>Industry <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text></Text>
+            {/* ── Status Update — agent can update lead status while logging remark ── */}
+            <Text style={[styles.modalLabel, { marginTop: 10 }]}>
+              Update Status <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text>
+            </Text>
             <View style={styles.outcomeRow}>
-              {INDUSTRIES.map(ind => (
-                <TouchableOpacity
-                  key={ind}
-                  style={[styles.outcomeChip, industry === ind && styles.outcomeChipActive]}
-                  onPress={() => setIndustry(industry === ind ? '' : ind)}
-                >
-                  <Text style={[styles.outcomeChipText, industry === ind && styles.outcomeChipTextActive]}>{ind}</Text>
-                </TouchableOpacity>
-              ))}
+              {STATUS_OPTIONS.map(s => {
+                // Don't show Not Interested here — that has its own special flow
+                if (s === 'Not Interested') return null;
+                const active = statusUpdate === s;
+                const isCurrent = (lead?.status || '') === s;
+                return (
+                  <TouchableOpacity
+                    key={s}
+                    style={[
+                      styles.outcomeChip,
+                      active && styles.outcomeChipActive,
+                      isCurrent && !active && { opacity: 0.45 },
+                    ]}
+                    onPress={() => setStatusUpdate(active ? '' : s)}
+                  >
+                    <Text style={[styles.outcomeChipText, active && styles.outcomeChipTextActive]}>
+                      {isCurrent ? `✓ ${s}` : s}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
+
+            {/* Industry + Service — only shown for SkyUp Digital Solutions.
+                Values must match templateNameResolver.js so the correct
+                MSG91 nurture template is resolved per lead. */}
+            {lead?.company === NURTURE_COMPANY_ID && (
+              <>
+                <Text style={styles.modalLabel}>Industry <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text></Text>
+                <View style={styles.outcomeRow}>
+                  {INDUSTRIES.map(ind => (
+                    <TouchableOpacity
+                      key={ind}
+                      style={[styles.outcomeChip, industry === ind && styles.outcomeChipActive]}
+                      onPress={() => setIndustry(industry === ind ? '' : ind)}
+                    >
+                      <Text style={[styles.outcomeChipText, industry === ind && styles.outcomeChipTextActive]}>{ind}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <Text style={[styles.modalLabel, { marginTop: 10 }]}>Service <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text></Text>
+                <View style={styles.outcomeRow}>
+                  {SERVICES.map(svc => (
+                    <TouchableOpacity
+                      key={svc}
+                      style={[styles.outcomeChip, service === svc && styles.outcomeChipActive]}
+                      onPress={() => setService(service === svc ? '' : svc)}
+                    >
+                      <Text style={[styles.outcomeChipText, service === svc && styles.outcomeChipTextActive]}>{svc}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </>
+            )}
 
             <Text style={styles.modalLabel}>Remark *</Text>
             <TextInput

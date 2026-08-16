@@ -22,7 +22,7 @@ import AsyncStorage                     from '@react-native-async-storage/async-
 import { useDispatch, useSelector }     from 'react-redux';
 import { useNavigation, useFocusEffect }                from '@react-navigation/native';
 import Icon                             from 'react-native-vector-icons/MaterialCommunityIcons';
-import { fetchLeads, fetchLeadsDelta, isNotContacted }   from '../../store/slices/leadsSlice';
+import { fetchLeads, fetchLeadsDelta, isNotContacted, isFollowUpDue }   from '../../store/slices/leadsSlice';
 import { triggerManualSync }            from '../../services/backgroundSyncService';
 import { checkAllPermissions }          from '../../services/permissionsService';
 import { checkAndNotifyNewLeads, checkAndNotifyFollowUps, checkAndScheduleClockInReminder } from '../../services/notificationService';
@@ -71,44 +71,11 @@ function timeAgo(ms) {
   return hrs < 24 ? `${hrs}h ago` : `${Math.floor(hrs / 24)}d ago`;
 }
 
-// Works out the follow-up date that actually governs a lead:
-//   • If an agent explicitly set followUpDate, that wins (auto: false).
-//   • Otherwise, a lead that's still "New" (not yet called) or "In Progress"
-//     automatically becomes a follow-up the day AFTER it was last touched —
-//     an untouched lead should never just sit there with no follow-up date
-//     and quietly fall off everyone's radar. Basis = last call time if the
-//     agent has called before, else the lead's creation date. (auto: true)
-// Kept at module scope with no theme/color dependency so it stays
-// Hermes-safe. Mirrored in LeadsScreen so the "Followups" card count and the
-// filtered list it opens always agree.
-function getEffectiveFollowUp(lead) {
-  if (lead?.followUpDate) {
-    const d = new Date(lead.followUpDate);
-    return isNaN(d.getTime()) ? null : { date: d, auto: false };
-  }
-  if (isNotContacted(lead) || lead?.status === 'In Progress') {
-    const basis = lead.lastCalledAt || lead._raw_date || lead.date;
-    if (!basis) return null;
-    const b = new Date(basis);
-    if (isNaN(b.getTime())) return null;
-    const due = new Date(b);
-    due.setDate(due.getDate() + 1);
-    due.setHours(0, 0, 0, 0);
-    return { date: due, auto: true };
-  }
-  return null;
-}
-
-// Returns true when a lead's effective follow-up (explicit or auto-assigned,
-// see getEffectiveFollowUp above) is today or earlier.
-function isFollowUpDue(lead) {
-  const info = getEffectiveFollowUp(lead);
-  if (!info) return false;
-  const endOfToday = new Date();
-  endOfToday.setHours(23, 59, 59, 999);
-  return info.date.getTime() <= endOfToday.getTime();
-}
-
+// FIX: getEffectiveFollowUp/isFollowUpDue used to be defined here AND
+// re-defined (with a simplified, non-matching version) in LeadsScreen.js.
+// That's why tapping the "Followups" KPI card showed a count but opened an
+// empty list — the two screens disagreed on what counted as "due". Both
+// screens now import the single shared version from leadsSlice.js.
 function computeKpi(leads) {
   const todayStr  = new Date().toDateString();
   const now       = new Date();

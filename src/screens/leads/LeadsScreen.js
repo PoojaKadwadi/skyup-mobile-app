@@ -1,30 +1,21 @@
 // src/screens/leads/LeadsScreen.js
-// PERFORMANCE FIXES (this revision):
-//   1. useFocusEffect with 2-min stale threshold replaces bare useEffect.
-//      The old code had NO fetch guard — every mount of this tab triggered
-//      a full network request. Now only re-fetches when data is >2 min old.
-//      Manual pull-to-refresh always forces a fresh fetch regardless.
-//
-//   2. InteractionManager wraps fetchLeads — the network call waits until
-//      the native slide-in animation completes. Prevents animation jank on
-//      first visit to this tab.
-//
-//   3. Stable renderItem — the old inline arrow functions
-//      `onPress={() => navigate(...)}` and `onCallStart={() => handle(item)}`
-//      created a NEW function object on every renderItem call, defeating
-//      LeadRow's React.memo entirely. Every leads-array change re-rendered
-//      every visible row even when individual items hadn't changed.
-//      Fix: LeadRow now receives stable `onPress` and `onCallStart` via
-//      useCallback + item.id so memo can actually bail out.
-//
-//   4. Debounced search (300ms) retained from prior revision.
-//
-// All previous fixes (React.memo, getItemLayout, windowSize, etc.) retained.
+// FIXES (this revision):
+//   1. New Lead / Follow-up filter not clearing — route.params persisted across
+//      navigation. Fixed by calling navigation.setParams({ followUpOnly: false,
+//      filterStatus: null }) after applying params so re-visiting the tab never
+//      re-applies a stale param.
+//   2. Replaced icon buttons (filter/sort) with always-visible inline dropdowns —
+//      Status, Quality, Industry, Sort all show as a horizontal scrollable row
+//      of picker dropdowns directly below the search bar. No hidden panel.
+//   3. Loading indicator during background sync — a slim blue bar appears at the
+//      top of the list while fetchLeads/fetchLeadsDelta is in flight, even when
+//      the list already has data (previously only showed on empty list).
 
 import React, { useEffect, useCallback, useMemo, useState, memo, useRef } from 'react';
 import {
   View, Text, FlatList, StyleSheet, TouchableOpacity,
-  TextInput, RefreshControl, StatusBar, InteractionManager, ActivityIndicator,
+  TextInput, RefreshControl, StatusBar, InteractionManager,
+  ActivityIndicator, ScrollView, Modal as RNModal,
 } from 'react-native';
 import { useDispatch, useSelector }     from 'react-redux';
 import { useNavigation, useRoute,
@@ -45,16 +36,48 @@ function maskPhone(phone) {
   return digits.slice(0, 2) + '•••••' + digits.slice(-2);
 }
 
-const STATUS_FILTERS = ['all', 'New', 'In Progress', 'Interest', 'Converted', 'Not Interested'];
+const STATUS_FILTERS   = ['all', 'New', 'In Progress', 'Interested', 'Converted', 'Not Interested'];
+const QUALITY_FILTERS  = ['All', 'Hot', 'Warm', 'Cold'];
+const INDUSTRY_FILTERS = [
+  'All', 'Healthcare', 'Education', 'Real Estate', 'Logistics', 'Finance',
+  'IT Solutions', 'Digital Marketing', 'Construction', 'Local Business',
+  'Interior Designers', 'Professional Services', 'Untagged',
+];
+const SORT_OPTIONS = [
+  { label: 'Recent',      value: 'recent'    },
+  { label: 'Newest',      value: 'date_desc' },
+  { label: 'Oldest',      value: 'date_asc'  },
+  { label: 'Name A–Z',    value: 'name_asc'  },
+  { label: 'By Status',   value: 'status'    },
+];
+const DATE_FILTERS = [
+  { label: 'All Time',   value: 'all'   },
+  { label: 'Today',      value: 'today' },
+  { label: 'This Week',  value: 'week'  },
+  { label: 'This Month', value: 'month' },
+];
 
-// "Domain-wise" filter — matches the Industry tag agents set from the remark
-// modal on LeadDetailScreen.js (Lead.industry on the backend). 'All' = no
-// filter; 'Untagged' = leads with no industry set yet.
-const INDUSTRY_FILTERS = ['All', 'Real Estate', 'Healthcare', 'Education', 'E-commerce', 'Finance', 'Manufacturing', 'Hospitality', 'Other', 'Untagged'];
+// Returns start-of-day for a date
+function startOf(d) { const r = new Date(d); r.setHours(0,0,0,0); return r; }
+function endOf(d)   { const r = new Date(d); r.setHours(23,59,59,999); return r; }
+function isInDateRange(lead, range) {
+  if (range === 'all') return true;
+  const ts = lead._raw_date || 0;
+  if (!ts) return false;
+  const now  = new Date();
+  if (range === 'today') return ts >= startOf(now) && ts <= endOf(now);
+  if (range === 'week') {
+    const start = startOf(new Date(now));
+    start.setDate(now.getDate() - now.getDay());
+    return ts >= start && ts <= endOf(now);
+  }
+  if (range === 'month') {
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    return ts >= start && ts <= endOf(now);
+  }
+  return true;
+}
 
-// Returns true when a lead has a follow-up scheduled for today or earlier
-// (due today or overdue). Mirrors the same predicate in DashboardScreen so the
-// "Followups" card count and this filtered list always agree.
 function isFollowUpDue(lead) {
   if (!lead?.followUpDate) return false;
   const d = new Date(lead.followUpDate);
@@ -69,7 +92,7 @@ function getStatusCfg(colors) {
     'New':            { dot: colors.blue,  bg: colors.blueBg,  text: colors.blueLight  },
     'In Progress':    { dot: colors.amber, bg: colors.amberBg, text: colors.amberLight },
     'Converted':      { dot: colors.green, bg: colors.greenBg, text: colors.greenLight },
-    'Interest':       { dot: colors.green, bg: colors.greenBg, text: colors.greenLight },
+    'Interested':     { dot: colors.green, bg: colors.greenBg, text: colors.greenLight },
     'Not Interested': { dot: colors.red,   bg: colors.redBg,   text: colors.redLight   },
   };
 }
@@ -82,12 +105,96 @@ function getQualityCfg(colors) {
   };
 }
 
-const SORT_OPTIONS = [
-  { label: 'Newest first', value: 'date_desc' },
-  { label: 'Oldest first', value: 'date_asc'  },
-  { label: 'Name A–Z',     value: 'name_asc'  },
-  { label: 'By Status',    value: 'status'    },
-];
+// ── Inline dropdown pill ──────────────────────────────────────────────────────
+// Uses a Modal overlay for the menu so it's never clipped by the parent
+// ScrollView. The pill measures its own position and renders the menu
+// absolutely on top of everything.
+function FilterDropdown({ label, value, options, onChange, colors }) {
+  const [open,    setOpen]    = useState(false);
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
+  const pillRef = useRef(null);
+
+  const isActive = value && value !== 'all' && value !== 'All' && value !== 'date_desc';
+
+  const openMenu = () => {
+    pillRef.current?.measureInWindow((x, y, _w, h) => {
+      setMenuPos({ top: y + h + 4, left: x });
+      setOpen(true);
+    });
+  };
+
+  return (
+    <>
+      <TouchableOpacity
+        ref={pillRef}
+        style={[
+          dd.pill,
+          { backgroundColor: isActive ? colors.blueBg : colors.surface,
+            borderColor:      isActive ? colors.blue   : colors.border },
+        ]}
+        onPress={openMenu}
+        activeOpacity={0.7}
+      >
+        <Text style={[dd.pillTxt, { color: isActive ? colors.blueLight : colors.textSec }]}>
+          {label}: <Text style={{ fontWeight: '700' }}>
+            {value === 'all' ? 'All' : value}
+          </Text>
+        </Text>
+        <Icon
+          name={open ? 'chevron-up' : 'chevron-down'}
+          size={13}
+          color={isActive ? colors.blueLight : colors.textMuted}
+          style={{ marginLeft: 2 }}
+        />
+      </TouchableOpacity>
+
+      <RNModal
+        visible={open}
+        transparent
+        animationType="none"
+        onRequestClose={() => setOpen(false)}
+      >
+        {/* Tap outside to close */}
+        <TouchableOpacity
+          style={dd.backdrop}
+          activeOpacity={1}
+          onPress={() => setOpen(false)}
+        />
+        <View style={[dd.menu, {
+          top: menuPos.top, left: menuPos.left,
+          backgroundColor: colors.surface,
+          borderColor: colors.border,
+        }]}>
+          {options.map(opt => {
+            const optVal   = typeof opt === 'object' ? opt.value : opt;
+            const optLabel = typeof opt === 'object' ? opt.label : (opt === 'all' ? 'All' : opt);
+            const selected = value === optVal;
+            return (
+              <TouchableOpacity
+                key={optVal}
+                style={[dd.menuItem, selected && { backgroundColor: colors.blueBg }]}
+                onPress={() => { onChange(optVal); setOpen(false); }}
+              >
+                <Text style={[dd.menuTxt, { color: selected ? colors.blueLight : colors.textPrimary }]}>
+                  {optLabel}
+                </Text>
+                {selected && <Icon name="check" size={13} color={colors.blueLight} />}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </RNModal>
+    </>
+  );
+}
+const dd = StyleSheet.create({
+  pill:     { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 7, borderRadius: 20, borderWidth: 1, gap: 3 },
+  pillTxt:  { fontSize: FONT.sm, fontWeight: '500' },
+  backdrop: { ...StyleSheet.absoluteFillObject },
+  menu:     { position: 'absolute', minWidth: 180, borderRadius: 10, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 10 },
+  menuItem: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 11 },
+  menuTxt:  { fontSize: FONT.sm, fontWeight: '500' },
+});
 
 function StatusBadge({ status }) {
   const { colors } = useTheme();
@@ -118,17 +225,11 @@ function TempBadge({ temp }) {
 
 const LeadRow = memo(function LeadRow({ item, leadId, onPress, onCallStart }) {
   const { colors } = useTheme();
-  const s = useMemo(() => createStyles(colors), [colors]);
+  const s  = useMemo(() => createStyles(colors), [colors]);
   const sc = getStatusCfg(colors)[item.status] || getStatusCfg(colors)['New'];
   const initials = (item.name || '?')
-    .split(' ')
-    .map(n => n[0])
-    .join('')
-    .slice(0, 2)
-    .toUpperCase();
+    .split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
 
-  // Stable per-item callbacks — useCallback keyed on leadId (primitive string)
-  // so they're only recreated when the leadId changes, not on every parent render.
   const handlePress     = useCallback(() => onPress(leadId),     [onPress, leadId]);
   const handleCallStart = useCallback(() => onCallStart(leadId), [onCallStart, leadId]);
 
@@ -172,51 +273,37 @@ const LeadRow = memo(function LeadRow({ item, leadId, onPress, onCallStart }) {
   );
 });
 
-const ITEM_HEIGHT   = 88;
-const SEPARATOR_H   = 8;
-const ITEM_TOTAL    = ITEM_HEIGHT + SEPARATOR_H;
-const getItemLayout = (_, index) => ({
-  length: ITEM_TOTAL,
-  offset: ITEM_TOTAL * index,
-  index,
-});
+const ITEM_HEIGHT = 88;
+const SEPARATOR_H = 8;
+const ITEM_TOTAL  = ITEM_HEIGHT + SEPARATOR_H;
+const getItemLayout = (_, index) => ({ length: ITEM_TOTAL, offset: ITEM_TOTAL * index, index });
 
 export default function LeadsScreen() {
-  const dispatch      = useDispatch();
-  const navigation    = useNavigation();
-  const route         = useRoute();
+  const dispatch   = useDispatch();
+  const navigation = useNavigation();
+  const route      = useRoute();
   const { dark, colors } = useTheme();
   const s = useMemo(() => createStyles(colors), [colors]);
+
   const filteredLeads = useSelector(selectFilteredLeads);
   const { loading, searchQuery, filterStatus, lastFetchedAt } = useSelector((s) => s.leads);
 
-  const [showFilters, setShowFilters] = useState(false);
-  const [showSort,    setShowSort]    = useState(false);
-  const [sortBy,      setSortBy]      = useState('date_desc');
-  const [filterTemp,  setFilterTemp]  = useState('All');
+  const [sortBy,         setSortBy]         = useState('recent');
+  const [filterTemp,     setFilterTemp]     = useState('All');
   const [filterIndustry, setFilterIndustry] = useState('All');
-  // Set from the dashboard "Followups" card. When true, the list is narrowed to
-  // leads whose follow-up is due today or overdue (see isFollowUpDue).
-  const [followUpOnly, setFollowUpOnly] = useState(false);
+  const [filterDate,     setFilterDate]     = useState('all');
+  const [followUpOnly,   setFollowUpOnly]   = useState(false);
 
-  // FIX: Local search value keeps TextInput snappy.
-  // Dispatch to Redux is debounced 300ms to avoid filter churn on every keystroke.
   const [localSearch, setLocalSearch] = useState(searchQuery);
   const debounceRef = useRef(null);
 
-  // ✅ FIX 1: useFocusEffect + 2-min stale threshold.
-  // The old bare useEffect had no deps array so it ran on every re-render,
-  // firing a full network fetch on every tab switch. Now: only re-fetches
-  // when data is genuinely stale. InteractionManager defers the network
-  // call until the slide-in animation is done — prevents frame drops.
+  // ── FIX 1: Stale fetch guard ──────────────────────────────────────────────
   const STALE_MS = 5 * 60 * 1000;
   useFocusEffect(
     useCallback(() => {
       const isStale = !lastFetchedAt || (Date.now() - lastFetchedAt > STALE_MS);
       if (!isStale) return;
       const task = InteractionManager.runAfterInteractions(() => {
-        // Delta fetch: if we already have leads, only download what changed.
-        // Full fetch: first load or something went wrong with delta.
         if (lastFetchedAt) {
           dispatch(fetchLeadsDelta(lastFetchedAt));
         } else {
@@ -227,12 +314,29 @@ export default function LeadsScreen() {
     }, [lastFetchedAt])
   );
 
+  // ── FIX 2: Route params — apply then CLEAR so re-visiting the tab doesn't
+  // re-apply a stale "New Lead" or "Follow-up" filter. Previously the params
+  // persisted on the route object forever, so coming back to Leads always
+  // re-applied the last dashboard tap even after the user had cleared it.
+  useFocusEffect(
+    useCallback(() => {
+      if (route.params?.followUpOnly) {
+        setFollowUpOnly(true);
+        dispatch(setFilterStatus('all'));
+        // Clear so next focus doesn't re-apply
+        navigation.setParams({ followUpOnly: false, filterStatus: null });
+      } else if (route.params?.filterStatus) {
+        setFollowUpOnly(false);
+        dispatch(setFilterStatus(route.params.filterStatus));
+        navigation.setParams({ followUpOnly: false, filterStatus: null });
+      }
+    }, [route.params?.followUpOnly, route.params?.filterStatus])
+  );
+
   const handleSearchChange = useCallback((text) => {
     setLocalSearch(text);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      dispatch(setSearchQuery(text));
-    }, 300);
+    debounceRef.current = setTimeout(() => dispatch(setSearchQuery(text)), 300);
   }, [dispatch]);
 
   const handleSearchClear = useCallback(() => {
@@ -241,80 +345,48 @@ export default function LeadsScreen() {
     dispatch(setSearchQuery(''));
   }, [dispatch]);
 
-  useFocusEffect(
-    useCallback(() => {
-      // Deep-links from the dashboard cards:
-      //   New Leads  → { filterStatus: 'New' }
-      //   Followups  → { followUpOnly: true }
-      // Use useFocusEffect (not useEffect) so re-navigating to an already-mounted
-      // Leads tab also applies the params — useEffect only fires on param change,
-      // but if Leads is already the active tab the params object reference may not
-      // change, silently ignoring the navigation.
-      if (route.params?.followUpOnly) {
-        setFollowUpOnly(true);
-        dispatch(setFilterStatus('all'));
-      } else if (route.params?.filterStatus) {
-        setFollowUpOnly(false);
-        dispatch(setFilterStatus(route.params.filterStatus));
-      }
-    }, [route.params?.followUpOnly, route.params?.filterStatus])
-  );
-
   const onRefresh = useCallback(() => { dispatch(fetchLeads()); }, [dispatch]);
 
-  // ✅ FIX 2: Stable callbacks — LeadRow now receives primitive `leadId` and
-  // two stable handler refs. The old inline arrows in renderItem created new
-  // functions on every call, so LeadRow's React.memo always saw new props and
-  // always re-rendered every visible row even when items hadn't changed.
   const handleLeadPress = useCallback((leadId) => {
     navigation.navigate('LeadDetail', { leadId });
   }, [navigation]);
 
   const handleCallStart = useCallback((leadId) => {
-    // FIX: the old code waited a hard-coded 2 seconds before navigating, which
-    // left a spinner stuck on the card and could land on a lead the store had
-    // already dropped ("Lead not found"). Navigate immediately; LeadDetail now
-    // fetches the lead by id if it isn't cached, and the post-call recording
-    // sync runs in the background regardless.
     navigation.navigate('LeadDetail', { leadId, postCall: true });
   }, [navigation]);
 
-  const displayed = React.useMemo(() => {
+  const displayed = useMemo(() => {
     let res = [...filteredLeads];
-    if (followUpOnly) {
-      res = res.filter(isFollowUpDue);
-    }
-    if (filterTemp !== 'All') {
-      res = res.filter(l => (l.Quality || l.temperature) === filterTemp);
-    }
+    if (followUpOnly)          res = res.filter(isFollowUpDue);
+    if (filterTemp !== 'All')  res = res.filter(l => (l.Quality || l.temperature) === filterTemp);
     if (filterIndustry !== 'All') {
       res = filterIndustry === 'Untagged'
         ? res.filter(l => !l.industry)
         : res.filter(l => l.industry === filterIndustry);
     }
-    // FIX: pre-compute sort keys before sorting so `new Date()` is called
-    // once per item instead of O(n log n) times inside the comparator.
-    // With 500 leads, the old approach called new Date() ~4,500 times per sort.
-    if (sortBy === 'date_desc' || sortBy === 'date_asc') {
-      const withTs = res.map(l => ({ l, ts: +(l._raw_date || 0) }));
-      withTs.sort((a, b) => sortBy === 'date_desc' ? b.ts - a.ts : a.ts - b.ts);
+    if (filterDate !== 'all')  res = res.filter(l => isInDateRange(l, filterDate));
+    // Sort
+    if (sortBy === 'recent') {
+      // Most recently called or created — uses _raw_date which is max(createdAt, lastCalledAt)
+      res = [...res].sort((a, b) => (b._raw_date || 0) - (a._raw_date || 0));
+    } else if (sortBy === 'date_desc') {
+      const withTs = res.map(l => ({ l, ts: +(new Date(l.date || 0)) }));
+      withTs.sort((a, b) => b.ts - a.ts);
+      res = withTs.map(x => x.l);
+    } else if (sortBy === 'date_asc') {
+      const withTs = res.map(l => ({ l, ts: +(new Date(l.date || 0)) }));
+      withTs.sort((a, b) => a.ts - b.ts);
       res = withTs.map(x => x.l);
     } else if (sortBy === 'name_asc') {
-      res.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      res = [...res].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     } else if (sortBy === 'status') {
-      res.sort((a, b) => (a.status || '').localeCompare(b.status || ''));
+      res = [...res].sort((a, b) => (a.status || '').localeCompare(b.status || ''));
     }
     return res;
-  }, [filteredLeads, sortBy, filterTemp, filterIndustry, followUpOnly]);
+  }, [filteredLeads, sortBy, filterTemp, filterIndustry, filterDate, followUpOnly]);
 
-  // Stable renderItem — receives only stable refs; no new closures per call.
   const renderItem = useCallback(({ item }) => (
-    <LeadRow
-      item={item}
-      leadId={item.id}
-      onPress={handleLeadPress}
-      onCallStart={handleCallStart}
-    />
+    <LeadRow item={item} leadId={item.id} onPress={handleLeadPress} onCallStart={handleCallStart} />
   ), [handleLeadPress, handleCallStart]);
 
   const keyExtractor = useCallback((item) => item.id, []);
@@ -324,16 +396,21 @@ export default function LeadsScreen() {
     dispatch(setFilterStatus('all'));
     setFilterTemp('All');
     setFilterIndustry('All');
-    setSortBy('date_desc');
+    setFilterDate('all');
+    setSortBy('recent');
     setFollowUpOnly(false);
   }, [dispatch, handleSearchClear]);
 
-  const hasActiveFilters = localSearch || filterStatus !== 'all' || filterTemp !== 'All' || filterIndustry !== 'All' || followUpOnly;
+  const hasActiveFilters = !!(
+    localSearch || filterStatus !== 'all' || filterTemp !== 'All' ||
+    filterIndustry !== 'All' || filterDate !== 'all' || followUpOnly || sortBy !== 'recent'
+  );
 
   return (
     <View style={s.root}>
-      <StatusBar barStyle={dark ? "light-content" : "dark-content"} backgroundColor={colors.surface} />
+      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} backgroundColor={colors.surface} />
 
+      {/* ── Header ─────────────────────────────────────────────────────── */}
       <View style={s.header}>
         <View>
           <Text style={s.headerTitle}>My Leads</Text>
@@ -347,6 +424,15 @@ export default function LeadsScreen() {
         </View>
       </View>
 
+      {/* ── FIX 3: Sync loading bar — visible even when list has data ───── */}
+      {loading && (
+        <View style={s.syncBar}>
+          <ActivityIndicator size="small" color={colors.blue} />
+          <Text style={s.syncTxt}>Syncing leads…</Text>
+        </View>
+      )}
+
+      {/* ── Follow-up banner ────────────────────────────────────────────── */}
       {followUpOnly && (
         <TouchableOpacity style={s.followUpBanner} onPress={clearAllFilters} activeOpacity={0.8}>
           <Icon name="calendar-clock" size={14} color={colors.amber} />
@@ -355,6 +441,7 @@ export default function LeadsScreen() {
         </TouchableOpacity>
       )}
 
+      {/* ── Search bar ──────────────────────────────────────────────────── */}
       <View style={s.searchRow}>
         <View style={s.searchBox}>
           <Icon name="magnify" size={16} color={colors.textMuted} style={s.searchIcon} />
@@ -371,85 +458,58 @@ export default function LeadsScreen() {
             </TouchableOpacity>
           ) : null}
         </View>
-        <TouchableOpacity
-          style={[s.iconBtn, showFilters && s.iconBtnActive]}
-          onPress={() => setShowFilters(!showFilters)}
-        >
-          <Icon name="filter-variant" size={20} color={showFilters ? colors.blue : colors.textMuted} />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[s.iconBtn, showSort && s.iconBtnActive]}
-          onPress={() => setShowSort(!showSort)}
-        >
-          <Icon name="sort" size={20} color={showSort ? colors.blue : colors.textMuted} />
-        </TouchableOpacity>
+        {hasActiveFilters && (
+          <TouchableOpacity style={s.clearBtn} onPress={clearAllFilters}>
+            <Text style={s.clearBtnTxt}>Clear</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
-      {showFilters && (
-        <View style={s.filterArea}>
-          <Text style={s.filterGroupLabel}>STATUS</Text>
-          <View style={s.filterRow}>
-            {STATUS_FILTERS.map(f => (
-              <TouchableOpacity
-                key={f}
-                style={[s.chip, filterStatus === f && s.chipActive]}
-                onPress={() => dispatch(setFilterStatus(f))}
-              >
-                <Text style={[s.chipTxt, filterStatus === f && s.chipTxtActive]}>
-                  {f === 'all' ? 'All' : f}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <Text style={[s.filterGroupLabel, s.filterGroupLabelTop]}>LEAD QUALITY</Text>
-          <View style={s.filterRow}>
-            {['All', 'Hot', 'Warm', 'Cold'].map(q => (
-              <TouchableOpacity
-                key={q}
-                style={[s.chip, filterTemp === q && s.chipActive]}
-                onPress={() => setFilterTemp(q)}
-              >
-                <Text style={[s.chipTxt, filterTemp === q && s.chipTxtActive]}>{q}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <Text style={[s.filterGroupLabel, s.filterGroupLabelTop]}>INDUSTRY</Text>
-          <View style={s.filterRow}>
-            {INDUSTRY_FILTERS.map(ind => (
-              <TouchableOpacity
-                key={ind}
-                style={[s.chip, filterIndustry === ind && s.chipActive]}
-                onPress={() => setFilterIndustry(ind)}
-              >
-                <Text style={[s.chipTxt, filterIndustry === ind && s.chipTxtActive]}>{ind}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          {hasActiveFilters && (
-            <TouchableOpacity onPress={clearAllFilters} style={s.clearBtn}>
-              <Text style={s.clearBtnTxt}>✕ Clear all filters</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-      )}
+      {/* ── FIX 2: Inline filter dropdowns (always visible, no icon needed) */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={s.filterScroll}
+        contentContainerStyle={s.filterScrollContent}
+      >
+        <FilterDropdown
+          label="Status"
+          value={filterStatus}
+          options={STATUS_FILTERS}
+          onChange={(v) => { dispatch(setFilterStatus(v)); setFollowUpOnly(false); }}
+          colors={colors}
+        />
+        <FilterDropdown
+          label="Date"
+          value={filterDate}
+          options={DATE_FILTERS}
+          onChange={setFilterDate}
+          colors={colors}
+        />
+        <FilterDropdown
+          label="Quality"
+          value={filterTemp}
+          options={QUALITY_FILTERS}
+          onChange={setFilterTemp}
+          colors={colors}
+        />
+        <FilterDropdown
+          label="Industry"
+          value={filterIndustry}
+          options={INDUSTRY_FILTERS}
+          onChange={setFilterIndustry}
+          colors={colors}
+        />
+        <FilterDropdown
+          label="Sort"
+          value={sortBy}
+          options={SORT_OPTIONS}
+          onChange={setSortBy}
+          colors={colors}
+        />
+      </ScrollView>
 
-      {showSort && (
-        <View style={s.filterArea}>
-          <Text style={s.filterGroupLabel}>SORT BY</Text>
-          <View style={s.filterRow}>
-            {SORT_OPTIONS.map(opt => (
-              <TouchableOpacity
-                key={opt.value}
-                style={[s.chip, sortBy === opt.value && s.chipActive]}
-                onPress={() => { setSortBy(opt.value); setShowSort(false); }}
-              >
-                <Text style={[s.chipTxt, sortBy === opt.value && s.chipTxtActive]}>{opt.label}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-      )}
-
+      {/* ── Lead list ───────────────────────────────────────────────────── */}
       <FlatList
         data={displayed}
         keyExtractor={keyExtractor}
@@ -472,9 +532,6 @@ export default function LeadsScreen() {
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
           loading ? (
-            // Show a clear loading state during the fetch (the first load can
-            // take 30–60s while the free-tier backend wakes from cold start).
-            // Without this the screen showed "No leads yet" and looked frozen.
             <View style={s.empty}>
               <ActivityIndicator size="large" color={colors.blue} />
               <Text style={s.emptyTitle}>Loading leads…</Text>
@@ -492,8 +549,8 @@ export default function LeadsScreen() {
                   : 'Your assigned leads appear here'}
               </Text>
               {hasActiveFilters && (
-                <TouchableOpacity onPress={clearAllFilters} style={[s.clearBtn, s.clearBtnMt]}>
-                  <Text style={s.clearBtnTxt}>Clear filters</Text>
+                <TouchableOpacity onPress={clearAllFilters} style={s.clearBtnCenter}>
+                  <Text style={s.clearBtnTxt}>Clear all filters</Text>
                 </TouchableOpacity>
               )}
             </View>
@@ -511,71 +568,70 @@ function Separator() {
 }
 
 function createStyles(colors) {
-return StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.bg },
-  header: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 20, paddingTop: 52, paddingBottom: 14,
-    backgroundColor: colors.surface,
-    borderBottomWidth: 1, borderBottomColor: colors.border,
-  },
-  headerTitle:    { fontSize: FONT.xl, fontWeight: '800', color: colors.textPrimary },
-  headerCountWrap: {
-    backgroundColor: colors.surfaceAlt, borderRadius: RADIUS.full,
-    paddingHorizontal: 10, paddingVertical: 3, alignSelf: 'flex-start', marginTop: 2,
-  },
-  headerCount:  { fontSize: FONT.xs, color: colors.textMuted, fontWeight: '600' },
-  securityNote: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  securityTxt:  { fontSize: 10, color: colors.textMuted, fontWeight: '600' },
-  searchRow:   { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
-  followUpBanner:    { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 10, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.amberBg, borderWidth: 1, borderColor: colors.amber + '55' },
-  followUpBannerTxt: { flex: 1, fontSize: FONT.sm, fontWeight: '600', color: colors.amberLight },
-  searchBox:   {
-    flex: 1, flexDirection: 'row', alignItems: 'center',
-    backgroundColor: colors.surface, borderRadius: RADIUS.md,
-    paddingHorizontal: 14, height: 44, borderWidth: 1, borderColor: colors.border,
-  },
-  searchIcon:  { marginRight: 8 },
-  searchInput: { flex: 1, color: colors.textPrimary, fontSize: FONT.base },
-  iconBtn:     {
-    width: 44, height: 44, backgroundColor: colors.surface, borderRadius: RADIUS.md,
-    alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border,
-  },
-  iconBtnActive: { borderColor: colors.blue, backgroundColor: colors.blueBg },
-  filterArea:       { paddingHorizontal: 16, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: colors.border },
-  filterGroupLabel: { fontSize: FONT.xs, fontWeight: '700', color: colors.textMuted, letterSpacing: 1, marginBottom: 6 },
-  filterGroupLabelTop: { marginTop: 10 },
-  filterRow:        { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip:             { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: colors.surface, borderRadius: RADIUS.full, borderWidth: 1, borderColor: colors.border },
-  chipActive:    { backgroundColor: colors.blueBg, borderColor: colors.blue },
-  chipTxt:       { color: colors.textSec, fontSize: FONT.sm, fontWeight: '600' },
-  chipTxtActive: { color: colors.blueLight },
-  clearBtn:      { marginTop: 8, alignSelf: 'flex-start' },
-  clearBtnMt:    { marginTop: 16 },
-  clearBtnTxt:   { fontSize: FONT.sm, color: colors.red, fontWeight: '600' },
-  listContent: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 24 },
-  leadCard: {
-    backgroundColor: colors.surface, borderRadius: RADIUS.lg, padding: 14,
-    flexDirection: 'row', alignItems: 'center',
-    borderWidth: 1, borderColor: colors.border, gap: 12,
-  },
-  avatar:       { width: 44, height: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  avatarTxt:    { fontSize: 13, fontWeight: '800' },
-  leadInfo:     { flex: 1, minWidth: 0 },
-  leadNameRow:  { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 2 },
-  leadName:     { fontSize: FONT.md, fontWeight: '700', color: colors.textPrimary, flexShrink: 1 },
-  reassignBadge:{ fontSize: FONT.xs, color: colors.purple, fontWeight: '700' },
-  phoneRow:     { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
-  phoneIcon:    { marginRight: 4 },
-  leadPhone:    { fontSize: FONT.sm, color: colors.textMuted, fontFamily: 'monospace', letterSpacing: 1 },
-  tagRow:       { flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginBottom: 4 },
-  leadCampaign: { fontSize: FONT.xs, color: colors.textSec, marginTop: 2 },
-  remarkRow:    { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
-  remarkIcon:   { marginRight: 4 },
-  remark:       { fontSize: FONT.xs, color: colors.textSec, fontStyle: 'italic', flex: 1 },
-  sep:          { height: 8 },
-  empty:      { alignItems: 'center', paddingTop: 80 },
-  emptyTitle: { fontSize: 17, fontWeight: '700', color: colors.textSec, marginTop: 14 },
-  emptySub:   { fontSize: FONT.base, color: colors.textMuted, marginTop: 5, textAlign: 'center', paddingHorizontal: 32 },
-});
+  return StyleSheet.create({
+    root: { flex: 1, backgroundColor: colors.bg },
+
+    // Header
+    header: {
+      flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+      paddingHorizontal: 20, paddingTop: 52, paddingBottom: 14,
+      backgroundColor: colors.surface,
+      borderBottomWidth: 1, borderBottomColor: colors.border,
+    },
+    headerTitle:     { fontSize: FONT.xl, fontWeight: '800', color: colors.textPrimary },
+    headerCountWrap: { backgroundColor: colors.surfaceAlt, borderRadius: RADIUS.full, paddingHorizontal: 10, paddingVertical: 3, alignSelf: 'flex-start', marginTop: 2 },
+    headerCount:     { fontSize: FONT.xs, color: colors.textMuted, fontWeight: '600' },
+    securityNote:    { flexDirection: 'row', alignItems: 'center', gap: 4 },
+    securityTxt:     { fontSize: 10, color: colors.textMuted, fontWeight: '600' },
+
+    // FIX 3: Sync loading bar
+    syncBar: {
+      flexDirection: 'row', alignItems: 'center', gap: 8,
+      paddingHorizontal: 16, paddingVertical: 6,
+      backgroundColor: colors.blueBg,
+      borderBottomWidth: 1, borderBottomColor: colors.blue + '30',
+    },
+    syncTxt: { fontSize: FONT.xs, color: colors.blueLight, fontWeight: '600' },
+
+    // Follow-up banner
+    followUpBanner:    { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 10, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.amberBg, borderWidth: 1, borderColor: colors.amber + '55' },
+    followUpBannerTxt: { flex: 1, fontSize: FONT.sm, fontWeight: '600', color: colors.amberLight },
+
+    // Search row
+    searchRow:   { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
+    searchBox:   { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderRadius: RADIUS.md, paddingHorizontal: 14, height: 44, borderWidth: 1, borderColor: colors.border },
+    searchIcon:  { marginRight: 8 },
+    searchInput: { flex: 1, color: colors.textPrimary, fontSize: FONT.base },
+
+    // Clear button (next to search)
+    clearBtn:    { paddingHorizontal: 10, paddingVertical: 8 },
+    clearBtnTxt: { fontSize: FONT.sm, color: colors.red, fontWeight: '700' },
+    clearBtnCenter: { marginTop: 16, alignSelf: 'center' },
+
+    // FIX 2: Filter dropdown row — no maxHeight so pills are fully visible
+    filterScroll:        { borderBottomWidth: 1, borderBottomColor: colors.border },
+    filterScrollContent: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
+
+    // Lead list
+    listContent: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 24 },
+    leadCard:    { backgroundColor: colors.surface, borderRadius: RADIUS.lg, padding: 14, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: colors.border, gap: 12 },
+    avatar:      { width: 44, height: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+    avatarTxt:   { fontSize: 13, fontWeight: '800' },
+    leadInfo:    { flex: 1, minWidth: 0 },
+    leadNameRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 2 },
+    leadName:    { fontSize: FONT.md, fontWeight: '700', color: colors.textPrimary, flexShrink: 1 },
+    reassignBadge: { fontSize: FONT.xs, color: colors.purple, fontWeight: '700' },
+    phoneRow:    { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
+    phoneIcon:   { marginRight: 4 },
+    leadPhone:   { fontSize: FONT.sm, color: colors.textMuted, fontFamily: 'monospace', letterSpacing: 1 },
+    tagRow:      { flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginBottom: 4 },
+    leadCampaign:{ fontSize: FONT.xs, color: colors.textSec, marginTop: 2 },
+    remarkRow:   { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
+    remarkIcon:  { marginRight: 4 },
+    remark:      { fontSize: FONT.xs, color: colors.textSec, fontStyle: 'italic', flex: 1 },
+    sep:         { height: 8 },
+    empty:       { alignItems: 'center', paddingTop: 80 },
+    emptyTitle:  { fontSize: 17, fontWeight: '700', color: colors.textSec, marginTop: 14 },
+    emptySub:    { fontSize: FONT.base, color: colors.textMuted, marginTop: 5, textAlign: 'center', paddingHorizontal: 32 },
+  });
 }

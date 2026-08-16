@@ -282,7 +282,15 @@ export const selectFilteredLeads = createSelector(
         (lead.mobile   || '').includes(q) ||
         (lead.email    || '').toLowerCase().includes(q) ||
         (lead.campaign || '').toLowerCase().includes(q);
-      const matchStatus = filterStatus === 'all' || lead.status === filterStatus;
+      // FIX: "New" used to match the literal backend status string, which is
+      // the default for almost every lead and doesn't mean "not yet worked".
+      // Now mirrors isNotContacted() below — zero call history — so this
+      // filter, the Dashboard's "New Leads" KPI, and the deep-link from its
+      // card all agree on what "New" means.
+      const matchStatus =
+        filterStatus === 'all' ? true :
+        filterStatus === 'New' ? isNotContacted(lead) :
+        lead.status === filterStatus;
       return matchSearch && matchStatus;
     });
   },
@@ -291,6 +299,61 @@ export const selectFilteredLeads = createSelector(
 export function isNotContacted(lead) {
   if (!lead) return false;
   return !lead.callHistoryCount && !lead.lastCalledAt;
+}
+
+// ── Shared follow-up logic ────────────────────────────────────────────────
+// Previously duplicated in DashboardScreen.js (full auto-follow-up logic)
+// AND LeadsScreen.js (a simplified version that only checked the explicit
+// followUpDate field). That mismatch was the root cause of the "Followups"
+// card showing a count > 0 on the Dashboard but the Leads screen it deep-links
+// to showing an empty list — the two screens disagreed on which leads counted
+// as "due". Both screens now import isFollowUpDue from here so they can never
+// drift apart again.
+//
+// Works out the follow-up date that actually governs a lead:
+//   • If an agent explicitly set followUpDate, that wins (auto: false).
+//   • Otherwise, a lead that's still "New" (not yet called) or "In Progress"
+//     automatically becomes a follow-up the day AFTER it was last touched —
+//     an untouched lead should never just sit there with no follow-up date
+//     and quietly fall off everyone's radar. Basis = last call time if the
+//     agent has called before, else the lead's creation date. (auto: true)
+export function getEffectiveFollowUp(lead) {
+  if (lead?.followUpDate) {
+    const d = new Date(lead.followUpDate);
+    return isNaN(d.getTime()) ? null : { date: d, auto: false };
+  }
+  if (isNotContacted(lead) || lead?.status === 'In Progress') {
+    const basis = lead.lastCalledAt || lead._raw_date || lead.date;
+    if (!basis) return null;
+    const b = new Date(basis);
+    if (isNaN(b.getTime())) return null;
+    const due = new Date(b);
+    due.setDate(due.getDate() + 1);
+    due.setHours(0, 0, 0, 0);
+    return { date: due, auto: true };
+  }
+  return null;
+}
+
+// Returns true when a lead's effective follow-up (explicit or auto-assigned,
+// see getEffectiveFollowUp above) is today or earlier.
+export function isFollowUpDue(lead) {
+  const info = getEffectiveFollowUp(lead);
+  if (!info) return false;
+  const endOfToday = new Date();
+  endOfToday.setHours(23, 59, 59, 999);
+  return info.date.getTime() <= endOfToday.getTime();
+}
+
+// Returns true when a lead's remark/call history was updated within the
+// given window (default 24h). Powers the Leads screen's "Recent Remark" filter.
+export function hasRecentRemark(lead, windowMs = 24 * 60 * 60 * 1000) {
+  if (!lead?.remark) return false;
+  const basis = lead.lastCalledAt || lead._raw_date || lead.date;
+  if (!basis) return false;
+  const t = new Date(basis).getTime();
+  if (isNaN(t)) return false;
+  return Date.now() - t <= windowMs;
 }
 
 // Helper for LeadDetailScreen: get the full lead (with callHistory) from cache.
