@@ -4,12 +4,21 @@
 //      navigation. Fixed by calling navigation.setParams({ followUpOnly: false,
 //      filterStatus: null }) after applying params so re-visiting the tab never
 //      re-applies a stale param.
-//   2. Replaced icon buttons (filter/sort) with always-visible inline dropdowns —
-//      Status, Quality, Industry, Sort all show as a horizontal scrollable row
-//      of picker dropdowns directly below the search bar. No hidden panel.
+//   2. Filter pills now wrap onto multiple lines (flexWrap) below the search
+//      bar instead of sitting in a horizontal ScrollView — previously extra
+//      filters (and the new Source filter) could scroll off-screen and go
+//      unnoticed. Now every filter is always visible without scrolling.
 //   3. Loading indicator during background sync — a slim blue bar appears at the
 //      top of the list while fetchLeads/fetchLeadsDelta is in flight, even when
 //      the list already has data (previously only showed on empty list).
+//   4. CRASH FIX (earlier revision) — removed a half-built custom date-range
+//      block that referenced undeclared state and a missing picker component.
+//   5. Custom date range — real implementation this time. A lightweight
+//      SimpleCalendar (plain View/Text, no new dependency) lets the user pick
+//      a start then end date; 'Custom Range' is now a real DATE_FILTERS option.
+//   6. Source filter — new dropdown driven by the actual `source` values
+//      present in the loaded leads (csv, meta, excel, manual, etc.), computed
+//      dynamically so it never goes stale as new sources get added.
 
 import React, { useEffect, useCallback, useMemo, useState, memo, useRef } from 'react';
 import {
@@ -51,16 +60,19 @@ const SORT_OPTIONS = [
   { label: 'By Status',   value: 'status'    },
 ];
 const DATE_FILTERS = [
-  { label: 'All Time',   value: 'all'   },
-  { label: 'Today',      value: 'today' },
-  { label: 'This Week',  value: 'week'  },
-  { label: 'This Month', value: 'month' },
+  { label: 'All Time',     value: 'all'    },
+  { label: 'Today',        value: 'today'  },
+  { label: 'This Week',    value: 'week'   },
+  { label: 'This Month',   value: 'month'  },
+  { label: 'Custom Range', value: 'custom' },
 ];
+
+const DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
 // Returns start-of-day for a date
 function startOf(d) { const r = new Date(d); r.setHours(0,0,0,0); return r; }
 function endOf(d)   { const r = new Date(d); r.setHours(23,59,59,999); return r; }
-function isInDateRange(lead, range) {
+function isInDateRange(lead, range, customFrom, customTo) {
   if (range === 'all') return true;
   const ts = lead._raw_date || 0;
   if (!ts) return false;
@@ -75,8 +87,113 @@ function isInDateRange(lead, range) {
     const start = new Date(now.getFullYear(), now.getMonth(), 1);
     return ts >= start && ts <= endOf(now);
   }
+  if (range === 'custom') {
+    if (!customFrom) return true; // range not fully chosen yet — don't filter anything out
+    const from = startOf(customFrom);
+    const to   = customTo ? endOf(customTo) : endOf(customFrom);
+    return ts >= from && ts <= to;
+  }
   return true;
 }
+
+function daysInMonth(year, month) { return new Date(year, month + 1, 0).getDate(); }
+
+// ── Lightweight calendar for the custom date-range picker ──────────────────
+// No external date-picker library required — just Views/Text and state.
+function SimpleCalendar({ initialDate, minDate, colors, onSelect }) {
+  const base = initialDate || new Date();
+  const [viewYear,  setViewYear]  = useState(base.getFullYear());
+  const [viewMonth, setViewMonth] = useState(base.getMonth());
+
+  const firstDow   = new Date(viewYear, viewMonth, 1).getDay();
+  const totalDays  = daysInMonth(viewYear, viewMonth);
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push(null);
+  for (let d = 1; d <= totalDays; d++) cells.push(d);
+
+  const goPrev = () => {
+    if (viewMonth === 0) { setViewMonth(11); setViewYear(y => y - 1); }
+    else setViewMonth(m => m - 1);
+  };
+  const goNext = () => {
+    if (viewMonth === 11) { setViewMonth(0); setViewYear(y => y + 1); }
+    else setViewMonth(m => m + 1);
+  };
+
+  const monthLabel = new Date(viewYear, viewMonth, 1)
+    .toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+
+  const minStart = minDate ? startOf(minDate) : null;
+  const isDisabled = (d) => {
+    if (!minStart) return false;
+    return new Date(viewYear, viewMonth, d) < minStart;
+  };
+  const isSelected = (d) => {
+    if (!initialDate) return false;
+    return d === initialDate.getDate() && viewMonth === initialDate.getMonth() && viewYear === initialDate.getFullYear();
+  };
+
+  return (
+    <View>
+      <View style={cal.header}>
+        <TouchableOpacity onPress={goPrev} style={cal.navBtn}>
+          <Icon name="chevron-left" size={22} color={colors.textPrimary} />
+        </TouchableOpacity>
+        <Text style={[cal.monthLabel, { color: colors.textPrimary }]}>{monthLabel}</Text>
+        <TouchableOpacity onPress={goNext} style={cal.navBtn}>
+          <Icon name="chevron-right" size={22} color={colors.textPrimary} />
+        </TouchableOpacity>
+      </View>
+      <View style={cal.dowRow}>
+        {DAY_LABELS.map((lbl, i) => (
+          <View key={i} style={cal.dowCell}>
+            <Text style={[cal.dowTxt, { color: colors.textMuted }]}>{lbl}</Text>
+          </View>
+        ))}
+      </View>
+      <View style={cal.grid}>
+        {cells.map((d, i) => {
+          if (d === null) return <View key={i} style={cal.dayCell} />;
+          const disabled = isDisabled(d);
+          const selected = isSelected(d);
+          return (
+            <TouchableOpacity
+              key={i}
+              disabled={disabled}
+              onPress={() => onSelect(new Date(viewYear, viewMonth, d))}
+              style={cal.dayCell}
+              activeOpacity={0.7}
+            >
+              <View style={[
+                cal.dayCircle,
+                selected && { backgroundColor: colors.blue },
+              ]}>
+                <Text style={[
+                  cal.dayTxt,
+                  { color: disabled ? colors.border : (selected ? '#FFFFFF' : colors.textPrimary) },
+                ]}>
+                  {d}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+const cal = StyleSheet.create({
+  header:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
+  navBtn:     { padding: 8 },
+  monthLabel: { fontSize: 15, fontWeight: '700' },
+  dowRow:     { flexDirection: 'row', marginBottom: 4 },
+  dowCell:    { width: `${100 / 7}%`, alignItems: 'center', paddingVertical: 4 },
+  dowTxt:     { fontSize: 11, fontWeight: '700' },
+  grid:       { flexDirection: 'row', flexWrap: 'wrap' },
+  dayCell:    { width: `${100 / 7}%`, aspectRatio: 1, alignItems: 'center', justifyContent: 'center' },
+  dayCircle:  { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  dayTxt:     { fontSize: 13, fontWeight: '600' },
+});
 
 function isFollowUpDue(lead) {
   if (!lead?.followUpDate) return false;
@@ -138,12 +255,15 @@ function FilterDropdown({ label, value, options, onChange, dark, colors }) {
     });
   };
 
-  // Explicit per-theme colors — never rely on theme resolution for pill text
-  const pillBg  = isActive ? colors.blueBg   : (dark ? '#1E2130' : '#EEF0F7');
-  const pillBd  = isActive ? colors.blue      : (dark ? '#3A3F55' : '#BFC5D6');
-  const lblClr  = isActive ? colors.blueLight : (dark ? '#9DA3BB' : '#4A5270');
-  const valClr  = isActive ? colors.blueLight : (dark ? '#F0F2FA' : '#111827');
-  const chvClr  = isActive ? colors.blueLight : (dark ? '#9DA3BB' : '#6B7280');
+  // Explicit, hardcoded per-theme colors — never rely on theme resolution for
+  // pill text, and never blend into the screen background. Bumped contrast
+  // (lighter fill, thicker border, brighter text) so pills read clearly at a
+  // glance instead of looking like empty outlines.
+  const pillBg  = isActive ? colors.blueBg   : (dark ? '#2A2F45' : '#EEF0F7');
+  const pillBd  = isActive ? colors.blue      : (dark ? '#4C5270' : '#BFC5D6');
+  const lblClr  = isActive ? colors.blueLight : (dark ? '#B7BCD4' : '#4A5270');
+  const valClr  = isActive ? colors.blueLight : (dark ? '#FFFFFF' : '#111827');
+  const chvClr  = isActive ? colors.blueLight : (dark ? '#B7BCD4' : '#6B7280');
 
   return (
     <>
@@ -193,7 +313,7 @@ function FilterDropdown({ label, value, options, onChange, dark, colors }) {
   );
 }
 const dd = StyleSheet.create({
-  pill:      { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20, borderWidth: 1.5, gap: 2 },
+  pill:      { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 9, borderRadius: 20, borderWidth: 2, gap: 2 },
   pillLabel: { fontSize: 12, fontWeight: '500' },
   pillValue: { fontSize: 12, fontWeight: '800' },
   backdrop:  { ...StyleSheet.absoluteFillObject },
@@ -300,11 +420,35 @@ export default function LeadsScreen() {
   const [sortBy,         setSortBy]         = useState('recent');
   const [filterTemp,     setFilterTemp]     = useState('All');
   const [filterIndustry, setFilterIndustry] = useState('All');
+  const [filterSource,   setFilterSource]   = useState('All');
   const [filterDate,     setFilterDate]     = useState('all');
   const [followUpOnly,   setFollowUpOnly]   = useState(false);
 
+  // Custom date-range picker state
+  const [customFrom,         setCustomFrom]         = useState(null);
+  const [customTo,           setCustomTo]           = useState(null);
+  const [showCustomPicker,   setShowCustomPicker]   = useState(false);
+  const [customPickerTarget, setCustomPickerTarget] = useState('from'); // 'from' | 'to'
+
   const [localSearch, setLocalSearch] = useState(searchQuery);
   const debounceRef = useRef(null);
+
+  // Source options built from whatever's actually in the data (csv, meta,
+  // excel, manual, etc.) so this never goes stale as new sources appear.
+  const sourceOptions = useMemo(() => {
+    const seen = new Set();
+    let hasUntagged = false;
+    allItems.forEach(l => {
+      if (l.source) seen.add(l.source);
+      else hasUntagged = true;
+    });
+    const opts = Array.from(seen).sort().map(v => ({
+      value: v,
+      label: v.charAt(0).toUpperCase() + v.slice(1),
+    }));
+    if (hasUntagged) opts.push({ value: 'Untagged', label: 'Untagged' });
+    return [{ value: 'All', label: 'All' }, ...opts];
+  }, [allItems]);
 
   // ── FIX 1: Stale fetch guard ──────────────────────────────────────────────
   const STALE_MS = 5 * 60 * 1000;
@@ -373,7 +517,12 @@ export default function LeadsScreen() {
         ? res.filter(l => !l.industry)
         : res.filter(l => l.industry === filterIndustry);
     }
-    if (filterDate !== 'all')  res = res.filter(l => isInDateRange(l, filterDate));
+    if (filterDate !== 'all')  res = res.filter(l => isInDateRange(l, filterDate, customFrom, customTo));
+    if (filterSource !== 'All') {
+      res = filterSource === 'Untagged'
+        ? res.filter(l => !l.source)
+        : res.filter(l => l.source === filterSource);
+    }
     // Sort
     if (sortBy === 'recent') {
       // Most recently called or created — uses _raw_date which is max(createdAt, lastCalledAt)
@@ -392,7 +541,7 @@ export default function LeadsScreen() {
       res = [...res].sort((a, b) => (a.status || '').localeCompare(b.status || ''));
     }
     return res;
-  }, [filteredLeads, allItems, sortBy, filterTemp, filterIndustry, filterDate, followUpOnly]);
+  }, [filteredLeads, allItems, sortBy, filterTemp, filterIndustry, filterSource, filterDate, customFrom, customTo, followUpOnly]);
 
   const renderItem = useCallback(({ item }) => (
     <LeadRow item={item} leadId={item.id} onPress={handleLeadPress} onCallStart={handleCallStart} />
@@ -405,15 +554,25 @@ export default function LeadsScreen() {
     dispatch(setFilterStatus('all'));
     setFilterTemp('All');
     setFilterIndustry('All');
+    setFilterSource('All');
     setFilterDate('all');
+    setCustomFrom(null);
+    setCustomTo(null);
     setSortBy('recent');
     setFollowUpOnly(false);
   }, [dispatch, handleSearchClear]);
 
   const hasActiveFilters = !!(
     localSearch || filterStatus !== 'all' || filterTemp !== 'All' ||
-    filterIndustry !== 'All' || filterDate !== 'all' || followUpOnly || sortBy !== 'recent'
+    filterIndustry !== 'All' || filterSource !== 'All' || filterDate !== 'all' ||
+    followUpOnly || sortBy !== 'recent'
   );
+
+  // Label shown on the Date pill when a custom range is active
+  const customDateLabel = customFrom
+    ? customFrom.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })
+      + (customTo ? ' – ' + customTo.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : ' – …')
+    : 'Custom Range';
 
   return (
     <View style={s.root}>
@@ -432,6 +591,60 @@ export default function LeadsScreen() {
           <Text style={s.securityTxt}>Numbers masked</Text>
         </View>
       </View>
+
+      {/* ── Custom date-range picker ──────────────────────────────────── */}
+      {showCustomPicker && (
+        <RNModal visible transparent animationType="slide" onRequestClose={() => setShowCustomPicker(false)}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
+            <View style={{
+              backgroundColor: colors.surface,
+              borderTopLeftRadius: 20, borderTopRightRadius: 20,
+              padding: 16, paddingBottom: 32,
+            }}>
+              <Text style={{ fontSize: 16, fontWeight: '700', color: colors.textPrimary, marginBottom: 4 }}>
+                {customPickerTarget === 'from' ? 'Select Start Date' : 'Select End Date'}
+              </Text>
+              {customPickerTarget === 'to' && customFrom && (
+                <Text style={{ fontSize: 13, color: colors.textSec, marginBottom: 8 }}>
+                  From: {customFrom.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                </Text>
+              )}
+              <SimpleCalendar
+                initialDate={customPickerTarget === 'to' ? customTo : customFrom}
+                minDate={customPickerTarget === 'to' ? customFrom : undefined}
+                colors={colors}
+                onSelect={(picked) => {
+                  if (customPickerTarget === 'from') {
+                    setCustomFrom(picked);
+                    setCustomTo(null);
+                    setCustomPickerTarget('to');
+                  } else {
+                    const finalTo = customFrom && picked < customFrom ? customFrom : picked;
+                    setCustomTo(finalTo);
+                    setShowCustomPicker(false);
+                    setFilterDate('custom');
+                  }
+                }}
+              />
+              <TouchableOpacity
+                style={{ marginTop: 8, alignSelf: 'center', padding: 10 }}
+                onPress={() => {
+                  if (customPickerTarget === 'to') {
+                    setCustomPickerTarget('from');
+                  } else {
+                    setShowCustomPicker(false);
+                    if (filterDate !== 'custom') setFilterDate('all');
+                  }
+                }}
+              >
+                <Text style={{ color: colors.red, fontWeight: '600', fontSize: 14 }}>
+                  {customPickerTarget === 'to' ? 'Back' : 'Cancel'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </RNModal>
+      )}
 
       {/* ── FIX 3: Sync loading bar — visible even when list has data ───── */}
       {loading && (
@@ -474,13 +687,9 @@ export default function LeadsScreen() {
         )}
       </View>
 
-      {/* ── FIX 2: Inline filter dropdowns (always visible, no icon needed) */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={s.filterScroll}
-        contentContainerStyle={s.filterScrollContent}
-      >
+      {/* ── FIX 2: Inline filter dropdowns — wrapping row so every filter is
+          always visible on screen, nothing hidden behind a horizontal scroll */}
+      <View style={s.filterWrap}>
         <FilterDropdown
           label="Status"
           value={filterStatus}
@@ -490,9 +699,18 @@ export default function LeadsScreen() {
         />
         <FilterDropdown
           label="Date"
-          value={filterDate}
+          value={filterDate === 'custom' ? customDateLabel : filterDate}
           options={DATE_FILTERS}
-          onChange={setFilterDate}
+          onChange={(v) => {
+            if (v === 'custom') {
+              setCustomPickerTarget('from');
+              setShowCustomPicker(true);
+            } else {
+              setFilterDate(v);
+              setCustomFrom(null);
+              setCustomTo(null);
+            }
+          }}
           dark={dark} colors={colors}
         />
         <FilterDropdown
@@ -510,13 +728,20 @@ export default function LeadsScreen() {
           dark={dark} colors={colors}
         />
         <FilterDropdown
+          label="Source"
+          value={filterSource}
+          options={sourceOptions}
+          onChange={setFilterSource}
+          dark={dark} colors={colors}
+        />
+        <FilterDropdown
           label="Sort"
           value={sortBy}
           options={SORT_OPTIONS}
           onChange={setSortBy}
           dark={dark} colors={colors}
         />
-      </ScrollView>
+      </View>
 
       {/* ── Lead list ───────────────────────────────────────────────────── */}
       <FlatList
@@ -617,9 +842,14 @@ function createStyles(colors) {
     clearBtnTxt: { fontSize: FONT.sm, color: colors.red, fontWeight: '700' },
     clearBtnCenter: { marginTop: 16, alignSelf: 'center' },
 
-    // FIX 2: Filter dropdown row — no maxHeight so pills are fully visible
-    filterScroll:        { backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
-    filterScrollContent: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
+    // FIX 2: Filter dropdown row — wraps onto multiple lines so nothing is
+    // ever hidden off-screen; no fixed height, grows with content.
+    filterWrap: {
+      flexDirection: 'row', flexWrap: 'wrap',
+      paddingHorizontal: 16, paddingTop: 10, paddingBottom: 12, gap: 8,
+      backgroundColor: colors.bg,
+      borderBottomWidth: 1, borderBottomColor: colors.border,
+    },
 
     // Lead list
     listContent: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 24 },
