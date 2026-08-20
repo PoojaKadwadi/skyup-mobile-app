@@ -731,12 +731,20 @@ export default function AttendanceWidget() {
 
   const handleBreakEnd = useCallback(async () => {
     try {
-      const r = await api.post('/attendance/break/end');
-      setRecord(r.data);
+      if (record?.status === 'idle') {
+        // idle = auto-break with no activeBreakIndex. pingActivity correctly
+        // ends it and sets status back to active.
+        const r = await api.post('/attendance/ping');
+        setRecord(prev => ({ ...prev, status: 'active', ...(r.data || {}) }));
+      } else {
+        // Manually started break — use the proper break/end endpoint.
+        const r = await api.post('/attendance/break/end');
+        setRecord(r.data);
+      }
     } catch (e) {
       Alert.alert('Error', e?.response?.data?.message || e.message);
     }
-  }, []);
+  }, [record?.status]);
 
   // ── Derived display values ────────────────────────────────────────────────
   const { statusStyle, statusLabel, elapsedStr, breakStr, notClockedIn } = useMemo(() => {
@@ -846,7 +854,9 @@ export default function AttendanceWidget() {
     );
   }
 
-  const isOnBreak = record?.status === 'on_break' || record?.status === 'idle';
+  const isOnBreak  = record?.status === 'on_break';
+  const isIdle     = record?.status === 'idle';
+  const showEndBreak = isOnBreak || isIdle;
 
   return (
     <View style={w.card}>
@@ -904,7 +914,7 @@ export default function AttendanceWidget() {
       </View>
 
       <View style={w.btnRow}>
-        {isOnBreak ? (
+        {showEndBreak ? (
           <TouchableOpacity style={[w.btn, w.btnGreen]} onPress={handleBreakEnd}>
             <Icon name="play-circle-outline" size={15} color="#fff" />
             <Text style={w.btnTxt}>End Break</Text>

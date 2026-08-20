@@ -109,43 +109,53 @@ function getQualityCfg(colors) {
 // Uses a Modal overlay for the menu so it's never clipped by the parent
 // ScrollView. The pill measures its own position and renders the menu
 // absolutely on top of everything.
-function FilterDropdown({ label, value, options, onChange, colors }) {
+// FilterDropdown — pill shows "Label: Value" and opens a modal menu.
+// IMPORTANT: Two separate <Text> nodes for label and value.
+// Nested <Text> color inheritance is broken on Android — the inner node
+// rendered transparent. Each node now has its own explicit color.
+// Theme-aware: computes pill bg/border/text per dark flag so pills are
+// visible in BOTH light and dark mode without relying on theme resolution.
+function FilterDropdown({ label, value, options, onChange, dark, colors }) {
   const [open,    setOpen]    = useState(false);
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
   const pillRef = useRef(null);
 
-  const isActive = value && value !== 'all' && value !== 'All' && value !== 'date_desc';
+  // Human-readable label from options list
+  const displayLabel = (() => {
+    if (!value || value === 'all') return 'All';
+    const found = options.find(o => (typeof o === 'object' ? o.value : o) === value);
+    if (!found) return String(value);
+    return typeof found === 'object' ? found.label : found;
+  })();
+
+  const isActive = !!(value && value !== 'all' && value !== 'All' && value !== 'recent');
 
   const openMenu = () => {
-    pillRef.current?.measureInWindow((x, y, _w, h) => {
-      setMenuPos({ top: y + h + 4, left: x });
+    if (!pillRef.current) return;
+    pillRef.current.measureInWindow((x, y, _w, h) => {
+      setMenuPos({ top: y + h + 4, left: Math.max(8, x) });
       setOpen(true);
     });
   };
+
+  // Explicit per-theme colors — never rely on theme resolution for pill text
+  const pillBg  = isActive ? colors.blueBg   : (dark ? '#1E2130' : '#EEF0F7');
+  const pillBd  = isActive ? colors.blue      : (dark ? '#3A3F55' : '#BFC5D6');
+  const lblClr  = isActive ? colors.blueLight : (dark ? '#9DA3BB' : '#4A5270');
+  const valClr  = isActive ? colors.blueLight : (dark ? '#F0F2FA' : '#111827');
+  const chvClr  = isActive ? colors.blueLight : (dark ? '#9DA3BB' : '#6B7280');
 
   return (
     <>
       <TouchableOpacity
         ref={pillRef}
-        style={[
-          dd.pill,
-          { backgroundColor: isActive ? colors.blueBg : colors.surface,
-            borderColor:      isActive ? colors.blue   : colors.border },
-        ]}
+        style={[dd.pill, { backgroundColor: pillBg, borderColor: pillBd }]}
         onPress={openMenu}
-        activeOpacity={0.7}
+        activeOpacity={0.75}
       >
-        <Text style={[dd.pillTxt, { color: isActive ? colors.blueLight : colors.textSec }]}>
-          {label}: <Text style={{ fontWeight: '700' }}>
-            {value === 'all' ? 'All' : value}
-          </Text>
-        </Text>
-        <Icon
-          name={open ? 'chevron-up' : 'chevron-down'}
-          size={13}
-          color={isActive ? colors.blueLight : colors.textMuted}
-          style={{ marginLeft: 2 }}
-        />
+        <Text style={[dd.pillLabel, { color: lblClr }]}>{label}: </Text>
+        <Text style={[dd.pillValue, { color: valClr }]}>{displayLabel}</Text>
+        <Icon name={open ? 'chevron-up' : 'chevron-down'} size={12} color={chvClr} style={{ marginLeft: 2 }} />
       </TouchableOpacity>
 
       <RNModal
@@ -154,16 +164,11 @@ function FilterDropdown({ label, value, options, onChange, colors }) {
         animationType="none"
         onRequestClose={() => setOpen(false)}
       >
-        {/* Tap outside to close */}
-        <TouchableOpacity
-          style={dd.backdrop}
-          activeOpacity={1}
-          onPress={() => setOpen(false)}
-        />
+        <TouchableOpacity style={dd.backdrop} activeOpacity={1} onPress={() => setOpen(false)} />
         <View style={[dd.menu, {
           top: menuPos.top, left: menuPos.left,
           backgroundColor: colors.surface,
-          borderColor: colors.border,
+          borderColor:     colors.border,
         }]}>
           {options.map(opt => {
             const optVal   = typeof opt === 'object' ? opt.value : opt;
@@ -188,12 +193,13 @@ function FilterDropdown({ label, value, options, onChange, colors }) {
   );
 }
 const dd = StyleSheet.create({
-  pill:     { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 7, borderRadius: 20, borderWidth: 1, gap: 3 },
-  pillTxt:  { fontSize: FONT.sm, fontWeight: '500' },
-  backdrop: { ...StyleSheet.absoluteFillObject },
-  menu:     { position: 'absolute', minWidth: 180, borderRadius: 10, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 10 },
-  menuItem: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 11 },
-  menuTxt:  { fontSize: FONT.sm, fontWeight: '500' },
+  pill:      { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20, borderWidth: 1.5, gap: 2 },
+  pillLabel: { fontSize: 12, fontWeight: '500' },
+  pillValue: { fontSize: 12, fontWeight: '800' },
+  backdrop:  { ...StyleSheet.absoluteFillObject },
+  menu:      { position: 'absolute', minWidth: 190, borderRadius: 12, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 14 },
+  menuItem:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12 },
+  menuTxt:   { fontSize: 13, fontWeight: '500' },
 });
 
 function StatusBadge({ status }) {
@@ -286,6 +292,9 @@ export default function LeadsScreen() {
   const s = useMemo(() => createStyles(colors), [colors]);
 
   const filteredLeads = useSelector(selectFilteredLeads);
+  // Unfiltered — used when followUpOnly to bypass Redux filterStatus
+  // (filterStatus='New' uses isNotContacted which hides all called leads)
+  const allItems = useSelector(s => s.leads?.items ?? []);
   const { loading, searchQuery, filterStatus, lastFetchedAt } = useSelector((s) => s.leads);
 
   const [sortBy,         setSortBy]         = useState('recent');
@@ -356,7 +365,7 @@ export default function LeadsScreen() {
   }, [navigation]);
 
   const displayed = useMemo(() => {
-    let res = [...filteredLeads];
+    let res = followUpOnly ? [...allItems] : [...filteredLeads];
     if (followUpOnly)          res = res.filter(isFollowUpDue);
     if (filterTemp !== 'All')  res = res.filter(l => (l.Quality || l.temperature) === filterTemp);
     if (filterIndustry !== 'All') {
@@ -383,7 +392,7 @@ export default function LeadsScreen() {
       res = [...res].sort((a, b) => (a.status || '').localeCompare(b.status || ''));
     }
     return res;
-  }, [filteredLeads, sortBy, filterTemp, filterIndustry, filterDate, followUpOnly]);
+  }, [filteredLeads, allItems, sortBy, filterTemp, filterIndustry, filterDate, followUpOnly]);
 
   const renderItem = useCallback(({ item }) => (
     <LeadRow item={item} leadId={item.id} onPress={handleLeadPress} onCallStart={handleCallStart} />
@@ -477,35 +486,35 @@ export default function LeadsScreen() {
           value={filterStatus}
           options={STATUS_FILTERS}
           onChange={(v) => { dispatch(setFilterStatus(v)); setFollowUpOnly(false); }}
-          colors={colors}
+          dark={dark} colors={colors}
         />
         <FilterDropdown
           label="Date"
           value={filterDate}
           options={DATE_FILTERS}
           onChange={setFilterDate}
-          colors={colors}
+          dark={dark} colors={colors}
         />
         <FilterDropdown
           label="Quality"
           value={filterTemp}
           options={QUALITY_FILTERS}
           onChange={setFilterTemp}
-          colors={colors}
+          dark={dark} colors={colors}
         />
         <FilterDropdown
           label="Industry"
           value={filterIndustry}
           options={INDUSTRY_FILTERS}
           onChange={setFilterIndustry}
-          colors={colors}
+          dark={dark} colors={colors}
         />
         <FilterDropdown
           label="Sort"
           value={sortBy}
           options={SORT_OPTIONS}
           onChange={setSortBy}
-          colors={colors}
+          dark={dark} colors={colors}
         />
       </ScrollView>
 
@@ -609,7 +618,7 @@ function createStyles(colors) {
     clearBtnCenter: { marginTop: 16, alignSelf: 'center' },
 
     // FIX 2: Filter dropdown row — no maxHeight so pills are fully visible
-    filterScroll:        { borderBottomWidth: 1, borderBottomColor: colors.border },
+    filterScroll:        { backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
     filterScrollContent: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
 
     // Lead list

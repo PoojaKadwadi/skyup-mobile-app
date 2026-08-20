@@ -53,7 +53,7 @@ export const _fullLeadCache = new Map();
 // Fields kept in Redux (list screen + notifications only need these).
 const SLIM_FIELDS = new Set([
   'id','name','mobile','primaryPhone','secondaryPhone','email',
-  'source','campaign','industry','status','remark','remarkIsManual',
+  'source','campaign','industry','service','status','remark','remarkIsManual',
   'initialRemark','followUpDate','temperature','Quality','agent',
   'company','reassignCount','invalidStage','isClosed',
   'lastOutcome','lastCalledAt','_raw_date','date',
@@ -129,11 +129,11 @@ export const patchLead = createAsyncThunk(
 
 export const submitCallRemark = createAsyncThunk(
   'leads/submitCallRemark',
-  async ({ leadId, remark, outcome, followUpDate, document, recording, industry }, { rejectWithValue }) => {
+  async ({ leadId, remark, outcome, followUpDate, document, recording, industry, service }, { rejectWithValue }) => {
     try {
-      await addCallRemarkWithAttachments(leadId, { remark, outcome, followUpDate, document, recording, industry });
+      await addCallRemarkWithAttachments(leadId, { remark, outcome, followUpDate, document, recording, industry, service });
       return {
-        leadId, remark, outcome, followUpDate, industry,
+        leadId, remark, outcome, followUpDate, industry, service,
         hasDocument:  !!document,
         hasRecording: !!recording,
       };
@@ -228,7 +228,7 @@ const leadsSlice = createSlice({
     });
 
     builder.addCase(submitCallRemark.fulfilled, (state, action) => {
-      const { leadId, remark, outcome, followUpDate, industry, hasDocument, hasRecording } = action.payload;
+      const { leadId, remark, outcome, followUpDate, industry, service, hasDocument, hasRecording } = action.payload;
 
       // Update the full cache with the new callHistory entry
       if (_fullLeadCache.has(leadId)) {
@@ -243,8 +243,9 @@ const leadsSlice = createSlice({
         _fullLeadCache.set(leadId, {
           ...full,
           remark,
-          ...(followUpDate ? { followUpDate } : {}),
-          ...(industry !== undefined ? { industry } : {}),
+          ...(followUpDate !== undefined ? { followUpDate } : {}),
+          ...(industry    !== undefined ? { industry }    : {}),
+          ...(service     !== undefined ? { service  }    : {}),
           callHistory: [...(full.callHistory || []), newEntry],
         });
       }
@@ -261,6 +262,7 @@ const leadsSlice = createSlice({
           callHistoryCount: (prev.callHistoryCount || 0) + 1,
           ...(followUpDate ? { followUpDate } : {}),
           ...(industry !== undefined ? { industry } : {}),
+          ...(service  !== undefined ? { service  } : {}),
         };
       }
     });

@@ -48,7 +48,7 @@ const SERVICES = [
   'CRM', 'Video Editing', 'Graphic Design', 'Social Media Marketing',
 ];
 
-const OUTCOMES = ['Answered', 'Not Answered', 'Busy', 'Switch Off', 'Call Back Later', 'Interested', 'Not Interested', 'Invalid', 'Client Meeting'];
+const OUTCOMES = ['Answered', 'Not Answered', 'Busy', 'Switch Off', 'Call Back Later', 'Interested', 'Not Interested', 'Invalid', 'Client Meeting', 'status update'];
 
 function maskPhone(phone) {
   if (!phone) return '—';
@@ -1661,9 +1661,9 @@ export default function LeadDetailScreen() {
                 ))}
             </View>
 
-            {/* ── Status Update — agent can update lead status while logging remark ── */}
-            <Text style={[styles.modalLabel, { marginTop: 10 }]}>
-              Update Status <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text>
+            {/* ── Status Update ─────────────────────────────────────────── */}
+            <Text style={[styles.modalLabel, { marginTop: 14 }]}>
+              Update Lead Status <Text style={{ fontWeight: '400', color: colors.textMuted }}>(tap to change)</Text>
             </Text>
             <View style={styles.outcomeRow}>
               {STATUS_OPTIONS.map(s => {
@@ -1692,7 +1692,7 @@ export default function LeadDetailScreen() {
             {/* Industry + Service — only shown for SkyUp Digital Solutions.
                 Values must match templateNameResolver.js so the correct
                 MSG91 nurture template is resolved per lead. */}
-            {lead?.company === NURTURE_COMPANY_ID && (
+            {String(lead?.company || '') === NURTURE_COMPANY_ID && (
               <>
                 <Text style={styles.modalLabel}>Industry <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text></Text>
                 <View style={styles.outcomeRow}>

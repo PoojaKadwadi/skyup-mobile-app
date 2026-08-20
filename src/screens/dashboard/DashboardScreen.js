@@ -265,8 +265,12 @@ export default function DashboardScreen() {
   const [showReport, setShowReport] = React.useState(false);
 
   // Deep-link handlers for the action cards.
-  const goNewLeads  = useCallback(() => navigation.navigate('Leads', { filterStatus: 'New' }), [navigation]);
-  const goFollowups = useCallback(() => navigation.navigate('Leads', { followUpOnly: true }), [navigation]);
+  const goNewLeads    = useCallback(() => navigation.navigate('Leads', { filterStatus: 'New' }),          [navigation]);
+  const goFollowups   = useCallback(() => navigation.navigate('Leads', { followUpOnly: true }),             [navigation]);
+  const goConverted   = useCallback(() => navigation.navigate('Leads', { filterStatus: 'Converted' }),      [navigation]);
+  const goInProgress  = useCallback(() => navigation.navigate('Leads', { filterStatus: 'In Progress' }),    [navigation]);
+  const goAllLeads    = useCallback(() => navigation.navigate('Leads', {}),                                  [navigation]);
+  const goTodayLeads  = useCallback(() => navigation.navigate('Leads', { filterDate: 'today' }),             [navigation]);
   const toggleReport = useCallback(() => setShowReport(v => !v), []);
 
   return (
@@ -338,10 +342,10 @@ export default function DashboardScreen() {
 
         {/* KPI Cards */}
         <View style={styles.kpiGrid}>
-          <KpiCard label="Total Leads"  value={kpi.total}     icon="account-group"    color="#3B82F6" />
-          <KpiCard label="Converted"    value={kpi.converted} icon="check-circle"     color="#22C55E" />
-          <KpiCard label="In Progress"  value={kpi.inProgress}icon="progress-clock"   color="#F59E0B" />
-          <KpiCard label="Today"        value={kpi.todayLeads}icon="calendar-today"   color="#A78BFA" />
+          <KpiCard label="Total Leads"  value={kpi.total}      icon="account-group"  color="#3B82F6" onPress={goAllLeads} />
+          <KpiCard label="Converted"    value={kpi.converted}  icon="check-circle"   color="#22C55E" onPress={goConverted} />
+          <KpiCard label="In Progress"  value={kpi.inProgress} icon="progress-clock" color="#F59E0B" onPress={goInProgress} />
+          <KpiCard label="Today"        value={kpi.todayLeads} icon="calendar-today" color="#A78BFA" onPress={goTodayLeads} />
         </View>
 
         {/* Weekly Bar Chart */}
@@ -416,15 +420,21 @@ function ReportStat({ label, value, color }) {
   );
 }
 
-function KpiCard({ label, value, icon, color }) {
+function KpiCard({ label, value, icon, color, onPress }) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   return (
-    <View style={[styles.kpiCard, { borderLeftColor: color }]}>
+    <TouchableOpacity
+      style={[styles.kpiCard, { borderLeftColor: color }]}
+      onPress={onPress}
+      activeOpacity={onPress ? 0.75 : 1}
+      disabled={!onPress}
+    >
       <Icon name={icon} size={22} color={color} style={{ marginBottom: 6 }} />
       <Text style={styles.kpiValue}>{value}</Text>
       <Text style={styles.kpiLabel}>{label}</Text>
-    </View>
+      {onPress && <Icon name="chevron-right" size={12} color={color + '80'} style={{ position: 'absolute', top: 8, right: 8 }} />}
+    </TouchableOpacity>
   );
 }
 
