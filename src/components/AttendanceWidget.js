@@ -108,16 +108,26 @@ export default function AttendanceWidget() {
   const [requestSending,   setRequestSending]   = useState(false);
   const [requestStatus,    setRequestStatus]    = useState('idle'); // idle|pending|approved|denied
 
-  // ── Ideal time + remark ───────────────────────────────────────────────────
-  // Lets the employee record their planned/ideal working time for the day and
-  // a reason/remark explaining it (e.g. "Client visit, will start at 11"). The
-  // value is shown on the attendance card and persisted to the backend.
-  const [idealTime,       setIdealTime]       = useState('');   // free text e.g. "10:00 AM - 6:00 PM"
-  const [idealRemark,     setIdealRemark]     = useState('');   // reason for the ideal time
-  const [showIdealModal,  setShowIdealModal]  = useState(false);
-  const [idealDraftTime,  setIdealDraftTime]  = useState('');
-  const [idealDraftRemark,setIdealDraftRemark]= useState('');
-  const [idealSaving,     setIdealSaving]     = useState(false);
+  // ── Shift hours (read-only) ───────────────────────────────────────────────
+  // FIX: "Ideal Time" used to be free text the employee typed in per day —
+  // it drifted into meaning "what I actually worked" instead of a fixed
+  // shift window. It's now one company-wide setting the admin configures
+  // once (web Attendance Settings page); this widget just displays it.
+  const [shiftLabel, setShiftLabel] = useState('');
+
+  // ── Idle remark popup ─────────────────────────────────────────────────────
+  // Prompted every 5 minutes while status stays "idle", and again the moment
+  // the app comes back to the foreground while idle. Skipping is always
+  // allowed — an empty remark just stays "pending" and is offered again next
+  // time, listed alongside the current prompt.
+  const [showIdleRemarkModal, setShowIdleRemarkModal] = useState(false);
+  const [idleRemarkMode,      setIdleRemarkMode]      = useState('recurring'); // 'recurring' | 'resume'
+  const [idleRemarkText,      setIdleRemarkText]      = useState('');
+  const [idleRemarkSaving,    setIdleRemarkSaving]    = useState(false);
+  const [expandedPendingIdx,  setExpandedPendingIdx]  = useState(null);
+  const [pendingIdleText,     setPendingIdleText]     = useState('');
+  const idlePromptTimerRef = useRef(null);
+  const pendingResumeRef   = useRef(false);
 
   const isFocused = useIsFocused();
   const userId    = useSelector(state => state.auth?.user?._id || null);
@@ -132,8 +142,22 @@ export default function AttendanceWidget() {
   // Single definition reused by the tick effect, the AppState listener, and
   // the call-state effect below, so all three agree on one pingRef instead
   // of each maintaining their own duplicate timer.
+  // FIX: this used to discard the response entirely. The backend's matching
+  // fix now emits a socket "attendance:updated" event when a ping resumes an
+  // idle session, which the listener below picks up — but the socket can be
+  // mid-reconnect right when this background timer fires (very possible right
+  // after the app resumes from background, which is exactly when this idle→
+  // active transition is most likely). Applying the response directly here
+  // too, same as the manual Resume handler (handleBreakEnd) already does,
+  // means the chip can't get stuck on "Idle" waiting for a socket that missed
+  // its moment.
   const ping = useCallback(async () => {
-    try { await api.post('/attendance/ping'); } catch { /* silent */ }
+    try {
+      const r = await api.post('/attendance/ping');
+      if (r?.data?.status && r.data.status !== 'idle') {
+        setRecord(prev => (prev ? { ...prev, status: r.data.status, activeBreakIndex: null } : prev));
+      }
+    } catch { /* silent */ }
   }, []);
 
   const startPing = useCallback(() => {
@@ -215,40 +239,67 @@ export default function AttendanceWidget() {
   const recordRef = useRef(null);
   useEffect(() => { recordRef.current = record; }, [record]);
 
-  // ── Hydrate ideal time / remark from the attendance record ────────────────
+  // ── Idle-remark: re-prompt every 5 min while still idle ────────────────────
   useEffect(() => {
-    if (record) {
-      setIdealTime(record.idealTime || '');
-      setIdealRemark(record.idealRemark || record.idealTimeRemark || '');
-    }
-  }, [record?.idealTime, record?.idealRemark, record?.idealTimeRemark]);
+    if (idlePromptTimerRef.current) { clearInterval(idlePromptTimerRef.current); idlePromptTimerRef.current = null; }
+    if (record?.status !== 'idle') return;
 
-  // ── Save ideal time + remark ──────────────────────────────────────────────
-  const handleSaveIdeal = useCallback(async () => {
-    setIdealSaving(true);
-    try {
-      // Backend endpoint: persists the user's planned working time + reason for
-      // today's attendance record. Returns the updated record.
-      const r = await api.post('/attendance/ideal-time', {
-        idealTime:   idealDraftTime.trim(),
-        idealRemark: idealDraftRemark.trim(),
-      });
-      if (r?.data) setRecord(r.data);
-      setIdealTime(idealDraftTime.trim());
-      setIdealRemark(idealDraftRemark.trim());
-      setShowIdealModal(false);
-    } catch (e) {
-      Alert.alert('Could not save', e?.response?.data?.message || e.message);
-    } finally {
-      setIdealSaving(false);
-    }
-  }, [idealDraftTime, idealDraftRemark]);
+    setIdleRemarkMode('recurring');
+    setShowIdleRemarkModal(true);
+    idlePromptTimerRef.current = setInterval(() => {
+      setIdleRemarkMode('recurring');
+      setShowIdleRemarkModal(true);
+    }, 5 * 60 * 1000);
 
-  const openIdealModal = useCallback(() => {
-    setIdealDraftTime(idealTime);
-    setIdealDraftRemark(idealRemark);
-    setShowIdealModal(true);
-  }, [idealTime, idealRemark]);
+    return () => {
+      if (idlePromptTimerRef.current) { clearInterval(idlePromptTimerRef.current); idlePromptTimerRef.current = null; }
+    };
+  }, [record?.status]);
+
+  // ── Idle-remark: reset the "already prompted for this idle period" guard
+  // whenever we leave idle status, so the next idle period can trigger again.
+  // Also closes the popup if it's still open — the pre-existing "Resume"
+  // button (bottom of the card) calls handleBreakEnd() directly, bypassing
+  // this popup entirely. Without this, a recurring/resume popup open at that
+  // moment would keep showing stale content after the employee already
+  // resumed through that other button.
+  const prevIdleStatusRef = useRef(record?.status);
+  useEffect(() => {
+    if (record?.status !== 'idle') pendingResumeRef.current = false;
+    const prev = prevIdleStatusRef.current;
+    prevIdleStatusRef.current = record?.status;
+    if (prev === 'idle' && record?.status !== 'idle' && showIdleRemarkModal) {
+      setShowIdleRemarkModal(false);
+    }
+  }, [record?.status]);
+
+  // ── Idle-remark: screen regaining focus while idle also counts as
+  // "movement" — covers navigating back to this tab, which AppState's
+  // background/foreground listener below doesn't catch (app never left
+  // foreground, just switched screens).
+  useEffect(() => {
+    if (!isFocused) return;
+    const rec = recordRef.current;
+    if (rec?.status === 'idle' && !pendingResumeRef.current) {
+      pendingResumeRef.current = true;
+      setIdleRemarkMode('resume');
+      setShowIdleRemarkModal(true);
+    }
+  }, [isFocused]);
+
+  // ── Fetch the company's fixed shift window once ────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    api.get('/attendance/shift-config')
+      .then((r) => {
+        if (cancelled || !r?.data) return;
+        const { shiftStartHour, shiftStartMinute, shiftEndHour, shiftEndMinute } = r.data;
+        const fmt = (h, m) => moment({ hour: h, minute: m }).format('h:mm A');
+        setShiftLabel(`${fmt(shiftStartHour, shiftStartMinute)} – ${fmt(shiftEndHour, shiftEndMinute)}`);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   // ── Call-state chip sync + ping keep-alive across backgrounding ───────────
   // Updates the "On Call" status chip AND, critically, keeps /attendance/ping
@@ -348,6 +399,15 @@ export default function AttendanceWidget() {
           // stale 'idle' the backend applied while backgrounded (with no
           // call in progress) clears right away.
           startPing();
+
+          // ── Idle-remark: coming back to the app while idle counts as
+          // "movement" — surface the remark prompt right away instead of
+          // waiting for the recurring 5-min timer or the next ping cycle.
+          if (rec.status === 'idle' && !pendingResumeRef.current) {
+            pendingResumeRef.current = true;
+            setIdleRemarkMode('resume');
+            setShowIdleRemarkModal(true);
+          }
         }
       } else {
         // BUG FIX: this used to unconditionally kill the ping the instant the
@@ -735,7 +795,7 @@ export default function AttendanceWidget() {
         // idle = auto-break with no activeBreakIndex. pingActivity correctly
         // ends it and sets status back to active.
         const r = await api.post('/attendance/ping');
-        setRecord(prev => ({ ...prev, status: 'active', ...(r.data || {}) }));
+        setRecord(prev => ({ ...prev, status: 'active', activeBreakIndex: null, ...(r.data || {}) }));
       } else {
         // Manually started break — use the proper break/end endpoint.
         const r = await api.post('/attendance/break/end');
@@ -745,6 +805,57 @@ export default function AttendanceWidget() {
       Alert.alert('Error', e?.response?.data?.message || e.message);
     }
   }, [record?.status]);
+
+  // ── Idle-remark: derived data for the popup ─────────────────────────────────
+  const currentIdleBreak = (() => {
+    if (record?.status !== 'idle' || record?.activeBreakIndex == null) return null;
+    const br = record.breaks?.[record.activeBreakIndex];
+    return br?.reason === 'Auto Idle' ? { index: record.activeBreakIndex, ...br } : null;
+  })();
+
+  const pastPendingIdleBreaks = (record?.breaks || [])
+    .map((b, index) => ({ ...b, index }))
+    .filter((b) => b.reason === 'Auto Idle' && b.remarkStatus === 'pending' && b.index !== record?.activeBreakIndex);
+
+  // ── Idle-remark: save/skip handlers ─────────────────────────────────────────
+  const closeIdleRemarkModal = useCallback(async () => {
+    setShowIdleRemarkModal(false);
+    setIdleRemarkText('');
+    if (idleRemarkMode === 'resume') {
+      pendingResumeRef.current = false;
+      await handleBreakEnd();
+    }
+  }, [idleRemarkMode, handleBreakEnd]);
+
+  const handleSaveIdleRemark = useCallback(async () => {
+    setIdleRemarkSaving(true);
+    try {
+      const r = await api.post('/attendance/idle-remark', { remark: idleRemarkText });
+      if (r?.data) setRecord(prev => (prev ? { ...prev, breaks: r.data.breaks || prev.breaks } : prev));
+    } catch (e) {
+      Alert.alert('Could not save', e?.response?.data?.message || e.message);
+    } finally {
+      setIdleRemarkSaving(false);
+    }
+    closeIdleRemarkModal();
+  }, [idleRemarkText, closeIdleRemarkModal]);
+
+  const handleSkipIdleRemark = useCallback(async () => {
+    try { await api.post('/attendance/idle-remark', { remark: '' }); } catch { /* silent */ }
+    closeIdleRemarkModal();
+  }, [closeIdleRemarkModal]);
+
+  const handleSavePendingIdleRemark = useCallback(async (breakIndex) => {
+    if (!pendingIdleText.trim()) return;
+    try {
+      const r = await api.post('/attendance/idle-remark', { remark: pendingIdleText, breakIndex });
+      if (r?.data) setRecord(prev => (prev ? { ...prev, breaks: r.data.breaks || prev.breaks } : prev));
+    } catch (e) {
+      Alert.alert('Could not save', e?.response?.data?.message || e.message);
+    }
+    setExpandedPendingIdx(null);
+    setPendingIdleText('');
+  }, [pendingIdleText]);
 
   // ── Derived display values ────────────────────────────────────────────────
   const { statusStyle, statusLabel, elapsedStr, breakStr, notClockedIn } = useMemo(() => {
@@ -888,30 +999,16 @@ export default function AttendanceWidget() {
         </View>
       </View>
 
-      {/* ── Ideal Time & Remark ── */}
-      <View style={w.idealBox}>
-        <View style={w.idealHeader}>
+      {/* ── Shift hours (read-only, company-wide) ── */}
+      {shiftLabel ? (
+        <View style={w.idealBox}>
           <View style={w.idealHeaderLeft}>
             <Icon name="clock-time-four-outline" size={13} color={colors.blueLight} />
-            <Text style={w.idealTitle}>Ideal Working Time</Text>
+            <Text style={w.idealTitle}>Company Shift Hours</Text>
           </View>
-          <TouchableOpacity onPress={openIdealModal} style={w.idealEditBtn}>
-            <Icon name={idealTime || idealRemark ? 'pencil-outline' : 'plus'} size={13} color={colors.blueLight} />
-            <Text style={w.idealEditTxt}>{idealTime || idealRemark ? 'Edit' : 'Add'}</Text>
-          </TouchableOpacity>
+          <Text style={w.idealTimeTxt}>{shiftLabel}</Text>
         </View>
-        {idealTime ? (
-          <Text style={w.idealTimeTxt}>{idealTime}</Text>
-        ) : (
-          <Text style={w.idealEmptyTxt}>No ideal time set for today</Text>
-        )}
-        {idealRemark ? (
-          <View style={w.idealRemarkRow}>
-            <Icon name="message-reply-text-outline" size={12} color={colors.textMuted} style={{ marginTop: 1 }} />
-            <Text style={w.idealRemarkTxt}>{idealRemark}</Text>
-          </View>
-        ) : null}
-      </View>
+      ) : null}
 
       <View style={w.btnRow}>
         {showEndBreak ? (
@@ -931,49 +1028,91 @@ export default function AttendanceWidget() {
         </TouchableOpacity>
       </View>
 
-      {/* ── Ideal Time / Remark editor modal ── */}
-      <Modal visible={showIdealModal} transparent animationType="slide" onRequestClose={() => setShowIdealModal(false)}>
+      {/* ── Idle remark modal ─────────────────────────────────────────────── */}
+      <Modal visible={showIdleRemarkModal} transparent animationType="slide" onRequestClose={() => setShowIdleRemarkModal(false)}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={w.modalOverlay}>
           <View style={w.meetingModal}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <Text style={w.meetingModalTitle}>🕐 Ideal Working Time</Text>
-              <TouchableOpacity onPress={() => setShowIdealModal(false)}>
-                <Icon name="close" size={20} color="#64748B" />
-              </TouchableOpacity>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <Text style={w.meetingModalTitle}>
+                {idleRemarkMode === 'resume' ? '👋 Welcome back' : '🌙 Still idle'}
+              </Text>
             </View>
-            <Text style={w.meetingModalLabel}>Ideal time (e.g. 10:00 AM - 6:00 PM)</Text>
-            <TextInput
-              style={[w.meetingInput, { minHeight: 44 }]}
-              placeholder="e.g. 11:00 AM - 7:00 PM"
-              placeholderTextColor="#475569"
-              value={idealDraftTime}
-              onChangeText={setIdealDraftTime}
-            />
-            <Text style={w.meetingModalLabel}>Reason / Remark</Text>
+            <Text style={w.meetingModalHint}>
+              {idleRemarkMode === 'resume'
+                ? 'You were idle — what were you doing?'
+                : `Idle since ${currentIdleBreak?.startTime ? moment(currentIdleBreak.startTime).format('h:mm A') : '—'}. What\'s going on?`}
+            </Text>
             <TextInput
               style={w.meetingInput}
-              placeholder="e.g. Client visit in the morning, starting late"
+              placeholder="e.g. On a call, lunch break, meeting…"
               placeholderTextColor="#475569"
-              value={idealDraftRemark}
-              onChangeText={setIdealDraftRemark}
+              value={idleRemarkText}
+              onChangeText={setIdleRemarkText}
               multiline
+              autoFocus
             />
-            <Text style={w.meetingModalHint}>
-              Your ideal time and reason are saved to today's attendance and visible to your admin.
-            </Text>
-            <TouchableOpacity
-              style={[w.meetingSubmitBtn, idealSaving && { opacity: 0.6 }]}
-              onPress={handleSaveIdeal}
-              disabled={idealSaving}
-            >
-              {idealSaving
-                ? <ActivityIndicator color="#fff" size="small" />
-                : <>
-                  <Icon name="content-save-outline" size={16} color="#fff" style={{ marginRight: 6 }} />
-                  <Text style={w.meetingSubmitTxt}>Save</Text>
-                </>
-              }
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+              <TouchableOpacity
+                style={[w.btn, { flex: 1, backgroundColor: '#1E2236', borderWidth: 1, borderColor: '#2C3348' }]}
+                onPress={handleSkipIdleRemark}
+              >
+                <Text style={[w.btnTxt, { color: '#94A3B8' }]}>
+                  {idleRemarkMode === 'resume' ? 'Skip' : 'Continue Idle'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[w.meetingSubmitBtn, { flex: 1, opacity: (!idleRemarkText.trim() || idleRemarkSaving) ? 0.5 : 1 }]}
+                onPress={handleSaveIdleRemark}
+                disabled={!idleRemarkText.trim() || idleRemarkSaving}
+              >
+                {idleRemarkSaving
+                  ? <ActivityIndicator color="#fff" size="small" />
+                  : <Text style={w.meetingSubmitTxt}>{idleRemarkMode === 'resume' ? 'Save & Resume' : 'Save'}</Text>
+                }
+              </TouchableOpacity>
+            </View>
+
+            {pastPendingIdleBreaks.length > 0 && (
+              <View style={{ marginTop: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#262A38' }}>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: '#FBBF24', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+                  {pastPendingIdleBreaks.length} earlier idle period{pastPendingIdleBreaks.length > 1 ? 's' : ''} still need a reason
+                </Text>
+                {pastPendingIdleBreaks.map((b) => (
+                  <View key={b.index} style={{ marginBottom: 6 }}>
+                    <TouchableOpacity
+                      onPress={() => { setExpandedPendingIdx(expandedPendingIdx === b.index ? null : b.index); setPendingIdleText(''); }}
+                      style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 }}
+                    >
+                      <Text style={{ fontSize: 12, color: '#94A3B8' }}>
+                        {moment(b.startTime).format('h:mm A')}{b.endTime ? ` – ${moment(b.endTime).format('h:mm A')}` : ' – ongoing'}
+                      </Text>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: '#60A5FA' }}>
+                        {expandedPendingIdx === b.index ? 'Cancel' : 'Fill in'}
+                      </Text>
+                    </TouchableOpacity>
+                    {expandedPendingIdx === b.index && (
+                      <View style={{ flexDirection: 'row', gap: 6, marginTop: 4 }}>
+                        <TextInput
+                          style={[w.meetingInput, { flex: 1, minHeight: 40, marginBottom: 0 }]}
+                          placeholder="What were you doing then?"
+                          placeholderTextColor="#475569"
+                          value={pendingIdleText}
+                          onChangeText={setPendingIdleText}
+                          autoFocus
+                        />
+                        <TouchableOpacity
+                          style={[w.meetingSubmitBtn, { paddingHorizontal: 14, opacity: pendingIdleText.trim() ? 1 : 0.5 }]}
+                          onPress={() => handleSavePendingIdleRemark(b.index)}
+                          disabled={!pendingIdleText.trim()}
+                        >
+                          <Text style={w.meetingSubmitTxt}>Save</Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                  </View>
+                ))}
+              </View>
+            )}
           </View>
         </KeyboardAvoidingView>
       </Modal>

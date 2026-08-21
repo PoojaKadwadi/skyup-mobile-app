@@ -306,6 +306,14 @@ function formatLead(lead) {
         source: lead.source || 'Web Form',
         campaign: lead.campaign || '—',
         industry: lead.industry || '',
+        // FIX: `service` was never mapped here, even though the backend can
+        // send it (when the company's leadNurtureSequence feature is on).
+        // The industry/service picker in LeadDetailScreen prefills from
+        // `lead?.service` on every open (setService(lead?.service || '')),
+        // so without this line that prefill was always '' — looking exactly
+        // like the value had been wiped on refresh, even on a save that had
+        // actually succeeded on the backend.
+        service: lead.service || '',
         status: lead.status || 'New',
         date: lead.date,
         // FIX: store as numeric timestamp (ms) not a Date object.
