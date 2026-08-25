@@ -27,6 +27,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import apiClient from './apiClient';
 import { normalizePhone } from '../services/phoneService';
 import { BASE_URL } from '../config/config';
+import { getToken } from '../services/tokenStorage';
 
 // ── Sync call logs to backend ──────────────────────────────────────────────────
 export async function syncCallLogs(logs) {
@@ -124,9 +125,12 @@ export async function uploadRecording(filePath, phoneNumber, recordedAt, leadId)
   form.append('fileKey',     fileKey);  // Backend uses this for upsert/dedup
   if (leadId) form.append('leadId', String(leadId));
 
-  // ── Read auth token (same key the axios interceptor uses) ─────────────────
+  // ── Read auth token from Keychain-backed store (same as axios interceptor) ──
+  // FIX: was using AsyncStorage.getItem('auth_token') — token was migrated to
+  // Keychain (S-1 security fix), so AsyncStorage always returned null here,
+  // causing every upload to fail with "Not authorized, no token".
   let token = null;
-  try { token = await AsyncStorage.getItem('auth_token'); } catch {}
+  try { token = await getToken(); } catch {}
 
   // ── Build request headers — do NOT set Content-Type ──────────────────────
   // fetch() will derive the correct 'multipart/form-data; boundary=...'

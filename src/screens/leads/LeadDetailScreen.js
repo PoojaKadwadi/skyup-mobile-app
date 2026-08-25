@@ -564,7 +564,7 @@ export default function LeadDetailScreen() {
     setShowRemarkModal(true);
     setIndustry(lead?.industry || '');
     setService(lead?.service   || '');
-    setStatusUpdate('');
+    setStatusUpdate(lead?.status || '');
 
     // Defer the heavy call-log read + uploads so they never block the modal
     // animation or the JS thread while the agent starts typing the remark.
@@ -789,6 +789,8 @@ export default function LeadDetailScreen() {
     setRemark('');
     setOutcome('');
     setIndustry('');
+    setService('');
+    setStatusUpdate('');
     setFollowUpDate(null);
     setPickerTempDate(new Date());
     setShowDatePicker(false);
@@ -1421,7 +1423,12 @@ export default function LeadDetailScreen() {
 
         <TouchableOpacity
           style={styles.remarkBtn}
-          onPress={() => { setShowRemarkModal(true); setIndustry(lead?.industry || ''); }}
+          onPress={() => {
+            setShowRemarkModal(true);
+            setIndustry(lead?.industry || '');
+            setService(lead?.service   || '');
+            setStatusUpdate(lead?.status || '');
+          }}
           activeOpacity={0.8}
         >
           <Icon name="pencil-plus-outline" size={18} color={colors.purple} style={{ marginRight: 8 }} />

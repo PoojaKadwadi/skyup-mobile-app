@@ -129,13 +129,29 @@ export const patchLead = createAsyncThunk(
 
 export const submitCallRemark = createAsyncThunk(
   'leads/submitCallRemark',
-  async ({ leadId, remark, outcome, followUpDate, document, recording, industry, service }, { rejectWithValue }) => {
+  async ({ leadId, remark, outcome, followUpDate, document, recording, industry, service, status }, { rejectWithValue }) => {
     try {
-      await addCallRemarkWithAttachments(leadId, { remark, outcome, followUpDate, document, recording, industry, service });
+      // Read the full updated lead the backend returns — previously this was
+      // thrown away (bare `await`), so the reducer never got server-confirmed
+      // values. Now we propagate them so status/industry/service reflect what
+      // the backend actually saved, not just what the client hoped it would save.
+      const updatedLead = await addCallRemarkWithAttachments(leadId, {
+        remark, outcome, followUpDate, document, recording, industry, service, status,
+      });
       return {
-        leadId, remark, outcome, followUpDate, industry, service,
+        leadId,
+        remark,
+        outcome,
+        followUpDate,
         hasDocument:  !!document,
         hasRecording: !!recording,
+        // Prefer server-confirmed values; fall back to locally-sent values
+        // (e.g. multipart upload path returns the full lead; plain JSON path
+        // returns the updated lead doc — both have industry/service/status).
+        industry:     updatedLead?.industry     ?? industry,
+        service:      updatedLead?.service      ?? service,
+        status:       updatedLead?.status       ?? status,
+        followUpDate: updatedLead?.followUpDate ?? followUpDate,
       };
     } catch (error) {
       return rejectWithValue(
@@ -228,7 +244,7 @@ const leadsSlice = createSlice({
     });
 
     builder.addCase(submitCallRemark.fulfilled, (state, action) => {
-      const { leadId, remark, outcome, followUpDate, industry, service, hasDocument, hasRecording } = action.payload;
+      const { leadId, remark, outcome, followUpDate, industry, service, status, hasDocument, hasRecording } = action.payload;
 
       // Update the full cache with the new callHistory entry
       if (_fullLeadCache.has(leadId)) {
@@ -243,9 +259,12 @@ const leadsSlice = createSlice({
         _fullLeadCache.set(leadId, {
           ...full,
           remark,
+          // Write all server-confirmed fields back into the cache so the
+          // lead detail screen shows correct values without a full refetch.
+          ...(status       !== undefined ? { status }      : {}),
           ...(followUpDate !== undefined ? { followUpDate } : {}),
-          ...(industry    !== undefined ? { industry }    : {}),
-          ...(service     !== undefined ? { service  }    : {}),
+          ...(industry     !== undefined ? { industry }    : {}),
+          ...(service      !== undefined ? { service  }    : {}),
           callHistory: [...(full.callHistory || []), newEntry],
         });
       }
@@ -257,12 +276,16 @@ const leadsSlice = createSlice({
         state.items[idx] = {
           ...prev,
           remark,
-          lastOutcome: outcome || prev.lastOutcome,
-          lastCalledAt: new Date().toISOString(),
+          lastOutcome:      outcome || prev.lastOutcome,
+          lastCalledAt:     new Date().toISOString(),
           callHistoryCount: (prev.callHistoryCount || 0) + 1,
+          // Status: use server-confirmed value — previously this was never
+          // updated here (status came from a separate patchLead dispatch),
+          // causing a stale status to persist until the next delta fetch.
+          ...(status       !== undefined ? { status }       : {}),
           ...(followUpDate ? { followUpDate } : {}),
-          ...(industry !== undefined ? { industry } : {}),
-          ...(service  !== undefined ? { service  } : {}),
+          ...(industry     !== undefined ? { industry } : {}),
+          ...(service      !== undefined ? { service  } : {}),
         };
       }
     });

@@ -18,6 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import apiClient from './apiClient';
+import { getToken } from '../services/tokenStorage';
 
 // ─── Read ─────────────────────────────────────────────────────────────────────
 
@@ -124,12 +125,19 @@ export const getLeadActionSummary = async(leadId, { refresh = false } = {}) => {
     return response.data;
 };
 
-export const addCallRemark = async(leadId, { remark, outcome, followUpDate, industry, service }) => {
+export const addCallRemark = async(leadId, { remark, outcome, followUpDate, industry, service, status }) => {
     const payload = { remark, outcome };
-    if (followUpDate) payload.followUpDate = followUpDate;
-    if (industry !== undefined) payload.industry = industry;
-    if (service  !== undefined) payload.service  = service;
+    if (followUpDate)           payload.followUpDate = followUpDate;
+    if (industry !== undefined) payload.industry     = industry;
+    if (service  !== undefined) payload.service      = service;
+    // ── Include status in the same PATCH so it's one atomic request ──────────
+    // Previously status was sent as a separate patchLead call, creating a race
+    // condition between two concurrent PATCH requests. Sending both together
+    // guarantees they're applied atomically and the delta fetch sees one updatedAt.
+    if (status !== undefined)   payload.status       = status;
     const response = await apiClient.patch(`/lead/${leadId}`, payload);
+    // Return the full updated lead so the thunk can read back server-confirmed
+    // values (status, industry, service) and write them to the Redux store.
     return response.data;
 };
 
@@ -139,11 +147,11 @@ export const addCallRemark = async(leadId, { remark, outcome, followUpDate, indu
 // breaking the boundary string and causing a server-side parse failure.
 // fetch() derives Content-Type + boundary from the FormData automatically.
 export const addCallRemarkWithAttachments = async(
-    leadId, { remark, outcome, followUpDate, document, recording, industry, service },
+    leadId, { remark, outcome, followUpDate, document, recording, industry, service, status },
 ) => {
     // If neither attachment is provided, fall back to the plain JSON patch
     if (!document && !recording) {
-        return addCallRemark(leadId, { remark, outcome, followUpDate, industry, service });
+        return addCallRemark(leadId, { remark, outcome, followUpDate, industry, service, status });
     }
 
     const { BASE_URL } = require('../config/config');
@@ -182,9 +190,10 @@ export const addCallRemarkWithAttachments = async(
     const form = new FormData();
     form.append('remark', remark);
     form.append('outcome', outcome);
-    if (followUpDate) form.append('followUpDate', followUpDate);
+    if (followUpDate)           form.append('followUpDate', followUpDate);
     if (industry !== undefined) form.append('industry', industry);
     if (service  !== undefined) form.append('service',  service);
+    if (status   !== undefined) form.append('status',   status);
 
     if (document) {
         const name = document.name || document.uri.split('/').pop();
@@ -204,8 +213,12 @@ export const addCallRemarkWithAttachments = async(
         });
     }
 
+    // ── Read auth token from Keychain-backed store (same as axios interceptor) ──
+    // FIX: was using AsyncStorage.getItem('auth_token') — token was migrated to
+    // Keychain (S-1 security fix), so AsyncStorage always returned null here,
+    // causing multipart remark uploads to fail with "Not authorized, no token".
     let token = null;
-    try { token = await AsyncStorage.getItem('auth_token'); } catch {}
+    try { token = await getToken(); } catch {}
 
     const headers = { Accept: 'application/json' };
     if (token) headers.Authorization = `Bearer ${token}`;
