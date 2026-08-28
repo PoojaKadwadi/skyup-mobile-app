@@ -414,8 +414,16 @@ export default function LeadsScreen() {
   const filteredLeads = useSelector(selectFilteredLeads);
   // Unfiltered — used when followUpOnly to bypass Redux filterStatus
   // (filterStatus='New' uses isNotContacted which hides all called leads)
-  const allItems = useSelector(s => s.leads?.items ?? []);
-  const { loading, searchQuery, filterStatus, lastFetchedAt } = useSelector((s) => s.leads);
+  const totalLeads = useSelector(s => s.leads?.items?.length ?? 0);
+  // PERF FIX: subscribe to individual fields instead of the whole s.leads object.
+  // Previously useSelector((s) => s.leads) re-ran on EVERY leads state change
+  // (upsert, delta fetch, search query) even when loading/filterStatus didn't change,
+  // causing the whole LeadsScreen to re-render. Granular selectors only re-render
+  // when the specific field changes.
+  const loading       = useSelector(s => s.leads.loading);
+  const searchQuery   = useSelector(s => s.leads.searchQuery);
+  const filterStatus  = useSelector(s => s.leads.filterStatus);
+  const lastFetchedAt = useSelector(s => s.leads.lastFetchedAt);
 
   const [sortBy,         setSortBy]         = useState('recent');
   const [filterTemp,     setFilterTemp]     = useState('All');

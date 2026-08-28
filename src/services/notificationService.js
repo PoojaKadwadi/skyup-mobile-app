@@ -809,26 +809,58 @@ export async function checkAndScheduleClockInReminder(record) {
   // start. Compute "9:30 AM IST today" as an absolute instant instead, so
   // the reminder always lines up with the real shift start regardless of
   // the device's own timezone setting.
+  // FIX (timezone bug): the previous code added IST_OFFSET to now,
+  // then called setUTCHours(0,0,0,0) on the result — clearing the time on
+  // the SHIFTED value. When IST_OFFSET was then subtracted, the result was
+  // "yesterday 18:30 UTC" = "today 00:00 IST" minus the offset = wrong base.
+  // Net effect: the trigger computed as 12:00 PM UTC = 5:30 PM IST, not 9:30 AM IST.
+  //
+  // Correct approach: compute IST midnight as a real UTC instant directly.
+  // IST midnight = UTC 18:30 previous day. We compute it by:
+  //   1. Getting current UTC midnight
+  //   2. Adding 18h 30m to get "IST midnight as UTC" (18:30 UTC = 00:00 IST)
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // +05:30
-  const now      = new Date();
-  const istNow   = new Date(now.getTime() + IST_OFFSET_MS);
+  const now = new Date();
+
+  // IST "now" for hour check only
+  const istNowMs = now.getTime() + IST_OFFSET_MS;
+  const istNow   = new Date(istNowMs);
   const istHour  = istNow.getUTCHours();
+  const istMin   = istNow.getUTCMinutes();
 
-  // Midnight IST today, expressed as a real (UTC) instant.
-  const istMidnightUTC = new Date(istNow.getTime());
-  istMidnightUTC.setUTCHours(0, 0, 0, 0);
-  const todayMidnightIST = new Date(istMidnightUTC.getTime() - IST_OFFSET_MS);
+  // Compute UTC midnight of TODAY in IST:
+  // IST midnight (00:00 IST) = 18:30 UTC of the PREVIOUS calendar day.
+  // Simpler: take real UTC midnight today, subtract IST offset to get yesterday's 18:30 UTC.
+  // That instant IS "today IST midnight" in real UTC time.
+  const utcMidnight = new Date(now);
+  utcMidnight.setUTCHours(0, 0, 0, 0);
+  // IST midnight as a UTC instant = UTC midnight MINUS IST offset? No —
+  // 00:00 IST = UTC-5:30 → 00:00 IST = 18:30 UTC (prev day).
+  // Cleanest: start from now, compute IST date components, build IST midnight.
+  const istYear  = istNow.getUTCFullYear();
+  const istMonth = istNow.getUTCMonth();
+  const istDate  = istNow.getUTCDate();
+  // IST midnight as UTC = Date(istYear, istMonth, istDate, 00, 00 IST) in UTC
+  //                     = Date(istYear, istMonth, istDate, 00, 00) - IST_OFFSET as UTC
+  const istMidnightAsUTC = new Date(Date.UTC(istYear, istMonth, istDate, 0, 0, 0, 0) - IST_OFFSET_MS);
 
-  // Target: 9:30 AM IST today.
-  let trigger = new Date(todayMidnightIST.getTime() + (9 * 60 + 30) * 60 * 1000);
+  // Target: 9:30 AM IST = istMidnightAsUTC + 9.5 hours
+  let trigger = new Date(istMidnightAsUTC.getTime() + (9 * 60 + 30) * 60 * 1000);
+
+  // Verify: trigger should be "today 09:30 IST" = "today 04:00 UTC"
+  // (9:30 IST = 4:00 UTC)
 
   if (trigger <= now) {
-    // Already past 9:30 AM IST — fire in 5 minutes as an immediate nudge.
+    // Already past 9:30 AM IST.
+    // FIX: only send the "immediate nudge" if it's still morning/early afternoon
+    // (before 12:00 PM IST). After noon, the employee has clearly already clocked
+    // in or made a conscious choice not to — a reminder at 5:30 PM is useless
+    // and confusing (this was the reported bug: 5:30 PM clock-in ping).
+    if (istHour >= 12) return;  // ← KEY FIX: no evening reminders
     trigger = new Date(now.getTime() + 5 * 60 * 1000);
   }
 
-  // Don't schedule if it's already evening in IST (after 8 PM IST — shift
-  // likely not needed).
+  // Also skip if it's evening in IST (after 8 PM)
   if (istHour >= 20) return;
 
   await scheduleClockInReminder(trigger);

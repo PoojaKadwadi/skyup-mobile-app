@@ -14,6 +14,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { io }       from 'socket.io-client';
+import { getToken } from './tokenStorage';
 import { BASE_URL } from '../config/config';
 import { fetchLeads, upsertLead } from '../store/slices/leadsSlice';
 import { getLeadById }            from '../api/leadsApi';
@@ -60,6 +61,15 @@ export function connectSocket(userId, dispatch) {
     reconnectionDelayMax: 10000,
     reconnectionAttempts: Infinity,
     timeout:              10000,
+    auth: {},  // token attached below after async getToken()
+  });
+
+  // Attach auth token so backend socket middleware can verify the employee
+  getToken().then(tok => {
+    if (tok && socket) {
+      socket.auth = { token: tok };
+      if (socket.connected) socket.emit('agent_join', { userId: _userId });
+    }
   });
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────

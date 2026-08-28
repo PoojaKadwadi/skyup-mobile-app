@@ -48,15 +48,26 @@ export const getMyLeads = async() => {
     // NOTE: backend removed `pages` and `total` from the response to avoid
     // countDocuments() on every load. Instead it returns `hasMore: true` when
     // there are leads beyond the current page (fetches limit+1, slices to limit).
-    const { leads: firstLeads, hasMore } = firstPage.data;
+    // Backend now returns both pages (total count) AND hasMore.
+    const { leads: firstLeads, hasMore, pages: totalPages } = firstPage.data;
 
-    // Single page — the common case, return immediately
+    // Single page — the common case
     if (!hasMore) {
         return firstLeads.map(formatLead);
     }
 
-    // More leads exist — fetch remaining pages sequentially until hasMore=false.
-    // Sequential (not parallel) because we don't know the total page count.
+    // If backend returns totalPages, fetch all in parallel (much faster)
+    if (totalPages && totalPages > 1) {
+        const rest = await Promise.all(
+            Array.from({ length: totalPages - 1 }, (_, i) =>
+                apiClient.get(`/lead/my-leads?page=${i + 2}&limit=200`)
+                    .then(r => r.data?.leads || [])
+            )
+        );
+        return [...firstLeads, ...rest.flat()].map(formatLead);
+    }
+
+    // Fallback: sequential hasMore pagination
     const allLeads = [...firstLeads];
     let page = 2;
     let more = true;
@@ -66,7 +77,7 @@ export const getMyLeads = async() => {
         allLeads.push(...(data.leads || []));
         more = !!data.hasMore;
         page++;
-        if (page > 50) break; // safety cap — 50 pages × 200 = 10,000 leads
+        if (page > 50) break; // safety cap
     }
 
     return allLeads.map(formatLead);

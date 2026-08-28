@@ -167,7 +167,8 @@ let _lastFollowUpCheckAt = 0;
 const leadsSlice = createSlice({
   name: 'leads',
   initialState: {
-    items:         [],   // slim leads only — no callHistory arrays
+    items:         [],   // slim leads only — no callHistory arrays — ordered for FlatList
+    byId:          {},   // id → index map for O(1) upsert lookup (avoids O(n) findIndex)
     loading:       false,
     error:         null,
     lastFetchedAt: null,
@@ -185,11 +186,14 @@ const leadsSlice = createSlice({
         _fullLeadCache.set(action.payload.id, { ...full, ...action.payload });
       }
       const slim = toSlimLead({ ...action.payload });
-      const idx = state.items.findIndex(l => l.id === slim.id);
+      const idx = state.byId[slim.id] ?? -1;
       if (idx !== -1) {
         state.items[idx] = { ...state.items[idx], ...slim };
       } else {
         state.items.unshift(slim);
+        // Rebuild O(1) map after insert (indices shifted)
+        state.byId = {};
+        state.items.forEach((l, i) => { state.byId[l.id] = i; });
       }
     },
   },
@@ -204,6 +208,9 @@ const leadsSlice = createSlice({
         // Clear the full cache and repopulate — full fetch replaces everything.
         _fullLeadCache.clear();
         state.items         = action.payload.map(toSlimLead);
+        // Rebuild O(1) lookup map
+        state.byId = {};
+        state.items.forEach((l, i) => { state.byId[l.id] = i; });
         state.lastFetchedAt = Date.now();
 
         checkAndNotifyNewLeads(action.payload).catch(() => {});
@@ -224,11 +231,14 @@ const leadsSlice = createSlice({
       state.lastFetchedAt = Date.now();
       for (const lead of action.payload) {
         const slim = toSlimLead(lead);
-        const idx = state.items.findIndex(l => l.id === slim.id);
+        const idx = state.byId[slim.id] ?? -1;
         if (idx !== -1) {
           state.items[idx] = { ...state.items[idx], ...slim };
         } else {
           state.items.unshift(slim);
+          // Rebuild map after insert (all indices shifted)
+          state.byId = {};
+          state.items.forEach((l, i) => { state.byId[l.id] = i; });
         }
       }
     });
@@ -239,7 +249,7 @@ const leadsSlice = createSlice({
       if (_fullLeadCache.has(id)) {
         _fullLeadCache.set(id, { ..._fullLeadCache.get(id), ...data });
       }
-      const idx = state.items.findIndex(l => l.id === id);
+      const idx = state.byId[id] ?? -1;
       if (idx !== -1) state.items[idx] = { ...state.items[idx], ...data };
     });
 
@@ -270,7 +280,7 @@ const leadsSlice = createSlice({
       }
 
       // Update slim entry in Redux (no callHistory here — just counts + remark)
-      const idx = state.items.findIndex(l => l.id === leadId);
+      const idx = state.byId[leadId] ?? -1;
       if (idx !== -1) {
         const prev = state.items[idx];
         state.items[idx] = {

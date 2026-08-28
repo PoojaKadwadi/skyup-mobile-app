@@ -48,7 +48,45 @@ const SERVICES = [
   'CRM', 'Video Editing', 'Graphic Design', 'Social Media Marketing',
 ];
 
-const OUTCOMES = ['Answered', 'Not Answered', 'Busy', 'Switch Off', 'Call Back Later', 'Interested', 'Not Interested', 'Invalid', 'Client Meeting', 'status update'];
+// ── Sector-wise outcome structure ────────────────────────────────────────────
+// Sector 1 — NOT ANSWERED: call was not picked up
+const OUTCOMES_NOT_ANSWERED = ['Not Answered', 'Busy', 'Switch Off'];
+// Sector 2 — ANSWERED subsections
+const OUTCOMES_ANSWERED_SUB = ['Interested', 'Not Interested', 'Call Back Later', 'Client Meeting', 'Proposal Sent'];
+// All valid outcomes (for filtering auto-dialer entries)
+const OUTCOMES = [
+  'Answered',
+  ...OUTCOMES_NOT_ANSWERED,
+  ...OUTCOMES_ANSWERED_SUB,
+  'Invalid',
+];
+
+// ── Outcome → auto status mapping ─────────────────────────────────────────────
+// When an agent picks an outcome, the lead status is automatically updated:
+//   • Any "Answered" outcome → New leads become "In Progress"
+//   • "Interested"          → status becomes "Interested"
+//   • "Not Interested"      → handled by dedicated NI flow (not here)
+//   • "Client Meeting" / "Proposal Sent" → progress toward Interested
+// This runs only if the current status is "lower" — never downgrades.
+const STATUS_PRIORITY = { New: 0, 'In Progress': 1, Interested: 2, Converted: 3, 'Not Interested': 4 };
+function autoStatusForOutcome(outcome, currentStatus) {
+  const current = currentStatus || 'New';
+  const priority = STATUS_PRIORITY[current] ?? 0;
+
+  let suggested = null;
+  if (outcome === 'Interested') {
+    suggested = 'Interested';
+  } else if (['Client Meeting', 'Proposal Sent'].includes(outcome)) {
+    suggested = 'Interested';
+  } else if ([...OUTCOMES_ANSWERED_SUB, 'Answered'].includes(outcome)) {
+    suggested = 'In Progress';
+  }
+
+  if (!suggested) return null;
+  // Never downgrade — only upgrade
+  if ((STATUS_PRIORITY[suggested] ?? 0) <= priority) return null;
+  return suggested;
+}
 
 function maskPhone(phone) {
   if (!phone) return '—';
@@ -990,17 +1028,19 @@ export default function LeadDetailScreen() {
     // a non-destructive alert so the agent can re-add it.
     const followUp = followUpDate || null;
 
-    // ── Optimistic status update ───────────────────────────────────────────────
-    // If the agent also changed the lead status from the remark modal, apply it
-    // locally right away so the UI reflects it instantly. The patchLead call
-    // below persists it to the backend (and triggers nurture sequence).
-    if (statusUpdate && statusUpdate !== lead?.status) {
-      dispatch(upsertLead({ id: leadId, status: statusUpdate }));
-      setFetchedLead(prev => prev ? { ...prev, status: statusUpdate } : prev);
-      dispatch(patchLead({ id: leadId, data: { status: statusUpdate } }))
+    // ── Auto + manual status update ──────────────────────────────────────────
+    // 1. Auto: derive suggested status from the selected outcome (autoStatusForOutcome).
+    // 2. Manual: agent may have also manually picked a status from the status row.
+    //    Manual takes priority over auto; auto only applies if manual not set.
+    const autoStatus = autoStatusForOutcome(outcome, lead?.status);
+    const effectiveStatus = statusUpdate || autoStatus;
+
+    if (effectiveStatus && effectiveStatus !== lead?.status) {
+      dispatch(upsertLead({ id: leadId, status: effectiveStatus }));
+      setFetchedLead(prev => prev ? { ...prev, status: effectiveStatus } : prev);
+      dispatch(patchLead({ id: leadId, data: { status: effectiveStatus } }))
         .unwrap()
         .catch(() => {
-          // Revert on failure
           dispatch(upsertLead({ id: leadId, status: lead?.status }));
           setFetchedLead(prev => prev ? { ...prev, status: lead?.status } : prev);
         });
@@ -1654,16 +1694,60 @@ export default function LeadDetailScreen() {
                 </Text>
               </View>
             )}
+
+            {/* ── Sector 1: Not Answered ──────────────────────────────── */}
+            <Text style={styles.outcomeSectorLabel}>📵 Not Answered</Text>
             <View style={styles.outcomeRow}>
-              {OUTCOMES
+              {OUTCOMES_NOT_ANSWERED.map(o => (
+                <TouchableOpacity
+                  key={o}
+                  style={[styles.outcomeChip, styles.outcomeChipNotAnswered, outcome === o && styles.outcomeChipNotAnsweredActive]}
+                  onPress={() => { setOutcome(o); setStatusUpdate(''); }}
+                >
+                  <Text style={[styles.outcomeChipText, outcome === o && { color: '#fff', fontWeight: '700' }]}>{o}</Text>
+                </TouchableOpacity>
+              ))}
+              {/* Invalid also here as a standalone */}
+              <TouchableOpacity
+                style={[styles.outcomeChip, styles.outcomeChipInvalid, outcome === 'Invalid' && styles.outcomeChipInvalidActive]}
+                onPress={() => { setOutcome('Invalid'); setStatusUpdate(''); }}
+              >
+                <Text style={[styles.outcomeChipText, outcome === 'Invalid' && { color: '#fff', fontWeight: '700' }]}>Invalid</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* ── Sector 2: Answered ─────────────────────────────────── */}
+            <Text style={[styles.outcomeSectorLabel, { marginTop: 10 }]}>✅ Answered</Text>
+            <View style={styles.outcomeRow}>
+              {/* Plain "Answered" — no sub-outcome needed */}
+              <TouchableOpacity
+                style={[styles.outcomeChip, styles.outcomeChipAnswered, outcome === 'Answered' && styles.outcomeChipAnsweredActive]}
+                onPress={() => {
+                  setOutcome('Answered');
+                  const auto = autoStatusForOutcome('Answered', lead?.status);
+                  if (auto) setStatusUpdate(auto);
+                }}
+              >
+                <Text style={[styles.outcomeChipText, outcome === 'Answered' && { color: '#fff', fontWeight: '700' }]}>Answered</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* ── Sector 2 sub-outcomes ──────────────────────────────── */}
+            <Text style={[styles.outcomeSectorLabel, { marginTop: 6, fontSize: 11, color: colors.textMuted }]}>  Sub-outcome (if answered):</Text>
+            <View style={styles.outcomeRow}>
+              {OUTCOMES_ANSWERED_SUB
                 .filter(o => !(alreadyInterested && o === 'Interested'))
                 .map(o => (
                   <TouchableOpacity
                     key={o}
-                    style={[styles.outcomeChip, outcome === o && styles.outcomeChipActive]}
-                    onPress={() => setOutcome(o)}
+                    style={[styles.outcomeChip, styles.outcomeChipAnswered, outcome === o && styles.outcomeChipAnsweredActive]}
+                    onPress={() => {
+                      setOutcome(o);
+                      const auto = autoStatusForOutcome(o, lead?.status);
+                      if (auto) setStatusUpdate(auto);
+                    }}
                   >
-                    <Text style={[styles.outcomeChipText, outcome === o && styles.outcomeChipTextActive]}>{o}</Text>
+                    <Text style={[styles.outcomeChipText, outcome === o && { color: '#fff', fontWeight: '700' }]}>{o}</Text>
                   </TouchableOpacity>
                 ))}
             </View>
@@ -1943,6 +2027,30 @@ return StyleSheet.create({
   outcomeChipActive:  { backgroundColor: colors.blue + '20', borderColor: colors.blue },
   outcomeChipText:    { fontSize: 12, color: colors.textSec, fontWeight: '600' },
   outcomeChipTextActive: { color: colors.blueLight },
+
+  // Sector-wise outcome styles
+  outcomeSectorLabel: {
+    fontSize: 12, fontWeight: '700', color: colors.textSec,
+    marginBottom: 6, marginTop: 4,
+  },
+  outcomeChipNotAnswered: {
+    borderColor: '#F87171', backgroundColor: 'rgba(248,113,113,0.08)',
+  },
+  outcomeChipNotAnsweredActive: {
+    backgroundColor: '#EF4444', borderColor: '#EF4444',
+  },
+  outcomeChipAnswered: {
+    borderColor: '#34D399', backgroundColor: 'rgba(52,211,153,0.08)',
+  },
+  outcomeChipAnsweredActive: {
+    backgroundColor: '#10B981', borderColor: '#10B981',
+  },
+  outcomeChipInvalid: {
+    borderColor: '#94A3B8', backgroundColor: 'rgba(148,163,184,0.08)',
+  },
+  outcomeChipInvalidActive: {
+    backgroundColor: '#64748B', borderColor: '#64748B',
+  },
   remarkInput:        { backgroundColor: colors.surface, borderRadius: 10, padding: 12, color: colors.textPrimary, minHeight: 100, textAlignVertical: 'top', borderWidth: 1, borderColor: colors.border, marginBottom: 16 },
   submitBtn:          { backgroundColor: colors.blue, borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
   submitBtnDisabled:  { opacity: 0.6 },

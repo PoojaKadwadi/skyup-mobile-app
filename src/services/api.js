@@ -82,6 +82,31 @@ api.interceptors.request.use(
   (error) => Promise.reject(error),
 );
 
+// ─── Retry interceptor — transparent retry on cold-start / flaky network ────
+// Render.com free tier spins down after inactivity — first request after
+// spin-down gets a 502/503. A single automatic retry after 1.5s handles
+// this transparently so the user never sees the error.
+api.interceptors.response.use(
+  res => res,
+  async err => {
+    const cfg    = err.config;
+    const status = err.response?.status;
+    const isRetryable =
+      !err.response ||          // pure network error (ECONNRESET, ENOTFOUND)
+      err.code === 'ECONNABORTED' || // timeout
+      status === 502 || status === 503 || status === 504;
+
+    // Retry GET requests only (safe to repeat). Max 2 retries.
+    if (cfg && isRetryable && cfg.method === 'get' && (cfg._retry || 0) < 2) {
+      cfg._retry = (cfg._retry || 0) + 1;
+      const delay = cfg._retry * 1500; // 1.5s first, 3s second
+      await new Promise(r => setTimeout(r, delay));
+      return api(cfg);
+    }
+    return Promise.reject(err);
+  }
+);
+
 // ─── Response interceptor ────────────────────────────────────────────────────
 api.interceptors.response.use(
   (response) => {
