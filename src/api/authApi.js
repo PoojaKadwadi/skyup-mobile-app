@@ -38,7 +38,16 @@ function parseLoginResponse(data) {
       _id:     body._id,
       name:    body.name,
       email:   body.email,
-      company: body.company,
+      // FIX: Admin's response shape from loginUnified has no `company` field
+      // at all — it returns flat `companyId`/`companyName` instead (Employee's
+      // shape has a populated `company` object/ObjectId). Without this
+      // fallback, an admin logging in via this same mobile app would get
+      // `user.company === undefined` everywhere downstream that reads it,
+      // even though the login itself succeeded. Building an equivalent
+      // `company` value here means every existing screen that already reads
+      // `user.company` keeps working unchanged for both session types.
+      company: body.company || body.companyId || null,
+      companyName: body.companyName ?? null,
       role:    body.role,
       contactAccountEmail: body.contactAccountEmail ?? null,
     } : null);

@@ -38,6 +38,7 @@ import Icon              from 'react-native-vector-icons/MaterialCommunityIcons'
 import { getSocket }     from '../services/socketService';
 import api               from '../services/api';
 import { getDeviceInfo } from '../services/deviceInfoService';
+import { serverNow } from '../services/serverTime';
 import { cancelClockInReminder } from '../services/notificationService';
 import { syncRecordings }        from '../services/recordingService';
 import { RADIUS, FONT } from '../theme/tokens';
@@ -345,12 +346,12 @@ export default function AttendanceWidget() {
         (rec.totalBreakMinutes || 0) +
         (rec.activeBreakIndex !== null && rec.activeBreakIndex !== undefined
           ? Math.round(
-              (Date.now() - new Date(rec.breaks?.[rec.activeBreakIndex]?.startTime || Date.now())) / 60000
+              (serverNow() - new Date(rec.breaks?.[rec.activeBreakIndex]?.startTime || serverNow())) / 60000
             )
           : 0);
       const secs = Math.max(
         0,
-        Math.round((Date.now() - new Date(rec.loginTime)) / 1000) - breakMins * 60,
+        Math.round((serverNow() - new Date(rec.loginTime)) / 1000) - breakMins * 60,
       );
       if (secs !== lastElapsedRef.current) {
         lastElapsedRef.current = secs;
@@ -390,7 +391,7 @@ export default function AttendanceWidget() {
             const r = recordRef.current;
             if (!r?.loginTime || r?.logoutTime) return;
             const breakMins = (r.totalBreakMinutes || 0);
-            const secs = Math.max(0, Math.round((Date.now() - new Date(r.loginTime)) / 1000) - breakMins * 60);
+            const secs = Math.max(0, Math.round((serverNow() - new Date(r.loginTime)) / 1000) - breakMins * 60);
             if (secs !== lastElapsedRef.current) { lastElapsedRef.current = secs; setElapsed(secs); }
           };
           tickRef.current = setInterval(tick, tickInterval);

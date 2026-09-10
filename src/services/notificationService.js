@@ -2,6 +2,7 @@
 
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { serverNow } from './serverTime';
 
 // ── Safe import — app will not crash if notifee is not installed yet ──────────
 let notifee = null;
@@ -365,7 +366,11 @@ export async function checkAndNotifyFollowUps(leads) {
   }
 
   try {
-    const now = Date.now();
+    // serverNow(), not Date.now(): scheduledAt/followUpDate are SERVER
+    // timestamps, so comparing them against a skewed device clock shifts the
+    // whole 15-min "upcoming" window — reminders then fire early, late, or
+    // get skipped entirely. See services/serverTime.js.
+    const now = serverNow();
     const WINDOW_AHEAD_MS = 15 * 60 * 1000;
     const WINDOW_BEHIND_MS = 24 * 60 * 60 * 1000;
 
@@ -376,8 +381,19 @@ export async function checkAndNotifyFollowUps(leads) {
     for (const lead of leads) {
       const candidates = [];
 
-      if (Array.isArray(lead.scheduledCalls)) {
-        for (const sc of lead.scheduledCalls) {
+      // Accept BOTH shapes: full leads (scheduledCalls, from
+      // fetchLeads.fulfilled) and slim Redux leads (pendingScheduledCalls,
+      // from backgroundSyncService). Previously this only read
+      // lead.scheduledCalls, so every background follow-up check silently
+      // produced zero candidates — see the FIX note in store/slices/leadsSlice.js.
+      const scheduled = Array.isArray(lead.scheduledCalls)
+        ? lead.scheduledCalls
+        : (Array.isArray(lead.pendingScheduledCalls) ? lead.pendingScheduledCalls : null);
+
+      if (scheduled) {
+        for (const sc of scheduled) {
+          // pendingScheduledCalls is pre-filtered to !done, but full
+          // scheduledCalls is not — keep the check for both.
           if (!sc.done && sc.scheduledAt) {
             candidates.push({
               isoDate: sc.scheduledAt,
@@ -907,7 +923,7 @@ export async function scheduleMeetingFollowUp(meeting) {
   const whenMs = new Date(meeting.followUpDate).getTime();
   if (isNaN(whenMs)) return;
 
-  const now = Date.now();
+  const now = serverNow(); // server-corrected — see services/serverTime.js
   // Nothing to schedule if the follow-up is already in the past.
   if (whenMs <= now) return;
 
@@ -978,7 +994,7 @@ export async function checkAndScheduleMeetingFollowUps(meetings) {
   try {
     // RAM FIX: scheduledDedup loads once, stays in memory.
     await scheduledDedup.getSet();
-    const now = Date.now();
+    const now = serverNow(); // server-corrected — see services/serverTime.js
     const newlyScheduled = [];
 
     // Today's window for the summary

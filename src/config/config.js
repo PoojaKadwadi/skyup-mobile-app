@@ -1,5 +1,5 @@
 // src/config/config.js
-export const BASE_URL = 'https://skyup-crm-backend.onrender.com/api';
+export const BASE_URL = 'https://skyupcrm-backend.duckdns.org/api';
 
 // FIX: Reduced from 30000 → 15000ms.
 // 30s was triggering Android ANR ("SkyUp CRM isn't responding") because

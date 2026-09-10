@@ -32,7 +32,7 @@ import { useNavigation, useRoute,
 import Icon                             from 'react-native-vector-icons/MaterialCommunityIcons';
 import {
   fetchLeads, fetchLeadsDelta, selectFilteredLeads,
-  setSearchQuery, setFilterStatus,
+  setSearchQuery, setFilterStatus, isFollowUpDue,
 } from '../../store/slices/leadsSlice';
 import CallButton                    from '../../components/CallButton';
 import { RADIUS, FONT }              from '../../theme/tokens';
@@ -195,14 +195,19 @@ const cal = StyleSheet.create({
   dayTxt:     { fontSize: 13, fontWeight: '600' },
 });
 
-function isFollowUpDue(lead) {
-  if (!lead?.followUpDate) return false;
-  const d = new Date(lead.followUpDate);
-  if (isNaN(d.getTime())) return false;
-  const endOfToday = new Date();
-  endOfToday.setHours(23, 59, 59, 999);
-  return d.getTime() <= endOfToday.getTime();
-}
+// FIX: this used to be a LOCAL, narrower re-implementation that only
+// checked lead.followUpDate — it silently ignored the shared, comprehensive
+// definition's auto-derived follow-ups (an untouched "New"/"In Progress"
+// lead becomes due the day after its last contact, even with no explicit
+// followUpDate set). Since the Dashboard's "Follow-ups Due" KPI count is
+// computed from the SHARED isFollowUpDue (leadsSlice.js), but this screen's
+// filter used this local, narrower version, tapping the Dashboard's
+// Followups card opened a list MISSING every auto-derived lead the count
+// had included — the exact "count shown ≠ list shown" bug a comment in
+// DashboardScreen.js already describes fixing, but this local shadow
+// definition meant it was never actually fully fixed. Now imported from
+// leadsSlice.js directly — see the FIX comment above isFollowUpDue there
+// for the shared history.
 
 function getStatusCfg(colors) {
   return {
@@ -414,7 +419,8 @@ export default function LeadsScreen() {
   const filteredLeads = useSelector(selectFilteredLeads);
   // Unfiltered — used when followUpOnly to bypass Redux filterStatus
   // (filterStatus='New' uses isNotContacted which hides all called leads)
-  const totalLeads = useSelector(s => s.leads?.items?.length ?? 0);
+  const allItems   = useSelector(s => s.leads?.items ?? []);
+  const totalLeads = allItems.length;
   // PERF FIX: subscribe to individual fields instead of the whole s.leads object.
   // Previously useSelector((s) => s.leads) re-ran on EVERY leads state change
   // (upsert, delta fetch, search query) even when loading/filterStatus didn't change,
@@ -424,6 +430,14 @@ export default function LeadsScreen() {
   const searchQuery   = useSelector(s => s.leads.searchQuery);
   const filterStatus  = useSelector(s => s.leads.filterStatus);
   const lastFetchedAt = useSelector(s => s.leads.lastFetchedAt);
+
+  // Same derivation as CallLogsScreen.js's isAdmin — the backend already
+  // returns every company lead (not just this user's own) for an admin
+  // session (see leadController.js getMyLeads), so the header should say
+  // so plainly rather than showing the employee-oriented "My Leads" label
+  // to someone who is, correctly, seeing everyone's leads.
+  const authUser = useSelector((s) => s.auth?.user);
+  const isAdmin  = authUser?.role === 'admin' || authUser?.role === 'super_admin';
 
   const [sortBy,         setSortBy]         = useState('recent');
   const [filterTemp,     setFilterTemp]     = useState('All');
@@ -589,7 +603,7 @@ export default function LeadsScreen() {
       {/* ── Header ─────────────────────────────────────────────────────── */}
       <View style={s.header}>
         <View>
-          <Text style={s.headerTitle}>My Leads</Text>
+          <Text style={s.headerTitle}>{isAdmin ? 'All Leads' : 'My Leads'}</Text>
           <View style={s.headerCountWrap}>
             <Text style={s.headerCount}>{displayed.length} leads</Text>
           </View>

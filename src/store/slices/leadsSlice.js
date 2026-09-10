@@ -58,12 +58,32 @@ const SLIM_FIELDS = new Set([
   'company','reassignCount','invalidStage','isClosed',
   'lastOutcome','lastCalledAt','_raw_date','date',
   // Derived summary fields — cheap to store, used by list rows and notifications
-  'callHistoryCount','hasScheduledCalls',
+  'callHistoryCount','hasScheduledCalls','pendingScheduledCalls',
 ]);
 
-function toSlimLead(lead) {
+function toSlimLead(lead, { populateCache = true } = {}) {
   // Store the full lead in the transient cache for the detail screen.
-  if (lead && lead.id) _fullLeadCache.set(lead.id, lead);
+  //
+  // FIX — do NOT do this unconditionally. toSlimLead() is called from two
+  // very different contexts:
+  //   1. fetchLeads.fulfilled — `lead` is the FULL raw lead from the server.
+  //      Populating the cache here is correct and necessary.
+  //   2. The `upsertLead` reducer — `lead` is often a tiny PATCH object like
+  //      {id, status} or {id, temperature, Quality} (e.g. an optimistic
+  //      status/temperature update fired right before a call remark saves).
+  //      That reducer ALREADY merges this patch into the cache correctly
+  //      itself, just before calling toSlimLead() to compute the slim Redux
+  //      view. This line used to run AFTERWARD and unconditionally overwrite
+  //      the cache with the bare patch object — silently destroying mobile,
+  //      email, source, date, and every other field the correct merge had
+  //      just preserved. Symptom: after adding a call remark (which also
+  //      fires an optimistic status update), the lead detail screen showed
+  //      the new remark and status correctly, but Primary Phone, Email,
+  //      Source, and Date all went blank — because the "full" cache had been
+  //      reduced to just {id, status}.
+  //  `populateCache: false` is passed by the upsertLead reducer specifically
+  //  to skip this, since it already owns the correct cache merge.
+  if (populateCache && lead && lead.id) _fullLeadCache.set(lead.id, lead);
 
   // Return only the slim fields for Redux.
   const slim = {};
@@ -73,6 +93,27 @@ function toSlimLead(lead) {
   // Add summary counts so the list row can show "5 calls" without full array
   slim.callHistoryCount   = Array.isArray(lead.callHistory)    ? lead.callHistory.length    : (lead.callHistoryCount || 0);
   slim.hasScheduledCalls  = Array.isArray(lead.scheduledCalls) ? lead.scheduledCalls.length > 0 : (lead.hasScheduledCalls || false);
+
+  // ── FIX: keep a minimal projection of PENDING scheduled calls ──────────────
+  // scheduledCalls was stripped entirely to save RAM, but
+  // services/notificationService.js checkAndNotifyFollowUps() reads
+  // lead.scheduledCalls to build its reminder candidates. That worked when
+  // called from fetchLeads.fulfilled (which passes the raw full leads), but
+  // backgroundSyncService.js passes state.leads.items — the SLIM leads — so
+  // the background follow-up check found no candidates at all and silently
+  // never fired a single reminder. (The other candidate source,
+  // lead.followUpDate, is always undefined: it is not a top-level field on
+  // the backend Lead schema, only a field inside meetingRemarks.)
+  //
+  // Keeping only NOT-done entries, with only the 3 fields notifications
+  // actually use, preserves the RAM win — a lead normally has 0–2 pending
+  // follow-ups, vs the full array of every call ever scheduled.
+  slim.pendingScheduledCalls = Array.isArray(lead.scheduledCalls)
+    ? lead.scheduledCalls
+        .filter(sc => sc && !sc.done && sc.scheduledAt)
+        .map(sc => ({ scheduledAt: sc.scheduledAt, type: sc.type, note: sc.note }))
+    : (Array.isArray(lead.pendingScheduledCalls) ? lead.pendingScheduledCalls : []);
+
   return slim;
 }
 
@@ -185,7 +226,12 @@ const leadsSlice = createSlice({
         const full = _fullLeadCache.get(action.payload.id);
         _fullLeadCache.set(action.payload.id, { ...full, ...action.payload });
       }
-      const slim = toSlimLead({ ...action.payload });
+      // populateCache: false — this reducer already merged the cache
+      // correctly above; toSlimLead() must NOT also write to it here, or it
+      // overwrites that correct merge with the (often partial) action.payload
+      // directly. See the long comment on toSlimLead() for the exact bug
+      // this caused.
+      const slim = toSlimLead({ ...action.payload }, { populateCache: false });
       const idx = state.byId[slim.id] ?? -1;
       if (idx !== -1) {
         state.items[idx] = { ...state.items[idx], ...slim };
@@ -305,9 +351,9 @@ const leadsSlice = createSlice({
 export const { setSearchQuery, setFilterStatus, clearLeadsError, upsertLead } = leadsSlice.actions;
 
 export const selectFilteredLeads = createSelector(
-  (state) => state.leads.items,
-  (state) => state.leads.searchQuery,
-  (state) => state.leads.filterStatus,
+  (state) => state.leads?.items ?? [],
+  (state) => state.leads?.searchQuery ?? '',
+  (state) => state.leads?.filterStatus ?? 'all',
   (items, searchQuery, filterStatus) => {
     const q = (searchQuery || '').toLowerCase();
     return items.filter(lead => {

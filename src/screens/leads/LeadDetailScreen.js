@@ -36,16 +36,29 @@ const STATUS_OPTIONS = ['New', 'In Progress', 'Interested', 'Converted', 'Not In
 // ── Lead Nurture — industry/service classification ────────────────────────────
 // Values MUST match templateNameResolver.js exactly — they become part of the
 // MSG91 template name slug (e.g. "real_estate_crm_awareness_v1").
-// Only shown for company 6a22662b7aea6e4034f44aae.
-const NURTURE_COMPANY_ID = '6a22662b7aea6e4034f44aae';
+// NOTE: the old NURTURE_COMPANY_ID constant was removed — nurture is
+// multi-tenant on the backend now, so the industry/service pickers are no
+// longer gated on a single hardcoded company. See the comment at their
+// render site below.
 const INDUSTRIES = [
   'Healthcare', 'Education', 'Real Estate', 'Logistics', 'Finance',
   'IT Solutions', 'Digital Marketing', 'Construction', 'Local Business',
   'Interior Designers', 'Professional Services',
 ];
+// FIX: this list was a hardcoded duplicate of the backend's SERVICES array
+// (utils/templateNameResolver.js) and had drifted out of sync — missing
+// "AI Voice Agent" (already valid on the backend before this fix) and the
+// 5 newly-added services below. Every string here MUST exactly match the
+// backend's SERVICES array — leadController.js's patchLead validates
+// against that exact list and silently drops any service value it doesn't
+// recognise (see VALID_NURTURE_SERVICES there), so a mismatch here would
+// mean picking one of these does nothing when saved.
 const SERVICES = [
   'SEO', 'Paid Ads', 'Website Design & Development', 'AI Automation',
   'CRM', 'Video Editing', 'Graphic Design', 'Social Media Marketing',
+  'AI Voice Agent',
+  'Custom Software', 'WhatsApp Automation & Chatbots', 'ERP Systems',
+  'Mobile Applications', 'Branding',
 ];
 
 // ── Sector-wise outcome structure ────────────────────────────────────────────
@@ -176,7 +189,7 @@ export default function LeadDetailScreen() {
   const { dark, colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  const storeLead = useSelector((s) => s.leads.items.find(l => l.id === leadId));
+  const storeLead = useSelector((s) => (s.leads?.items ?? []).find(l => l.id === leadId));
   const contactAccountEmail = useSelector((s) => s.auth?.user?.contactAccountEmail || '');
 
   // RAM FIX: Redux now stores slim leads (no callHistory/scheduledCalls).
@@ -1034,26 +1047,48 @@ export default function LeadDetailScreen() {
     //    Manual takes priority over auto; auto only applies if manual not set.
     const autoStatus = autoStatusForOutcome(outcome, lead?.status);
     const effectiveStatus = statusUpdate || autoStatus;
+    const statusChanged = !!(effectiveStatus && effectiveStatus !== lead?.status);
 
-    if (effectiveStatus && effectiveStatus !== lead?.status) {
+    if (statusChanged) {
+      // Optimistic UI only here — the actual PATCH is bundled into the single
+      // submitCallRemark call below (see the FIX note there for why this
+      // used to be a separate dispatch(patchLead(...)) and why that was wrong).
       dispatch(upsertLead({ id: leadId, status: effectiveStatus }));
       setFetchedLead(prev => prev ? { ...prev, status: effectiveStatus } : prev);
-      dispatch(patchLead({ id: leadId, data: { status: effectiveStatus } }))
-        .unwrap()
-        .catch(() => {
-          dispatch(upsertLead({ id: leadId, status: lead?.status }));
-          setFetchedLead(prev => prev ? { ...prev, status: lead?.status } : prev);
-        });
     }
 
     closeModal();
 
+    // FIX: status is now included in this SAME request as remark + followUpDate,
+    // instead of firing a separate dispatch(patchLead({status})) beforehand.
+    //
+    // This was a genuine bug, not just a redundant extra call: the backend's
+    // scheduledCalls creation (leadController.js patchLead) — which is what
+    // actually generates the follow-up reminder AND fires the Telegram ping
+    // to the employee — is gated on `status !== undefined` being true WITHIN
+    // THE SAME REQUEST that carries followUpDate. Sending status in one PATCH
+    // and followUpDate+outcome in a separate, later PATCH meant NEITHER
+    // request ever satisfied both conditions at once — so setting a
+    // follow-up date via a normal call remark (not a Client Meeting, which
+    // has its own explicit scheduling call) silently never created a
+    // scheduledCalls entry, never pinged the employee on Telegram, and never
+    // showed up in jobs/followUpReminderJob.js's daily reminder scan. Always
+    // sending the CURRENT effective status (whether it changed or not) means
+    // the backend's shouldSchedule check correctly evaluates against
+    // followUpDate/outcome regardless of whether status happened to change.
     dispatch(submitCallRemark({
       leadId, remark: trimmed, outcome, industry, service,
       followUpDate: followUp, document: null, recording: null,
+      status: effectiveStatus || lead?.status,
     }))
       .unwrap()
       .catch((e) => {
+        if (statusChanged) {
+          // Roll back the optimistic status update — the whole request failed,
+          // including the status change that used to be a separate call.
+          dispatch(upsertLead({ id: leadId, status: lead?.status }));
+          setFetchedLead(prev => prev ? { ...prev, status: lead?.status } : prev);
+        }
         Alert.alert(
           'Remark not saved',
           `Your remark could not be saved:\n${e?.toString?.() || e}\n\nPlease open the lead and add it again.`,
@@ -1780,11 +1815,28 @@ export default function LeadDetailScreen() {
               })}
             </View>
 
-            {/* Industry + Service — only shown for SkyUp Digital Solutions.
+            {/* Industry + Service — optional nurture tags.
                 Values must match templateNameResolver.js so the correct
-                MSG91 nurture template is resolved per lead. */}
-            {String(lead?.company || '') === NURTURE_COMPANY_ID && (
-              <>
+                MSG91 nurture template is resolved per lead.
+
+                FIX: this used to render only when the lead's company matched a
+                hardcoded NURTURE_COMPANY_ID. The backend nurture job is now
+                multi-tenant (it runs for every company with the
+                leadNurtureSequence entitlement), so that hardcoded gate meant
+                employees at every OTHER nurture-enabled company physically
+                could not tag a lead from mobile — the fields never rendered.
+                Untagged leads then fall back to generic niche templates
+                instead of their correct industry+service template.
+
+                Showing the pickers unconditionally is safe: leadController's
+                patchLead only persists industry/service when the company
+                actually has the leadNurtureSequence entitlement, and it
+                validates both values against the canonical lists — so for a
+                non-nurture company the values are simply ignored server-side.
+                (A cleaner long-term fix is to expose the entitlement to the
+                app and gate on that; there is no entitlements endpoint in the
+                mobile client today.) */}
+            <>
                 <Text style={styles.modalLabel}>Industry <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text></Text>
                 <View style={styles.outcomeRow}>
                   {INDUSTRIES.map(ind => (
@@ -1809,8 +1861,7 @@ export default function LeadDetailScreen() {
                     </TouchableOpacity>
                   ))}
                 </View>
-              </>
-            )}
+            </>
 
             <Text style={styles.modalLabel}>Remark *</Text>
             <TextInput

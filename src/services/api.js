@@ -35,6 +35,7 @@ import { BASE_URL, API_TIMEOUT, IS_DEV } from '../config/config';
 import { getToken, removeToken } from './tokenStorage';
 // R-2: safe crash/telemetry reporter (no-op until the native module is linked).
 import crash from './crashReporting';
+import { recordServerDate } from './serverTime';
 
 // PERF FIX: dev-only logger. Calls compile away to nothing when IS_DEV=false
 // (no string concatenation, no bridge crossing). Use these instead of
@@ -110,6 +111,12 @@ api.interceptors.response.use(
 // ─── Response interceptor ────────────────────────────────────────────────────
 api.interceptors.response.use(
   (response) => {
+    // Keep the server-time offset fresh from the response's Date header, so
+    // any UI that shows elapsed/duration uses SERVER time rather than the
+    // device clock. Costs nothing (header is already present on every
+    // response) and self-corrects as the app makes normal requests.
+    // See services/serverTime.js for why this matters.
+    try { recordServerDate(response.headers?.date); } catch { /* never break a response */ }
     dlog(`[API ✓] ${response.status} ${response.config.url}`);
     return response;
   },
@@ -182,7 +189,16 @@ function buildUserMessage(error) {
     case 404: return 'Resource not found.';
     case 422: return serverMsg || 'Validation failed.';
     case 429: return 'Too many requests. Please wait a moment.';
-    case 500: return 'Server error. Please try again later.';
+    // FIX: this used to hardcode a generic string, unlike every other status
+    // code here — completely discarding whatever specific error.message the
+    // backend actually sent (e.g. patchLead's catch block always returns
+    // res.status(500).json({message: error.message}), a real, often useful
+    // diagnostic string). A 500 is already the "something unexpected broke"
+    // case; throwing away the one clue about WHAT broke made every 500 in
+    // the app look identical and undiagnosable from the error alert alone —
+    // exactly what happened trying to diagnose the "Remark not saved" bug.
+    // Same serverMsg-first pattern as 400/401/422 above.
+    case 500: return serverMsg || 'Server error. Please try again later.';
     case 503: return 'Server is temporarily unavailable.';
     default:  return serverMsg || `Unexpected error (${status}).`;
   }

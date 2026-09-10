@@ -202,6 +202,9 @@ export default function DashboardScreen() {
   const loading       = useSelector(s => s.leads?.loading ?? false);
   const lastFetchedAt = useSelector(s => s.leads?.lastFetchedAt);
   const user          = useSelector(s => s.auth?.user);
+  // Same derivation as LeadsScreen.js / CallLogsScreen.js — used here to hide
+  // employee-only widgets (Attendance) that don't apply to an admin session.
+  const isAdmin       = user?.role === 'admin' || user?.role === 'super_admin';
 
   // ── Auto sync setup on first login
   useAutoSyncSetup();
@@ -336,9 +339,11 @@ export default function DashboardScreen() {
           </View>
         )}
 
-        {/* Attendance Widget */}
+        {/* Attendance Widget — employee-only. An admin/company owner has no
+            reason to clock themselves in; this was showing for admin simply
+            because nothing here checked role before now. */}
         <NotificationPermissionBanner />
-        <AttendanceWidget />
+        {!isAdmin && <AttendanceWidget />}
 
         {/* KPI Cards */}
         <View style={styles.kpiGrid}>
