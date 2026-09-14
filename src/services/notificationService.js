@@ -3,6 +3,7 @@
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { serverNow } from './serverTime';
+import { getFCMNavigationTarget } from './fcmTokenService';
 
 // ── Safe import — app will not crash if notifee is not installed yet ──────────
 let notifee = null;
@@ -541,6 +542,20 @@ export function registerNotificationHandlers(
 
   const handlePress = notification => {
     if (!notification) return;
+
+    // FIX: check the real FCM data payload FIRST (type/leadId, now actually
+    // attached in fcmTokenService.js's displayFCMNotification) rather than
+    // relying only on brittle id-string prefix matching — that matching
+    // didn't even match the actual ids being used (fcm_new_lead_*,
+    // fcm_reassigned_*), so tapping those notifications silently did
+    // nothing. Falls through to the existing id-prefix checks below for
+    // genuinely local-only notifications (scheduled reminders) that have
+    // no FCM data payload at all.
+    const fcmTarget = getFCMNavigationTarget(notification.data);
+    if (fcmTarget) {
+      navigate(fcmTarget.screen, fcmTarget.params);
+      return;
+    }
 
     if (
       notification.id?.startsWith('followup_')

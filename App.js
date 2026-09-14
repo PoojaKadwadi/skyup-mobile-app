@@ -85,6 +85,7 @@ import {
   registerFCMToken,
   startFCMTokenRefreshListener,
   startFCMForegroundListener,
+  registerFCMNotificationOpenHandlers,
   clearFCMToken,
   handleFCMBackgroundMessages,
 } from './src/services/fcmTokenService';
@@ -147,6 +148,7 @@ function AppManager() {
   const fcmRefreshUnsub = useRef(null);
   // ✅ FIX — store unsubscribe fn for FCM foreground listener
   const fcmForegroundUnsub = useRef(null);
+  const fcmOpenUnsub = useRef(null);
 
   // PERF/UX: warm the Render free-tier backend the instant the app launches,
   // independent of login. It sleeps after inactivity and takes 30–60s to
@@ -198,6 +200,15 @@ function AppManager() {
           fcmForegroundUnsub.current();
         }
         fcmForegroundUnsub.current = startFCMForegroundListener();
+
+        // BUG FIX: notifications were received but tapping them didn't
+        // navigate anywhere — onNotificationOpenedApp (backgrounded app) and
+        // getInitialNotification (killed app) were never registered at all.
+        // See the long comment in fcmTokenService.js for the full trace.
+        if (fcmOpenUnsub.current) {
+          fcmOpenUnsub.current();
+        }
+        fcmOpenUnsub.current = registerFCMNotificationOpenHandlers(navigationRef);
 
         // ✅ Start background sync after notifications
         startBackgroundSync();
@@ -271,6 +282,12 @@ function AppManager() {
       if (fcmForegroundUnsub.current) {
         fcmForegroundUnsub.current();
         fcmForegroundUnsub.current = null;
+      }
+
+      // BUG FIX — stop FCM notification-open listener
+      if (fcmOpenUnsub.current) {
+        fcmOpenUnsub.current();
+        fcmOpenUnsub.current = null;
       }
 
       // ✅ NEW — disconnect socket
