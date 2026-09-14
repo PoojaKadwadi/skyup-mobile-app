@@ -3,6 +3,7 @@ import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Alert, Modal, ActivityIndicator, StatusBar,
   KeyboardAvoidingView, Platform, AppState, Linking, InteractionManager,
+  Animated,
 } from 'react-native';
 // CRASH FIX: @react-native-community/datetimepicker NOT in bundle — removed import
 // DateTimePickerAndroid.open() was crashing the Follow-Up button on every Android device.
@@ -187,7 +188,7 @@ export default function LeadDetailScreen() {
   const dispatch   = useDispatch();
   const navigation = useNavigation();
   const route      = useRoute();
-  const { leadId, postCall = false } = route.params;
+  const { leadId, postCall = false, highlightFollowUp = false } = route.params;
   const { dark, colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -302,6 +303,25 @@ export default function LeadDetailScreen() {
       setNiSubmitting(false);
     }
   };
+
+  // FEATURE: scroll to + pulse-highlight the Follow-Up field when opened via
+  // highlightFollowUp:true. Runs once lead data is loaded and the field has
+  // been laid out (followUpFieldY populated by its onLayout below) — a
+  // short delay lets the initial render/layout settle first.
+  useEffect(() => {
+    if (!highlightFollowUp || !lead?.followUpDate) return;
+    const timer = setTimeout(() => {
+      if (scrollViewRef.current && followUpFieldY.current > 0) {
+        scrollViewRef.current.scrollTo({ y: Math.max(followUpFieldY.current - 80, 0), animated: true });
+      }
+      Animated.sequence([
+        Animated.timing(followUpHighlightAnim, { toValue: 1, duration: 250, useNativeDriver: false }),
+        Animated.delay(900),
+        Animated.timing(followUpHighlightAnim, { toValue: 0, duration: 500, useNativeDriver: false }),
+      ]).start();
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [highlightFollowUp, lead?.followUpDate]);
 
   useEffect(() => {
     let cancelled = false;
@@ -605,6 +625,16 @@ export default function LeadDetailScreen() {
   const backgroundAtRef  = React.useRef(0);
   const callNumberRef    = React.useRef('');    // number of the in-flight call
   const callStartedAtRef = React.useRef(0);
+
+  // FEATURE: tapping a follow-up notification opens this screen but the
+  // Follow-Up field was just one item lost among everything else on the
+  // page — the person had to hunt for it. When navigated here with
+  // highlightFollowUp:true (see fcmTokenService.js's getFCMNavigationTarget
+  // and notificationService.js's local-reminder handling), auto-scroll to
+  // and briefly pulse-highlight that specific field instead.
+  const scrollViewRef       = React.useRef(null);
+  const followUpFieldY      = React.useRef(0);
+  const followUpHighlightAnim = React.useRef(new Animated.Value(0)).current;
   // PERF FIX: track mount state so AppState listener never updates unmounted
   // component state or leaves a stale listener if user navigates away mid-call.
   const isMountedRef     = React.useRef(true);
@@ -1360,7 +1390,7 @@ export default function LeadDetailScreen() {
         <CallButton phoneNumber={primaryNumber} onCallStart={handleCall} size="small" />
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false}>
+      <ScrollView ref={scrollViewRef} showsVerticalScrollIndicator={false}>
 
         <View style={styles.infoCard}>
           <View style={styles.infoRow}>
@@ -1497,7 +1527,18 @@ export default function LeadDetailScreen() {
           {lead.followUpDate ? (
             <>
               <View style={styles.divider} />
-              <InfoItem icon="calendar-clock" label="Follow-Up" value={formatDateTime(lead.followUpDate)} full />
+              <Animated.View
+                onLayout={(e) => { followUpFieldY.current = e.nativeEvent.layout.y; }}
+                style={{
+                  backgroundColor: followUpHighlightAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: ['rgba(0,0,0,0)', dark ? 'rgba(59,130,246,0.25)' : 'rgba(59,130,246,0.15)'],
+                  }),
+                  borderRadius: 8,
+                }}
+              >
+                <InfoItem icon="calendar-clock" label="Follow-Up" value={formatDateTime(lead.followUpDate)} full />
+              </Animated.View>
             </>
           ) : null}
         </View>
