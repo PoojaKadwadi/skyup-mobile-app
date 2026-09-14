@@ -18,6 +18,8 @@ import { markLeadInvalid, markNotInterested, getLeadActionSummary, getLeadById }
 import { triggerPostCallRecordingSync }            from '../../services/backgroundSyncService';
 import { syncCallLogs }                            from '../../api/callLogsApi';
 import CallButton                                  from '../../components/CallButton';
+// SECURITY: block screenshots/screen-recording while sensitive PII is shown.
+import { enableSecureScreen, disableSecureScreen } from '../../services/secureScreen';
 import LeadRecordingsSection                       from '../../components/LeadRecordingsSection';
 import CalendarDateTimePicker                       from '../../components/CalendarDateTimePicker';
 import { postMeetingRemark }                        from '../../api/meetingsApi';
@@ -339,6 +341,18 @@ export default function LeadDetailScreen() {
         .catch(() => {});               // silent — keep showing cached data on failure
       return () => { cancelled = true; };
     }, [leadId, dispatch]),
+  );
+
+  // ── SECURITY: block screenshots/screen-recording/Recent-Apps thumbnail ─────
+  // Lead detail shows customer PII (phone numbers, remarks, meeting notes).
+  // Enabled only while this screen is focused; always disabled on blur/
+  // unmount so the rest of the app is unaffected. No-ops safely if the
+  // native module isn't available (see services/secureScreen.js).
+  useFocusEffect(
+    useCallback(() => {
+      enableSecureScreen();
+      return () => disableSecureScreen();
+    }, [])
   );
 
   // ── Has this lead already been marked "Interested"? ─────────────────────────

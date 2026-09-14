@@ -64,6 +64,14 @@
         </intent>
     </queries>
 
+    <!-- SECURITY: usesCleartextTraffic below was "true", which is misleading/
+         redundant given network_security_config.xml already denies cleartext
+         everywhere except the local-dev hosts (10.0.2.2/localhost/127.0.0.1).
+         On this app's minSdk (24+) the network security config is
+         authoritative over this attribute anyway. Set to "false" to remove
+         the contradiction and add a defense-in-depth default in case the
+         config file is ever changed to one without an explicit base-config
+         cleartextTrafficPermitted value. -->
     <application
       android:name=".MainApplication"
       android:label="SkyUp CRM"
@@ -72,7 +80,7 @@
       android:roundIcon="@mipmap/ic_launcher"
       android:allowBackup="false"
       android:theme="@style/AppTheme"
-      android:usesCleartextTraffic="true"
+      android:usesCleartextTraffic="false"
       android:networkSecurityConfig="@xml/network_security_config"
       android:supportsRtl="true">
 

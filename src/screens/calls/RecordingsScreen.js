@@ -14,7 +14,7 @@ import {
   View, Text, FlatList, StyleSheet, TouchableOpacity,
   Alert, ActivityIndicator, StatusBar, InteractionManager,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import Icon              from 'react-native-vector-icons/MaterialCommunityIcons';
 import AsyncStorage      from '@react-native-async-storage/async-storage';
 import moment            from 'moment';
@@ -22,6 +22,10 @@ import { useTheme }      from '../../theme/ThemeContext';
 
 import { normalizePhone } from '../../services/phoneService';
 import { store }          from '../../store';
+// SECURITY: call recordings are sensitive conversation audio — block
+// screenshots/screen-recording/Recent-Apps thumbnail while this screen is
+// open. No-ops safely if unavailable (see services/secureScreen.js).
+import { enableSecureScreen, disableSecureScreen } from '../../services/secureScreen';
 
 // Mask phone for display only — full number is still used for upload/matching
 function maskPhone(phone) {
@@ -308,6 +312,15 @@ function makeFileKey(filename, phone, mtimeMs) {
 
 export default function RecordingsScreen() {
   const navigation = useNavigation();
+
+  // SECURITY: enable FLAG_SECURE only while this screen is focused; always
+  // disable on blur/unmount so the rest of the app is unaffected.
+  useFocusEffect(
+    useCallback(() => {
+      enableSecureScreen();
+      return () => disableSecureScreen();
+    }, [])
+  );
   const { dark, colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [recordings,    setRecordings]    = useState([]);

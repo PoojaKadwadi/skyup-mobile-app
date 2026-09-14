@@ -23,6 +23,9 @@ class MainApplication : Application(), ReactApplication {
           // previously registered here. If/when their Kotlin sources are
           // restored, re-add their package(s) to this list, e.g.:
           //   packages.add(CallStatePackage())
+          // SECURITY: exposes FLAG_SECURE toggling to JS for sensitive screens
+          // (call recordings, lead PII) — see src/services/secureScreen.js.
+          packages.add(SecureScreenPackage())
           return packages
         }
 

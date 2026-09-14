@@ -105,6 +105,7 @@ function getKnownLeadNumberSet() {
 let syncInterval         = null;
 let followUpInterval     = null;
 let appStateListener     = null;
+let netInfoUnsubscribe   = null;
 let isSyncing            = false;
 let isCheckingFollowUps  = false;
 
@@ -328,12 +329,38 @@ export const startBackgroundSync = () => {
       InteractionManager.runAfterInteractions(() => { doFollowUpCheck(); });
     }
   });
+
+  // RELIABILITY FIX: react to connectivity coming back instead of only
+  // syncing on a fixed timer. Previously a recording/call-log that failed to
+  // upload because the device had no signal right after a call would just
+  // wait for the next 10–15 min interval tick (or the agent manually opening
+  // the app) before it was retried — on a CRM where "admin needs to see the
+  // recording" this delay matters. Now: the moment NetInfo reports the
+  // device went offline→online, an immediate sync is queued (debounced so a
+  // flapping connection doesn't spam requests).
+  let _wasConnected = true;
+  let _reconnectDebounce = null;
+  netInfoUnsubscribe = NetInfo.addEventListener((state) => {
+    const isConnected = !!(state.isConnected && state.isInternetReachable !== false);
+    if (isConnected && !_wasConnected) {
+      console.log('[Sync] 📶 Connectivity restored — queuing immediate sync');
+      if (_reconnectDebounce) clearTimeout(_reconnectDebounce);
+      // Small debounce: let the radio fully settle before hammering it with
+      // requests, and avoid double-firing on rapid connected/disconnected
+      // flicker (common when switching between WiFi and mobile data).
+      _reconnectDebounce = setTimeout(() => {
+        doSyncDeferred({ fromForeground: false });
+      }, 2000);
+    }
+    _wasConnected = isConnected;
+  });
 };
 
 export const stopBackgroundSync = () => {
   if (syncInterval)     { clearInterval(syncInterval);     syncInterval     = null; }
   if (followUpInterval) { clearInterval(followUpInterval); followUpInterval = null; }
   if (appStateListener) { appStateListener.remove();       appStateListener = null; }
+  if (netInfoUnsubscribe) { netInfoUnsubscribe();          netInfoUnsubscribe = null; }
   // Clear session-scoped dedup state on logout
   _postCallSyncedNumbers.clear();
   _lastAutoUploadAt = 0;

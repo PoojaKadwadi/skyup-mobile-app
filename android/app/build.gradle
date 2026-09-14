@@ -20,13 +20,17 @@ configurations.all {
     buildToolsVersion "34.0.0"
     compileSdk 35
     namespace "com.skyupcrm"
+
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
     defaultConfig {
         applicationId "com.skyupcrm"
         minSdkVersion 24
         targetSdkVersion 35
-        // B-2: bump versionCode on EVERY release (ideally from CI). Play Store
-        // rejects an upload whose versionCode isn't strictly higher than the
-        // installed build, so a stuck versionCode blocks user updates.
         versionCode 2
         versionName "1.0.1"
     }
@@ -36,16 +40,6 @@ configurations.all {
             enable true
             reset()
             include "armeabi-v7a", "arm64-v8a"
-            // FIX: was false — this app's APK is also distributed for manual
-            // sideload via the backend's /download and /install routes (not
-            // just Play Store, which handles per-ABI delivery automatically).
-            // With only split APKs and no universal one, whoever runs the
-            // release build has to guess which employee's phone is 32-bit vs
-            // 64-bit before copying the right file to the backend. Enabling
-            // the universal APK produces a third file
-            // (app-universal-release.apk) that installs on either
-            // architecture, so /download always has one file that works for
-            // everyone.
             universalApk true
         }
     }
@@ -70,12 +64,6 @@ configurations.all {
     buildTypes {
         debug { signingConfig signingConfigs.debug }
         release {
-            // S-3: NEVER silently fall back to the public debug key for a release
-            // build. A debug-signed release APK cannot update over a real release
-            // install and is trivially re-signable. If the release keystore is
-            // configured, use it; otherwise FAIL the build — but only when a
-            // release APK/bundle is actually being assembled, so debug builds and
-            // IDE sync still work without the release keystore present.
             if (project.hasProperty('MYAPP_RELEASE_STORE_FILE')) {
                 signingConfig signingConfigs.release
             } else {
@@ -114,13 +102,10 @@ dependencies {
     implementation("com.facebook.react:react-android")
     implementation("com.facebook.react:hermes-android")
 
-    // ✅ Firebase BOM — controls all Firebase library versions together
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+
     implementation(platform("com.google.firebase:firebase-bom:33.1.0"))
-
-    // ✅ Firebase Messaging (FCM) — required for push notifications
     implementation("com.google.firebase:firebase-messaging")
-
-    // ✅ Firebase Analytics — required for Firebase to initialize properly
     implementation("com.google.firebase:firebase-analytics")
 }
 

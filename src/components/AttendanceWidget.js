@@ -56,6 +56,28 @@ function fmtMins(mins) {
   const m = mins % 60;
   return `${h}h ${m.toString().padStart(2, '0')}m`;
 }
+
+// BUG FIX ("Total Work timing ... sometimes shows wrong"): there used to be
+// TWO copies of this elapsed-work-time calculation — one inside the main tick
+// effect (correct: subtracts the CURRENTLY-RUNNING break's elapsed time too),
+// and a second, separate one inside the AppState-resume handler that only
+// subtracted `totalBreakMinutes` (the break total as of the LAST completed
+// break) and silently ignored any break still in progress. Resuming the app
+// from the background while on an active break re-registered the interval
+// using that second, buggy version — so from that point on, worked time was
+// overcounted by however long the break had been running, and stayed wrong
+// until the break ended (which finally updates totalBreakMinutes). Both call
+// sites now share this single implementation so there is only one place this
+// can ever go wrong.
+function computeElapsedSecs(rec) {
+  if (!rec?.loginTime || rec?.logoutTime) return 0;
+  const activeBreakMs =
+    rec.activeBreakIndex !== null && rec.activeBreakIndex !== undefined
+      ? serverNow() - new Date(rec.breaks?.[rec.activeBreakIndex]?.startTime || serverNow())
+      : 0;
+  const breakMins = (rec.totalBreakMinutes || 0) + Math.round(activeBreakMs / 60000);
+  return Math.max(0, Math.round((serverNow() - new Date(rec.loginTime)) / 1000) - breakMins * 60);
+}
 function fmtTime(d) {
   if (!d) return '—';
   // toLocaleTimeString relies on Hermes ICU data which may be incomplete
@@ -342,17 +364,7 @@ export default function AttendanceWidget() {
         }
         return;
       }
-      const breakMins =
-        (rec.totalBreakMinutes || 0) +
-        (rec.activeBreakIndex !== null && rec.activeBreakIndex !== undefined
-          ? Math.round(
-              (serverNow() - new Date(rec.breaks?.[rec.activeBreakIndex]?.startTime || serverNow())) / 60000
-            )
-          : 0);
-      const secs = Math.max(
-        0,
-        Math.round((serverNow() - new Date(rec.loginTime)) / 1000) - breakMins * 60,
-      );
+      const secs = computeElapsedSecs(rec);
       if (secs !== lastElapsedRef.current) {
         lastElapsedRef.current = secs;
         setElapsed(secs);
@@ -390,8 +402,10 @@ export default function AttendanceWidget() {
           const tick = () => {
             const r = recordRef.current;
             if (!r?.loginTime || r?.logoutTime) return;
-            const breakMins = (r.totalBreakMinutes || 0);
-            const secs = Math.max(0, Math.round((serverNow() - new Date(r.loginTime)) / 1000) - breakMins * 60);
+            // BUG FIX: was `(r.totalBreakMinutes || 0)` only — ignored a
+            // currently-in-progress break, overcounting work time until the
+            // break ended. See computeElapsedSecs doc comment above.
+            const secs = computeElapsedSecs(r);
             if (secs !== lastElapsedRef.current) { lastElapsedRef.current = secs; setElapsed(secs); }
           };
           tickRef.current = setInterval(tick, tickInterval);

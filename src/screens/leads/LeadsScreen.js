@@ -445,7 +445,6 @@ export default function LeadsScreen() {
   const [filterSource,   setFilterSource]   = useState('All');
   const [filterDate,     setFilterDate]     = useState('all');
   const [followUpOnly,   setFollowUpOnly]   = useState(false);
-
   // Custom date-range picker state
   const [customFrom,         setCustomFrom]         = useState(null);
   const [customTo,           setCustomTo]           = useState(null);
@@ -454,6 +453,48 @@ export default function LeadsScreen() {
 
   const [localSearch, setLocalSearch] = useState(searchQuery);
   const debounceRef = useRef(null);
+
+  // BUG FIX: after searching or filtering and then clearing/closing it, the
+  // list stayed scrolled wherever it happened to be (e.g. deep in a filtered
+  // result), instead of returning to the top of the now-different list. This
+  // ref + effect scrolls back to the top whenever the active search/filter/
+  // sort criteria change, so the user always starts reading the new result
+  // set from the beginning.
+  const listRef = useRef(null);
+  useEffect(() => {
+    listRef.current?.scrollToOffset?.({ offset: 0, animated: false });
+  }, [searchQuery, filterStatus, filterTemp, filterIndustry, filterSource, filterDate, sortBy, followUpOnly]);
+
+  // ── BUG FIX: new leads shouldn't pop into view while the user is reading ──
+  // further down the list. `displayed` is live — a brand-new lead (pushed via
+  // socket, or an existing lead whose sort key changed) lands at index 0 the
+  // instant it arrives. Previously that reordered the list under the user's
+  // finger mid-scroll. Now: while scrolled away from the top in the DEFAULT
+  // view (no search/filter, default sort, not the follow-up view), the list
+  // stays frozen at what the user is already looking at, and a small banner
+  // reports how many new leads are waiting above — tapping it (or scrolling
+  // back to the top yourself) reveals them. Any active search/filter/sort
+  // is left exactly as before (unaffected by this).
+  const isNearTopRef      = useRef(true);
+  const frozenAnchorIdRef = useRef(null);
+  const [frozenList,      setFrozenList]      = useState(null); // null = not frozen
+  const [pendingNewCount, setPendingNewCount] = useState(0);
+
+  const isDefaultView =
+    !localSearch && filterStatus === 'all' && filterTemp === 'All' &&
+    filterIndustry === 'All' && filterSource === 'All' && filterDate === 'all' &&
+    sortBy === 'recent' && !followUpOnly;
+
+  const handleScroll = useCallback((e) => {
+    isNearTopRef.current = e.nativeEvent.contentOffset.y < ITEM_TOTAL;
+  }, []);
+
+  const revealNewLeads = useCallback(() => {
+    setFrozenList(null);
+    setPendingNewCount(0);
+    frozenAnchorIdRef.current = null;
+    listRef.current?.scrollToOffset?.({ offset: 0, animated: true });
+  }, []);
 
   // Source options built from whatever's actually in the data (csv, meta,
   // excel, manual, etc.) so this never goes stale as new sources appear.
@@ -564,6 +605,45 @@ export default function LeadsScreen() {
     }
     return res;
   }, [filteredLeads, allItems, sortBy, filterTemp, filterIndustry, filterSource, filterDate, customFrom, customTo, followUpOnly]);
+
+  const prevDisplayedRef = useRef(displayed);
+  useEffect(() => {
+    const prevList = prevDisplayedRef.current;
+
+    if (!isDefaultView || isNearTopRef.current) {
+      // Live mode: either not in the scenario this applies to, or the user
+      // is already at (or near) the top, so a reorder there is expected.
+      if (frozenList) setFrozenList(null);
+      if (pendingNewCount) setPendingNewCount(0);
+      frozenAnchorIdRef.current = null;
+      prevDisplayedRef.current = displayed;
+      return;
+    }
+
+    if (!frozenList) {
+      // First divergence detected while scrolled down — freeze at what the
+      // user was ALREADY looking at (the list as of the previous render),
+      // not the incoming one that already contains the new item.
+      setFrozenList(prevList);
+      const anchorId = prevList[0]?.id ?? null;
+      frozenAnchorIdRef.current = anchorId;
+      const idx = anchorId ? displayed.findIndex(l => l.id === anchorId) : -1;
+      setPendingNewCount(idx === -1 ? 1 : idx);
+      prevDisplayedRef.current = displayed;
+      return;
+    }
+
+    // Already frozen — count how many items now sit ahead of the frozen
+    // anchor in the live data. That's the "N new leads" badge.
+    const idx = frozenAnchorIdRef.current
+      ? displayed.findIndex(l => l.id === frozenAnchorIdRef.current)
+      : -1;
+    setPendingNewCount(idx === -1 ? pendingNewCount : idx);
+    prevDisplayedRef.current = displayed;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayed, isDefaultView]);
+
+  const visibleList = frozenList || displayed;
 
   const renderItem = useCallback(({ item }) => (
     <LeadRow item={item} leadId={item.id} onPress={handleLeadPress} onCallStart={handleCallStart} />
@@ -765,9 +845,22 @@ export default function LeadsScreen() {
         />
       </View>
 
+      {/* ── New-leads banner (only while frozen — see the effect above) ──── */}
+      {pendingNewCount > 0 && (
+        <TouchableOpacity style={s.newLeadsBanner} onPress={revealNewLeads} activeOpacity={0.85}>
+          <Icon name="arrow-up-circle" size={14} color={colors.blue} />
+          <Text style={s.newLeadsBannerTxt}>
+            {pendingNewCount} new lead{pendingNewCount > 1 ? 's' : ''} — tap to view
+          </Text>
+        </TouchableOpacity>
+      )}
+
       {/* ── Lead list ───────────────────────────────────────────────────── */}
       <FlatList
-        data={displayed}
+        ref={listRef}
+        data={visibleList}
+        onScroll={handleScroll}
+        scrollEventThrottle={100}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
         getItemLayout={getItemLayout}
@@ -852,6 +945,8 @@ function createStyles(colors) {
     // Follow-up banner
     followUpBanner:    { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 10, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.amberBg, borderWidth: 1, borderColor: colors.amber + '55' },
     followUpBannerTxt: { flex: 1, fontSize: FONT.sm, fontWeight: '600', color: colors.amberLight },
+    newLeadsBanner:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginHorizontal: 16, marginTop: 10, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.blueBg, borderWidth: 1, borderColor: colors.blue + '55' },
+    newLeadsBannerTxt: { fontSize: FONT.sm, fontWeight: '700', color: colors.blueLight },
 
     // Search row
     searchRow:   { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, gap: 8 },

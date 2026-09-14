@@ -333,6 +333,18 @@ export default function CallLogsScreen() {
         </View>
       </View>
 
+      {/* NEW: entry point into DayCallLogsScreen — CallLogsScreen only ever
+          shows today; this lets the user pick any past day to review. */}
+      <TouchableOpacity
+        style={styles.byDateRow}
+        onPress={() => navigation.navigate('DayCallLogs')}
+        activeOpacity={0.7}
+      >
+        <Icon name="calendar-search" size={16} color={colors.primary} />
+        <Text style={styles.byDateText}>View calls for a specific day</Text>
+        <Icon name="chevron-right" size={16} color={colors.textMuted} />
+      </TouchableOpacity>
+
       <View style={styles.syncInfo}>
         <Icon name="information-outline" size={12} color={colors.textMuted} />
         <Text style={styles.syncInfoText}>{syncedText}</Text>
@@ -423,6 +435,8 @@ function createStyles(colors) {
     autoSyncText:        { color: colors.greenLight, fontSize: 12, fontWeight: '600' },
     syncInfo:            { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 20, paddingVertical: 8 },
     syncInfoText:        { fontSize: 11, color: colors.textMuted },
+    byDateRow:           { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 20, paddingVertical: 12, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
+    byDateText:          { flex: 1, fontSize: 13, fontWeight: '600', color: colors.textPrimary },
     filterRow:           { flexDirection: 'row', paddingHorizontal: 16, gap: 8, marginBottom: 12 },
     filterTab:           { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
     filterTabActive:     { backgroundColor: colors.surfaceAlt, borderColor: colors.textMuted },

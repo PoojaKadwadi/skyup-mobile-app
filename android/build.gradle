@@ -15,7 +15,7 @@ buildscript {
         maven { url "https://maven.aliyun.com/repository/central" }
     }
     dependencies {
-        classpath("com.android.tools.build:gradle:8.3.2")
+        classpath("com.android.tools.build:gradle:8.4.2")
         classpath("com.facebook.react:react-native-gradle-plugin")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${kotlinVersion}")
         classpath("com.google.gms:google-services:4.4.0")

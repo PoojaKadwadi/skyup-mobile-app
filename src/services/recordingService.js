@@ -259,13 +259,40 @@ function resolveLast4ToPhone(last4, fileMs, callLogs, preferPhone = null) {
   }
 
   // 2. Call-log match by suffix, disambiguated by time proximity.
+  //
+  // RELIABILITY FIX ("recording syncing from other lead"): if TWO different
+  // numbers in the call log share the same last 4 digits and were BOTH
+  // called close together in time (agent doing back-to-back calls), the old
+  // code silently picked whichever was time-closest — with no way to tell a
+  // confident match from a coin-flip guess. A wrong guess here means one
+  // lead's recorded conversation gets attached to a DIFFERENT lead's file
+  // list, which is worse than just not auto-attributing it. Now: if the two
+  // best candidates (for DIFFERENT phone numbers) are within AMBIGUITY_MS of
+  // each other, treat it as ambiguous and return no match — the periodic
+  // sweep / manual Recordings screen can still surface the file for the
+  // agent to attribute by hand, but it won't silently land on the wrong lead.
+  const AMBIGUITY_MS = 90 * 1000; // two calls within 90s of each other = too close to call
   let best = null, minDiff = Infinity;
+  let secondBest = null, secondMinDiff = Infinity;
   for (const log of callLogs || []) {
     const norm = normalizePhone(log.phoneNumber || '');
     if (!norm || norm.length < 4) continue;
     if (norm.slice(-4) !== last4) continue;
     const diff = Math.abs(fileMs - parseInt(log.timestamp));
-    if (diff < WINDOW && diff < minDiff) { minDiff = diff; best = norm; }
+    if (diff >= WINDOW) continue;
+    if (diff < minDiff) {
+      // Previous best becomes second-best, but only if it's a genuinely
+      // different number (multiple call-log rows for the SAME number, e.g.
+      // a missed call followed by a real one, aren't "ambiguity").
+      if (best && best !== norm) { secondBest = best; secondMinDiff = minDiff; }
+      minDiff = diff; best = norm;
+    } else if (diff < secondMinDiff && norm !== best) {
+      secondMinDiff = diff; secondBest = norm;
+    }
+  }
+  if (best && secondBest && Math.abs(minDiff - secondMinDiff) < AMBIGUITY_MS) {
+    console.log(`[recordingService] Ambiguous last-4 match for ${last4} (${best} vs ${secondBest}) — skipping auto-attribution`);
+    return null;
   }
   return best;
 }
@@ -364,6 +391,92 @@ const saveUploadedSet = async (set) => {
   }
 };
 
+// ── Pending-retry queue (RELIABILITY FIX) ─────────────────────────────────────
+// PROBLEM THIS FIXES:
+//   A file that fails all 3 in-line retry attempts inside syncRecordings()
+//   (typically: no signal / dead spot right after a call) was simply dropped.
+//   It stayed un-uploaded on disk, which sounds recoverable — except the
+//   PERIODIC sweep's scan window (`sinceMs`) advances forward every run
+//   (backgroundSyncService always calls setTs(LAST_REC_SYNC_KEY) after a
+//   sweep, success or not). So once the sweep's window moved past that
+//   file's mtime, no future periodic sweep would ever look at it again.
+//   The only way it got uploaded was the agent manually opening the
+//   Recordings screen (which re-scans all of today's files) — i.e. it
+//   silently stopped being "auto" the moment the network hiccuped.
+//
+// FIX:
+//   Every file that exhausts its retries is now recorded in a small
+//   persisted queue (survives app restarts/kills). retryPendingUploads()
+//   is called at the START of every syncRecordings() run (periodic sweep,
+//   post-call sync, and manual sync all funnel through syncRecordings),
+//   so a previously-failed file gets another attempt on every sync cycle
+//   regardless of the scan time window, until it succeeds. Entries older
+//   than 48h are dropped (the source file itself was likely cleaned up by
+//   the OS/dialer app by then).
+const PENDING_RETRY_KEY   = 'recording_pending_retry_v1';
+const PENDING_RETRY_TTL_MS = 48 * 60 * 60 * 1000; // 48h
+
+const loadPendingRetryQueue = async () => {
+  try {
+    const raw = await AsyncStorage.getItem(PENDING_RETRY_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    const cutoff = Date.now() - PENDING_RETRY_TTL_MS;
+    return Array.isArray(arr) ? arr.filter(e => e && e.queuedAt > cutoff) : [];
+  } catch { return []; }
+};
+
+const savePendingRetryQueue = async (queue) => {
+  try { await AsyncStorage.setItem(PENDING_RETRY_KEY, JSON.stringify(queue)); }
+  catch (e) { console.warn('[recordingService] savePendingRetryQueue error:', e.message); }
+};
+
+async function enqueuePendingRetry(filePath, phone, fileMs) {
+  const queue = await loadPendingRetryQueue();
+  const fileKey = makeFileKey(filePath.split('/').pop(), phone, fileMs);
+  if (queue.some(e => e.fileKey === fileKey)) return; // already queued
+  queue.push({ fileKey, filePath, phone, fileMs, queuedAt: Date.now() });
+  await savePendingRetryQueue(queue);
+  console.log('[recordingService] Queued for retry after connectivity/next sync:', filePath.split('/').pop());
+}
+
+// Attempts every pending file once. Called at the top of every sync cycle so
+// a file that failed due to a transient network drop gets retried on the very
+// next sync — including one triggered immediately by connectivity coming back
+// (see backgroundSyncService's NetInfo listener) — not just the next time its
+// mtime happens to fall inside a scan window.
+export async function retryPendingUploads() {
+  if (Platform.OS !== 'android') return { uploaded: 0, remaining: 0 };
+
+  const queue = await loadPendingRetryQueue();
+  if (queue.length === 0) return { uploaded: 0, remaining: 0 };
+
+  const uploadedSet = await loadUploadedSet();
+  const stillPending = [];
+  let uploaded = 0;
+
+  for (const entry of queue) {
+    if (uploadedSet.has(entry.fileKey)) continue; // uploaded via another path already
+
+    try {
+      const exists = RNFS ? await RNFS.exists(entry.filePath) : false;
+      if (!exists) continue; // file no longer on disk — drop from queue, nothing to retry
+
+      await uploadRecording(entry.filePath, entry.phone, entry.fileMs);
+      uploadedSet.add(entry.fileKey);
+      uploaded++;
+      console.log('[recordingService] ✅ Pending retry succeeded:', entry.filePath.split('/').pop());
+    } catch {
+      stillPending.push(entry); // keep it queued for the next cycle
+    }
+  }
+
+  if (uploaded > 0) await saveUploadedSet(uploadedSet);
+  await savePendingRetryQueue(stillPending);
+
+  return { uploaded, remaining: stillPending.length };
+}
+
 // ── isFile helper ─────────────────────────────────────────────────────────────
 // react-native-fs returns isFile as a FUNCTION on some builds and a BOOLEAN
 // PROPERTY on others (Samsung/newer Android).
@@ -418,6 +531,18 @@ export const syncRecordings = async (phoneNumber = null, sinceMs = 0, skipPhones
 
   const granted = await requestStoragePermission();
   if (!granted) return { uploaded: 0, failed: 0, skipped: 0 };
+
+  // RELIABILITY FIX: always give previously-failed files another shot first,
+  // independent of the scan time window below (see retryPendingUploads doc
+  // comment for why this matters — without it, a file that failed once could
+  // fall outside every future scan window and never get re-attempted).
+  let pendingRetryUploaded = 0;
+  try {
+    const retryResult = await retryPendingUploads();
+    pendingRetryUploaded = retryResult.uploaded;
+  } catch (e) {
+    console.warn('[recordingService] retryPendingUploads error:', e.message);
+  }
 
   // FIX: effectiveSince now respects sinceMs as-is when > 0 (matches the file
   // header comment, which the old code contradicted).
@@ -626,6 +751,11 @@ export const syncRecordings = async (phoneNumber = null, sinceMs = 0, skipPhones
       } else {
         failed++;
         console.warn('[recordingService] Failed after retries:', file.name);
+        // RELIABILITY FIX: don't drop it — queue it so the next sync cycle
+        // (including one triggered immediately by connectivity returning)
+        // retries it, regardless of whether it still falls inside a future
+        // scan window.
+        try { await enqueuePendingRetry(filePath, phone, fileMs); } catch {}
       }
     }
   }
@@ -635,7 +765,7 @@ export const syncRecordings = async (phoneNumber = null, sinceMs = 0, skipPhones
     await saveUploadedSet(uploadedSet);
   }
 
-  return { uploaded, failed, skipped };
+  return { uploaded: uploaded + pendingRetryUploaded, failed, skipped };
 };
 
 // ── Upload a specific recording after a call (with retry) ─────────────────────
