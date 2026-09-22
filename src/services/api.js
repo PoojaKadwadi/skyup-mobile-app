@@ -1,78 +1,65 @@
 // src/services/api.js
 // ─────────────────────────────────────────────────────────────────────────────
 //  CENTRALIZED API SERVICE
-//  PERF FIXES (previous revision):
-//   1. API_TIMEOUT 15s → 10s. 15s is too long to wait for a failed request —
-//      user perceives the app as "hung" for the full window. 10s is enough
-//      for genuinely slow-but-OK responses on 3G, and fails fast on dead links.
-//   2. console.log/warn calls now no-op when IS_DEV is false. Each console.log
-//      in RN is a JS-to-native bridge call — under heavy load (sync + tick +
-//      list scroll) these add up. Stripping them in prod removes ~15 calls per
-//      API request (request log + success log + error path).
 //
-//  FIX (this revision) — recording upload "network error":
-//   The axios instance default header 'Content-Type': 'application/json'
-//   was bleeding into multipart/form-data upload requests in callLogsApi.js.
-//   Setting 'Content-Type': undefined per-request does NOT clear an instance-
-//   level default — axios merges headers and the instance value always wins.
-//   The server received 'application/json' with a binary multipart body and
-//   could not parse it.
+//  FIX (this revision) — 401 handling:
+//   The response interceptor previously cleared the keychain token and
+//   AsyncStorage on a genuine 401, but NEVER dispatched forceLogout to Redux
+//   and NEVER navigated to the Login screen.  Result: the user stayed on the
+//   current screen while all subsequent requests silently failed with 401 again
+//   (no token). This fix:
+//     1. Imports the Redux store lazily (avoids circular-import boot-time crash).
+//     2. Dispatches forceLogout() on genuine mid-session 401s.
+//     3. Navigates to Login via the global navigationRef.
+//   Only GENUINE auth failures trigger this flow (see isAuthError guard).
+//   Network timeouts, 500s, and any other error do NOT cause logout.
 //
-//   Fix: callLogsApi.uploadRecording() now uses native fetch() directly so it
-//   is completely isolated from this axios instance. No change needed here —
-//   this comment documents WHY the upload bypasses this client.
-//
-//   Additionally: removed 'Content-Type': 'application/json' from instance
-//   defaults and moved it to the request interceptor where it is set ONLY
-//   when the request body is not a FormData object. This is a belt-and-
-//   suspenders guard so even future axios-based uploads won't hit this bug.
+//  RETAINED (previous revision):
+//   • Content-Type fix for FormData uploads.
+//   • Retry interceptor for cold-start 502/503.
+//   • Server-time recording on every success response.
+//   • buildUserMessage for friendly error strings.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL, API_TIMEOUT, IS_DEV } from '../config/config';
-// S-1: token now lives in the Keychain, not plaintext AsyncStorage.
 import { getToken, removeToken } from './tokenStorage';
-// R-2: safe crash/telemetry reporter (no-op until the native module is linked).
 import crash from './crashReporting';
 import { recordServerDate } from './serverTime';
 
-// PERF FIX: dev-only logger. Calls compile away to nothing when IS_DEV=false
-// (no string concatenation, no bridge crossing). Use these instead of
-// raw console.log throughout this file.
 const dlog  = IS_DEV ? (...a) => console.log(...a)  : () => {};
 const dwarn = IS_DEV ? (...a) => console.warn(...a) : () => {};
 
+// ── Lazy store/nav imports to avoid circular dependency at boot ───────────────
+// These are imported INSIDE the interceptor callback, not at the top level.
+// By the time any API call can fire a 401, both modules are fully initialized.
+let _store = null;
+let _navRef = null;
+
+export function _injectStoreAndNav(store, navRef) {
+  _store  = store;
+  _navRef = navRef;
+}
+
 // ─── Axios instance ───────────────────────────────────────────────────────────
-// FIX: Content-Type removed from instance defaults — it is now set
-// conditionally in the request interceptor below so FormData requests
-// never receive the wrong Content-Type.
 const api = axios.create({
   baseURL: BASE_URL,
-  timeout: API_TIMEOUT, // from config — single source of truth
+  timeout: API_TIMEOUT,
   headers: {
     Accept: 'application/json',
-    // NOTE: Content-Type is intentionally NOT set here.
-    // It is applied per-request in the interceptor below.
+    // NOTE: Content-Type NOT set here — set conditionally in request interceptor.
   },
 });
 
 // ─── Request interceptor ─────────────────────────────────────────────────────
 api.interceptors.request.use(
   async (config) => {
-    // Attach auth token (S-1: read from the Keychain-backed store)
     try {
       const token = await getToken();
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-      }
-    } catch {
-      // No token — proceed unauthenticated
-    }
+      if (token) config.headers.Authorization = `Bearer ${token}`;
+    } catch { /* No token — proceed unauthenticated */ }
 
-    // FIX: Only set Content-Type to application/json when the body is NOT
-    // FormData. For FormData, the boundary must be auto-generated by the
-    // network layer — never set it manually.
     if (!(config.data instanceof FormData)) {
       config.headers['Content-Type'] = 'application/json';
     }
@@ -83,24 +70,20 @@ api.interceptors.request.use(
   (error) => Promise.reject(error),
 );
 
-// ─── Retry interceptor — transparent retry on cold-start / flaky network ────
-// Render.com free tier spins down after inactivity — first request after
-// spin-down gets a 502/503. A single automatic retry after 1.5s handles
-// this transparently so the user never sees the error.
+// ─── Retry interceptor (cold-start 502/503) ───────────────────────────────────
 api.interceptors.response.use(
   res => res,
   async err => {
     const cfg    = err.config;
     const status = err.response?.status;
     const isRetryable =
-      !err.response ||          // pure network error (ECONNRESET, ENOTFOUND)
-      err.code === 'ECONNABORTED' || // timeout
+      !err.response ||
+      err.code === 'ECONNABORTED' ||
       status === 502 || status === 503 || status === 504;
 
-    // Retry GET requests only (safe to repeat). Max 2 retries.
     if (cfg && isRetryable && cfg.method === 'get' && (cfg._retry || 0) < 2) {
       cfg._retry = (cfg._retry || 0) + 1;
-      const delay = cfg._retry * 1500; // 1.5s first, 3s second
+      const delay = cfg._retry * 1500;
       await new Promise(r => setTimeout(r, delay));
       return api(cfg);
     }
@@ -108,51 +91,77 @@ api.interceptors.response.use(
   }
 );
 
-// ─── Response interceptor ────────────────────────────────────────────────────
+// ─── Response interceptor ─────────────────────────────────────────────────────
 api.interceptors.response.use(
   (response) => {
-    // Keep the server-time offset fresh from the response's Date header, so
-    // any UI that shows elapsed/duration uses SERVER time rather than the
-    // device clock. Costs nothing (header is already present on every
-    // response) and self-corrects as the app makes normal requests.
-    // See services/serverTime.js for why this matters.
-    try { recordServerDate(response.headers?.date); } catch { /* never break a response */ }
+    try { recordServerDate(response.headers?.date); } catch {}
     dlog(`[API ✓] ${response.status} ${response.config.url}`);
     return response;
   },
   async (error) => {
     const status  = error.response?.status;
     const message = error.response?.data?.message || '';
+    const url     = error.config?.url || '';
 
-    if (status === 401) {
+    // ─── 401 handling — only for GENUINE session expiry ──────────────────────
+    // Conditions for a "genuine" expired-session 401:
+    //   1. The response is actually 401 (not a timeout / network error).
+    //   2. It is NOT from the /auth/login endpoint (that 401 means wrong
+    //      credentials, not an expired session — we must not log out on it).
+    //   3. The body message mentions session/token expiry keywords.
+    //      (Some backends always return 401 for any auth problem; others return
+    //       it for missing roles too — we only logout on clear expiry signals.)
+    //
+    // FIX: Previously this block cleared storage but then did nothing with Redux
+    // or navigation, leaving the user on a broken authenticated screen.
+    if (status === 401 && !url.includes('/auth/login')) {
       const isAuthError =
-        message.toLowerCase().includes('invalid') ||
-        message.toLowerCase().includes('expired') ||
-        message.toLowerCase().includes('jwt') ||
-        message.toLowerCase().includes('no token') ||
+        message.toLowerCase().includes('invalid')   ||
+        message.toLowerCase().includes('expired')   ||
+        message.toLowerCase().includes('jwt')        ||
+        message.toLowerCase().includes('no token')   ||
         message.toLowerCase().includes('unauthorized');
 
-      // Only wipe stored session if this is NOT a login request. On the login
-      // endpoint a 401 means wrong credentials — there is no valid session to
-      // revoke. Wiping storage on a failed login attempt previously caused a
-      // ghost logout on the next app launch.
-      const url = error.config?.url || '';
-      const isLoginRequest = url.includes('/auth/login');
+      if (isAuthError) {
+        // 1. Clear stored credentials
+        try { await removeToken(); } catch {}
+        try { await AsyncStorage.removeItem('auth_user'); } catch {}
 
-      if (isAuthError && !isLoginRequest) {
-        try {
-          await removeToken();                       // S-1: clear Keychain token
-          await AsyncStorage.removeItem('auth_user');
-        } catch { /* ignore */ }
+        // 2. Dispatch forceLogout to Redux so AppManager runs cleanup
+        //    (stops background sync, call detector, FCM, socket, etc.)
+        if (_store) {
+          try {
+            // Lazy import avoids circular dependency at module load time
+            const { forceLogout } = require('../store/slices/authSlice');
+            _store.dispatch(forceLogout());
+          } catch (e) {
+            dwarn('[API] forceLogout dispatch failed:', e.message);
+          }
+        }
+
+        // 3. Navigate to Login screen
+        //    Use a short delay so Redux state update propagates first (the
+        //    navigator reads user from Redux; dispatching forceLogout sets
+        //    user=null which causes AppNavigator to render the Login screen,
+        //    so we don't technically NEED to navigate — but explicit nav
+        //    handles edge cases where the navigator hasn't re-rendered yet).
+        if (_navRef?.current) {
+          try {
+            setTimeout(() => {
+              if (_navRef.current?.isReady()) {
+                _navRef.current.reset({ index: 0, routes: [{ name: 'Login' }] });
+              }
+            }, 100);
+          } catch {}
+        }
+
+        dwarn('[API] Session expired — forced logout dispatched');
       }
     }
 
     error.userMessage = buildUserMessage(error);
     dwarn(`[API ✗] ${error.userMessage}`, error.response?.data);
 
-    // R-2: report server errors and network failures (not expected 4xx auth/
-    // validation responses) so recurring backend/connectivity problems surface
-    // in crash reporting instead of being silently swallowed.
     if (!status || status >= 500) {
       crash.recordError(error, `API ${error.config?.method?.toUpperCase() || ''} ${error.config?.url || ''}`);
     }
@@ -178,26 +187,11 @@ function buildUserMessage(error) {
 
   switch (status) {
     case 400: return serverMsg || 'Invalid request. Please check your input.';
-    // A 401 on the LOGIN request means bad credentials (or the backend
-    // rejecting the account/device) — NOT an expired session. Prefer the
-    // server's own message ("Invalid email or password", etc.) so the login
-    // screen shows the real reason. Only fall back to the session-expired
-    // wording when the server sends no message, which is the case for a
-    // genuinely expired token on an already-authenticated request.
     case 401: return serverMsg || 'Session expired. Please log in again.';
     case 403: return 'You do not have permission to do that.';
     case 404: return 'Resource not found.';
     case 422: return serverMsg || 'Validation failed.';
     case 429: return 'Too many requests. Please wait a moment.';
-    // FIX: this used to hardcode a generic string, unlike every other status
-    // code here — completely discarding whatever specific error.message the
-    // backend actually sent (e.g. patchLead's catch block always returns
-    // res.status(500).json({message: error.message}), a real, often useful
-    // diagnostic string). A 500 is already the "something unexpected broke"
-    // case; throwing away the one clue about WHAT broke made every 500 in
-    // the app look identical and undiagnosable from the error alert alone —
-    // exactly what happened trying to diagnose the "Remark not saved" bug.
-    // Same serverMsg-first pattern as 400/401/422 above.
     case 500: return serverMsg || 'Server error. Please try again later.';
     case 503: return 'Server is temporarily unavailable.';
     default:  return serverMsg || `Unexpected error (${status}).`;
@@ -205,26 +199,10 @@ function buildUserMessage(error) {
 }
 
 // ─── apiRequest helper ───────────────────────────────────────────────────────
-export async function apiRequest(
-  endpoint,
-  method = 'GET',
-  body = null,
-  token = null,
-  params = null,
-  headers = {},
-) {
-  const config = {
-    url: endpoint,
-    method: method.toLowerCase(),
-    params,
-    headers,
-  };
-  if (token) {
-    config.headers = { ...config.headers, Authorization: `Bearer ${token}` };
-  }
-  if (body) {
-    config.data = body;
-  }
+export async function apiRequest(endpoint, method = 'GET', body = null, token = null, params = null, headers = {}) {
+  const config = { url: endpoint, method: method.toLowerCase(), params, headers };
+  if (token) config.headers = { ...config.headers, Authorization: `Bearer ${token}` };
+  if (body) config.data = body;
   const response = await api(config);
   return response.data;
 }
@@ -242,15 +220,8 @@ export async function checkHealth() {
 }
 
 // ─── Warm-up ping ────────────────────────────────────────────────────────────
-// Render's free tier sleeps after inactivity and takes 30–60s to cold-start.
-// The FIRST real request would otherwise hit a sleeping server and time out at
-// API_TIMEOUT (15s) before it finishes waking — making the app feel frozen on
-// open. Fire this on app launch (fire-and-forget) so the server starts spinning
-// up while the user is still on the splash/login screen; by the time real
-// endpoints are hit it's already awake. Uses a long timeout + one retry
-// specifically to survive a cold start (unlike checkHealth's short 5s timeout).
 export async function warmUpBackend() {
-  const COLD_START_TIMEOUT = 60000; // 60s — long enough to outlast a full cold start
+  const COLD_START_TIMEOUT = 60000;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       await api.get('/health', { timeout: COLD_START_TIMEOUT });

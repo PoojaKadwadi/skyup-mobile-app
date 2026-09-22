@@ -1,106 +1,59 @@
 // App.js — Root component
 //
-// PERFORMANCE FIXES:
-//  1. enableScreens() called at the top — required for react-native-screens
-//     to activate native screen containers. Without this, even native-stack
-//     uses JS View wrappers and loses most of its performance benefit.
+// FIXES (this revision):
+//  FIX 1 — startup race condition (InteractionManager never cancelled):
+//    The `startupTask` from InteractionManager.runAfterInteractions was created
+//    but NEVER cancelled. If the user logged out while the interactions were
+//    still settling (fast login→logout, or a slow first render), the deferred
+//    async function would still fire and start FCM, background sync, socket,
+//    and other authenticated services for a user who was already logged out.
+//    Fix: store the task ref and cancel it in the else (logout) branch and in
+//    the effect cleanup. Also guard the inner async fn with a currentUser check
+//    before starting any service.
 //
-//  2. NavigationContainer theme set explicitly so background color is
-//     correct during transitions — prevents white flash between screens.
+//  FIX 2 — api.js 401 handler needs store & nav references:
+//    api.js now exports `_injectStoreAndNav()` so the response interceptor can
+//    dispatch forceLogout and navigate to Login on a genuine 401. Both refs are
+//    injected once on first render (before any API call can fire).
 //
-// REAL-TIME SOCKET FIX:
-//  3. Socket.IO connection added on login
-//  4. Socket disconnected on logout/unmount
-//  5. Backend pushes new_lead_assigned events instantly
+//  ALL PREVIOUS FIXES RETAINED.
 
 import React, { useEffect, useMemo, useRef } from 'react';
 import { StatusBar, View, ActivityIndicator, StyleSheet, InteractionManager } from 'react-native';
 
 import { Provider, useSelector, useDispatch } from 'react-redux';
-
 import { PersistGate } from 'redux-persist/integration/react';
-
-import {
-  NavigationContainer,
-  DarkTheme,
-} from '@react-navigation/native';
-
+import { NavigationContainer, DarkTheme } from '@react-navigation/native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-
 import { enableScreens } from 'react-native-screens';
 
 import { store, persistor } from './src/store';
-
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
-
 import AppNavigator from './src/navigation/AppNavigator';
-
 import ErrorBoundary from './src/components/ErrorBoundary';
 
-import {
-  startBackgroundSync,
-  stopBackgroundSync,
-} from './src/services/backgroundSyncService';
-
-import {
-  setupNotifications,
-  registerNotificationHandlers,
-  clearNotificationState,
-} from './src/services/notificationService';
-
-import {
-  startCallStateListener,
-  stopCallStateListener,
-} from './src/services/callStateService';
-
+import { startBackgroundSync, stopBackgroundSync } from './src/services/backgroundSyncService';
+import { setupNotifications, registerNotificationHandlers, clearNotificationState } from './src/services/notificationService';
+import { startCallStateListener, stopCallStateListener } from './src/services/callStateService';
 import { drainOfflineQueue } from './src/services/callSyncService';
-import { warmUpBackend } from './src/services/api';
-
-import {
-  requestContactsPermission,
-  requestWriteContactsPermission,
-  requestLocationPermission,
-} from './src/services/permissionsService';
-
-import {
-  startCallDetector,
-  stopCallDetector,
-} from './src/services/callDetector';
-
-// ✅ NEW — auto-upload foreground service (keeps app alive for post-call upload)
+import { warmUpBackend, _injectStoreAndNav } from './src/services/api';
+import { requestContactsPermission, requestWriteContactsPermission, requestLocationPermission } from './src/services/permissionsService';
+import { startCallDetector, stopCallDetector } from './src/services/callDetector';
 import { initAutoUploadService, stopAutoUploadService } from './src/services/autoUploadService';
-
-// ✅ NEW — socket service
+import { connectSocket, disconnectSocket } from './src/services/socketService';
 import {
-  connectSocket,
-  disconnectSocket,
-} from './src/services/socketService';
-
-// ✅ FIX BUG 1 & 2 — FCM token registration
-// Obtains the device push token and sends it to the backend so FCM
-// notifications (new lead, reassigned lead) can actually reach this device.
-import {
-  registerFCMToken,
-  startFCMTokenRefreshListener,
-  startFCMForegroundListener,
-  registerFCMNotificationOpenHandlers,
-  clearFCMToken,
-  handleFCMBackgroundMessages,
+  registerFCMToken, startFCMTokenRefreshListener, startFCMForegroundListener,
+  registerFCMNotificationOpenHandlers, clearFCMToken, handleFCMBackgroundMessages,
 } from './src/services/fcmTokenService';
 
-// Register background FCM handler at module level (required by Firebase
-// BEFORE any component mounts — missing this drops messages when app is killed)
+// Register background FCM handler at module level (required BEFORE any component mounts)
 handleFCMBackgroundMessages();
 
-// ✅ Activate native screen containers globally
 enableScreens(true);
 
 export const navigationRef = React.createRef();
 
-// Builds the react-navigation theme from our color tokens so the background
-// during screen transitions always matches the current light/dark mode.
 function buildNavTheme(colors) {
   return {
     ...DarkTheme,
@@ -119,195 +72,137 @@ function PersistLoadingScreen() {
   const { colors } = useTheme();
   return (
     <View style={[splashStyles.root, { backgroundColor: colors.bg }]}>
-      <ActivityIndicator
-        color={colors.blue}
-        size="large"
-      />
+      <ActivityIndicator color={colors.blue} size="large" />
     </View>
   );
 }
 
 const splashStyles = StyleSheet.create({
-  root: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  root: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 });
 
 function AppManager() {
-  const user = useSelector(
-    state => state.auth.user
-  );
-
-  // ✅ NEW
+  const user     = useSelector(state => state.auth.user);
   const dispatch = useDispatch();
 
-  const handlersRegistered = useRef(false);
-  // ✅ FIX BUG 1 — store unsubscribe fn for token refresh listener
-  const fcmRefreshUnsub = useRef(null);
-  // ✅ FIX — store unsubscribe fn for FCM foreground listener
-  const fcmForegroundUnsub = useRef(null);
-  const fcmOpenUnsub = useRef(null);
+  const handlersRegistered  = useRef(false);
+  const fcmRefreshUnsub     = useRef(null);
+  const fcmForegroundUnsub  = useRef(null);
+  const fcmOpenUnsub        = useRef(null);
+  // FIX 1: track the startup task so we can cancel it
+  const startupTaskRef      = useRef(null);
 
-  // PERF/UX: warm the Render free-tier backend the instant the app launches,
-  // independent of login. It sleeps after inactivity and takes 30–60s to
-  // cold-start; without this the first real request hits a sleeping server and
-  // times out at API_TIMEOUT (15s), making the app feel frozen on open. Firing
-  // this here (fire-and-forget) starts the wake-up while the user is still on
-  // the splash/login screen, so real requests land on an already-awake server.
+  // FIX 2: inject store + nav ref into api.js so 401 can dispatch forceLogout
   useEffect(() => {
-    warmUpBackend();
+    _injectStoreAndNav(store, navigationRef);
   }, []);
+
+  // Warm up Render free-tier backend on first launch
+  useEffect(() => { warmUpBackend(); }, []);
 
   useEffect(() => {
     if (user) {
-      // PERF: defer heavy startup work (notifications, FCM, background sync,
-      // socket, permission prompts) until AFTER the first screen has painted.
-      // Running it all synchronously on mount competed with the initial render
-      // and made the app feel slow to open. InteractionManager lets the UI show
-      // first, then these services spin up a tick later.
+      // FIX 1: cancel any previous task before creating a new one
+      if (startupTaskRef.current) {
+        startupTaskRef.current.cancel();
+        startupTaskRef.current = null;
+      }
+
+      // Capture `user` snapshot at dispatch time so the async callback
+      // can verify the session is still valid before starting services.
+      const capturedUserId = user?._id || user?.id;
+
       const startupTask = InteractionManager.runAfterInteractions(() => {
-      (async () => {
-        try {
-          // ✅ Notifications MUST finish first
-          await setupNotifications();
-        } catch (e) {
-          console.warn(
-            '[App] Notification setup failed:',
-            e?.message
-          );
-        }
+        (async () => {
+          // FIX 1: guard — if user logged out while interactions were settling,
+          // do not start any authenticated service.
+          const currentUser = store.getState().auth?.user;
+          if (!currentUser) {
+            console.log('[App] Startup task aborted — user logged out during interaction wait');
+            return;
+          }
 
-        // ✅ FIX BUG 1 & 2 — Register FCM token with backend after login
-        // This is what makes sendNewLeadNotification / sendReassignedLeadNotification
-        // actually reach this device. Without this, fcmService.js finds
-        // user.fcmToken === null and silently returns without sending anything.
-        registerFCMToken().catch(e =>
-          console.warn('[App] FCM token registration failed:', e?.message)
-        );
+          try { await setupNotifications(); } catch (e) {
+            console.warn('[App] Notification setup failed:', e?.message);
+          }
 
-        // ✅ FIX BUG 1 — Keep token fresh if Firebase rotates it
-        if (fcmRefreshUnsub.current) {
-          fcmRefreshUnsub.current(); // clean up any previous listener
-        }
-        fcmRefreshUnsub.current = startFCMTokenRefreshListener();
+          registerFCMToken().catch(e => console.warn('[App] FCM token registration failed:', e?.message));
 
-        // ✅ FIX — Start FCM foreground listener so push notifications display
-        // while the app is open. Without this, arriving FCM messages while in
-        // foreground are silently dropped — no banner, no sound, nothing.
-        if (fcmForegroundUnsub.current) {
-          fcmForegroundUnsub.current();
-        }
-        fcmForegroundUnsub.current = startFCMForegroundListener();
+          if (fcmRefreshUnsub.current) fcmRefreshUnsub.current();
+          fcmRefreshUnsub.current = startFCMTokenRefreshListener();
 
-        // BUG FIX: notifications were received but tapping them didn't
-        // navigate anywhere — onNotificationOpenedApp (backgrounded app) and
-        // getInitialNotification (killed app) were never registered at all.
-        // See the long comment in fcmTokenService.js for the full trace.
-        if (fcmOpenUnsub.current) {
-          fcmOpenUnsub.current();
-        }
-        fcmOpenUnsub.current = registerFCMNotificationOpenHandlers(navigationRef);
+          if (fcmForegroundUnsub.current) fcmForegroundUnsub.current();
+          fcmForegroundUnsub.current = startFCMForegroundListener();
 
-        // ✅ Start background sync after notifications
-        startBackgroundSync();
+          if (fcmOpenUnsub.current) fcmOpenUnsub.current();
+          fcmOpenUnsub.current = registerFCMNotificationOpenHandlers(navigationRef);
 
-        // ✅ Request Contacts & Location permissions
-        requestContactsPermission().catch(() => {});
-        requestWriteContactsPermission().catch(() => {});
-        requestLocationPermission().catch(() => {});
+          startBackgroundSync();
 
-        // ✅ NEW — Connect socket for real-time lead updates
-        const userId =
-          user?._id || user?.id;
+          requestContactsPermission().catch(() => {});
+          requestWriteContactsPermission().catch(() => {});
+          requestLocationPermission().catch(() => {});
 
-        if (userId) {
-          connectSocket(userId, dispatch);
-        }
-      })();
+          if (capturedUserId) connectSocket(capturedUserId, dispatch);
+        })();
       });
 
-      // ✅ Call state listener before detector
+      // FIX 1: store so we can cancel if user logs out before it fires
+      startupTaskRef.current = startupTask;
+
       startCallStateListener();
-
-      startCallDetector().catch(e =>
-        console.warn(
-          '[App] callDetector start failed:',
-          e?.message
-        )
-      );
-
-      // ✅ Auto-upload foreground service — keeps the app alive so post-call
-      // recording upload runs reliably on aggressive OEMs (ColorOS etc.).
-      // Honors the user's in-app toggle (default ON); no-op if they turned it off.
-      initAutoUploadService().catch(e =>
-        console.warn('[App] autoUpload init failed:', e?.message)
-      );
-
-      // ✅ Drain queued offline calls
+      startCallDetector().catch(e => console.warn('[App] callDetector start failed:', e?.message));
+      initAutoUploadService().catch(e => console.warn('[App] autoUpload init failed:', e?.message));
       drainOfflineQueue().catch(() => {});
 
-      // ✅ Register notification handlers once
       if (!handlersRegistered.current) {
-        registerNotificationHandlers(
-          navigationRef
-        );
-
+        registerNotificationHandlers(navigationRef);
         handlersRegistered.current = true;
       }
     } else {
-      // ✅ Cleanup on logout
+      // User logged out — cancel the pending startup task immediately so it
+      // does NOT start authenticated services after we've cleaned up below.
+      if (startupTaskRef.current) {
+        startupTaskRef.current.cancel();
+        startupTaskRef.current = null;
+      }
+
+      // Cleanup all authenticated services
       stopBackgroundSync();
-
       stopCallStateListener();
-
       stopCallDetector();
-
-      // Stop the auto-upload foreground service (removes the ongoing notification)
       stopAutoUploadService().catch(() => {});
-
       clearNotificationState().catch(() => {});
-
-      // ✅ FIX BUG 1 — clear stored FCM token so next login re-registers
       clearFCMToken().catch(() => {});
 
-      // ✅ FIX BUG 1 — stop token refresh listener
       if (fcmRefreshUnsub.current) {
         fcmRefreshUnsub.current();
         fcmRefreshUnsub.current = null;
       }
-
-      // ✅ FIX — stop FCM foreground listener
       if (fcmForegroundUnsub.current) {
         fcmForegroundUnsub.current();
         fcmForegroundUnsub.current = null;
       }
-
-      // BUG FIX — stop FCM notification-open listener
       if (fcmOpenUnsub.current) {
         fcmOpenUnsub.current();
         fcmOpenUnsub.current = null;
       }
 
-      // ✅ NEW — disconnect socket
       disconnectSocket();
-
       handlersRegistered.current = false;
     }
 
-    // ✅ Cleanup on unmount
     return () => {
+      // FIX 1: cancel on effect cleanup (component unmount or user change)
+      if (startupTaskRef.current) {
+        startupTaskRef.current.cancel();
+        startupTaskRef.current = null;
+      }
       stopBackgroundSync();
-
       stopCallStateListener();
-
       stopCallDetector();
-
-      // ✅ NEW
       disconnectSocket();
 
-      // ✅ FIX BUG 1 — stop token refresh listener on unmount
       if (fcmRefreshUnsub.current) {
         fcmRefreshUnsub.current();
         fcmRefreshUnsub.current = null;
@@ -329,55 +224,24 @@ function RootNavigation() {
       onReady={() => {
         // Handle notification taps when app was closed
         try {
-          const notifee =
-            require('@notifee/react-native')
-              .default;
-
-          notifee
-            .getInitialNotification()
-            .then(initial => {
-              if (!initial?.notification)
-                return;
-
-              const n =
-                initial.notification;
-
-              const nav =
-                navigationRef.current;
-
-              if (!nav) return;
-
-              nav.navigate('Main');
-
-              if (
-                n.id?.startsWith(
-                  'followup_'
-                )
-              ) {
-                const leadId =
-                  n.data?.leadId;
-
-                if (leadId) {
-                  setTimeout(() => {
-                    nav.navigate(
-                      'LeadDetail',
-                      { leadId }
-                    );
-                  }, 150);
-                } else {
-                  setTimeout(() => {
-                    nav.navigate(
-                      'Leads'
-                    );
-                  }, 150);
-                }
+          const notifee = require('@notifee/react-native').default;
+          notifee.getInitialNotification().then(initial => {
+            if (!initial?.notification) return;
+            const n = initial.notification;
+            const nav = navigationRef.current;
+            if (!nav) return;
+            nav.navigate('Main');
+            if (n.id?.startsWith('followup_')) {
+              const leadId = n.data?.leadId;
+              if (leadId) {
+                setTimeout(() => nav.navigate('LeadDetail', { leadId }), 150);
               } else {
-                setTimeout(() => {
-                  nav.navigate('Leads');
-                }, 150);
+                setTimeout(() => nav.navigate('Leads'), 150);
               }
-            })
-            .catch(() => {});
+            } else {
+              setTimeout(() => nav.navigate('Leads'), 150);
+            }
+          }).catch(() => {});
         } catch {}
       }}
     >
@@ -385,9 +249,7 @@ function RootNavigation() {
         barStyle={dark ? 'light-content' : 'dark-content'}
         backgroundColor={colors.surface}
       />
-
       <AppManager />
-
       <ErrorBoundary>
         <AppNavigator />
       </ErrorBoundary>
@@ -401,10 +263,7 @@ export default function App() {
       <SafeAreaProvider>
         <ThemeProvider>
           <Provider store={store}>
-            <PersistGate
-              loading={<PersistLoadingScreen />}
-              persistor={persistor}
-            >
+            <PersistGate loading={<PersistLoadingScreen />} persistor={persistor}>
               <RootNavigation />
             </PersistGate>
           </Provider>

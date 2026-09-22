@@ -1,43 +1,50 @@
-// src/services/notifDedup.js — NEW (RAM fix #3)
+// src/services/notifDedup.js
 // ─────────────────────────────────────────────────────────────────────────────
-// THE PROBLEM:
-//   notificationService.js called AsyncStorage.getItem + JSON.parse on every
-//   single sync cycle (every 10 min × 3 dedup sets = 36 AsyncStorage calls/hr).
-//   Each JSON.parse of a 50-entry dedup array allocates a brand-new Set and
-//   discards the old one — that's heap churn every sync. On a 200-lead account
-//   with active follow-ups, this was the #2 RAM consumer after Redux.
+// FIX (this revision) — user-scoped dedup store keys:
 //
-// THE FIX:
-//   This module is the single source of truth for all three dedup Sets.
-//   It loads from AsyncStorage ONCE on first access and caches in memory.
-//   Writes flush to AsyncStorage asynchronously (fire-and-forget) so the
-//   sync cycle never waits for storage I/O.
+//   The three dedup Sets (seenLeads, notified, scheduled) used global
+//   AsyncStorage keys. On a device used by multiple employees, User B would
+//   inherit User A's seen-lead dedup state and either:
+//     (a) miss real new-lead notifications (A's IDs already in the set), or
+//     (b) see duplicate notifications (B's IDs not yet in the set but A's
+//         leads were sending events for B's session).
 //
-// USAGE (in notificationService.js):
-//   import { seenLeads, notified, scheduled } from './notifDedup';
-//   const seen = await seenLeads.getSet();
-//   seenLeads.add('123');
+//   Fix: storage keys are now suffixed with the current userId, computed
+//   lazily so this module loads without circular-import issues at boot time.
+//   The stores are also reset (in-memory cache cleared) on each call to
+//   getSet() when the userId changes — detected by comparing the last-seen
+//   suffix to the current one.
 //
-//   Full sync flush (call before app background if needed):
-//   import { flushAll } from './notifDedup';
-//   await flushAll();
+// ALL OTHER BEHAVIOUR RETAINED (debounced flush, max-set-size cap, pruning).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const MAX_SET_SIZE = 500; // cap each set so it can't grow without bound
+const MAX_SET_SIZE = 500;
 
-function createDedupStore(storageKey, maxAge = null) {
-  let _set       = null;   // null = not yet loaded
-  let _dirty     = false;
-  let _loading   = null;   // Promise<Set> while loading
+function getCurrentUserSuffix() {
+  try {
+    const { store } = require('../store');
+    const userId = store.getState()?.auth?.user?._id || store.getState()?.auth?.user?.id;
+    return userId ? `_${userId}` : '_anon';
+  } catch { return '_anon'; }
+}
+
+function createDedupStore(baseKey, maxAge = null) {
+  let _set         = null;
+  let _dirty       = false;
+  let _loading     = null;
+  let _lastSuffix  = null; // tracks which user's data is loaded
+
+  function _getStorageKey() {
+    return `${baseKey}${getCurrentUserSuffix()}`;
+  }
 
   async function _load() {
     try {
-      const raw = await AsyncStorage.getItem(storageKey);
+      const raw = await AsyncStorage.getItem(_getStorageKey());
       if (!raw) return new Set();
       const parsed = JSON.parse(raw);
-      // If entries have timestamps (for maxAge pruning), filter old ones
       if (maxAge && Array.isArray(parsed) && parsed[0] && typeof parsed[0] === 'object') {
         const cutoff = Date.now() - maxAge;
         return new Set(parsed.filter(e => e.ts > cutoff).map(e => e.k));
@@ -49,6 +56,16 @@ function createDedupStore(storageKey, maxAge = null) {
   }
 
   async function getSet() {
+    const currentSuffix = getCurrentUserSuffix();
+    // FIX: if the user changed since last load, reset the in-memory cache
+    // so we load the new user's data rather than serving the old user's set.
+    if (_lastSuffix !== null && _lastSuffix !== currentSuffix) {
+      _set     = null;
+      _loading = null;
+      _dirty   = false;
+    }
+    _lastSuffix = currentSuffix;
+
     if (_set !== null) return _set;
     if (_loading) return _loading;
     _loading = _load().then(s => { _set = s; _loading = null; return s; });
@@ -59,7 +76,6 @@ function createDedupStore(storageKey, maxAge = null) {
     if (!_set) { _set = new Set(); }
     _set.add(String(key));
     _dirty = true;
-    // Evict oldest entries when over the cap (convert to array, slice, re-Set)
     if (_set.size > MAX_SET_SIZE) {
       const arr = [..._set];
       _set = new Set(arr.slice(arr.length - MAX_SET_SIZE));
@@ -84,35 +100,28 @@ function createDedupStore(storageKey, maxAge = null) {
     if (_set.size !== before) _dirty = true;
   }
 
-  // Debounced async flush — batches multiple add() calls into one write.
   let _flushTimer = null;
   function _flushDebounced() {
     if (_flushTimer) return;
     _flushTimer = setTimeout(() => {
       _flushTimer = null;
       if (_dirty && _set) {
-        AsyncStorage.setItem(storageKey, JSON.stringify([..._set])).catch(() => {});
+        AsyncStorage.setItem(_getStorageKey(), JSON.stringify([..._set])).catch(() => {});
         _dirty = false;
       }
-    }, 2000); // 2s debounce — batches a full sync cycle's worth of adds
+    }, 2000);
   }
 
   async function flush() {
     if (_flushTimer) { clearTimeout(_flushTimer); _flushTimer = null; }
     if (_dirty && _set) {
-      await AsyncStorage.setItem(storageKey, JSON.stringify([..._set])).catch(() => {});
+      await AsyncStorage.setItem(_getStorageKey(), JSON.stringify([..._set])).catch(() => {});
       _dirty = false;
     }
   }
 
   return { getSet, add, has, getAll, prune, flush };
 }
-
-// The three dedup stores that notificationService uses.
-// Pruning rules match what notificationService already does:
-//   seenLeads — checked at startup to detect newly assigned leads
-//   notified  — follow-up fire dedup (key = leadId_isoDate)
-//   scheduled — meeting reminder dedup
 
 export const seenLeads = createDedupStore('notif_seen_lead_ids');
 export const notified  = createDedupStore('notif_followup_fired_keys');

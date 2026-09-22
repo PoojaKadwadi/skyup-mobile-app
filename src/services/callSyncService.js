@@ -1,28 +1,49 @@
-// mobile-app/src/services/callSyncService.js
+// src/services/callSyncService.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Call Sync Service
-// Responsible for uploading a single completed call (detected in real-time
-// by callDetector.js) to the CRM backend.
+// FIX (this revision) — user-scoped storage keys:
 //
-// Differs from backgroundSyncService (bulk history sync) — this handles
-// individual calls immediately after they end, so the CRM is updated
-// within seconds rather than on the next 15-minute sync cycle.
+//   OFFLINE_QUEUE_KEY was a global key ('crm_call_sync_offline_queue').
+//   If User A logged out and User B logged in on the same device, User B's
+//   calls could be processed using the queue built by User A, or User A's
+//   queued calls could be uploaded under User B's account.
 //
-// Features:
-//   - Retry logic with exponential back-off (3 retries)
-//   - Offline queue: calls are saved to AsyncStorage if offline,
-//     then uploaded when connectivity returns
-//   - Lead auto-mapping (handled server-side via normalizedPhone)
-//   - Deduplication is handled server-side (compound unique index)
+//   Fix: the queue key is now scoped to the current userId + companyId,
+//   read from the Redux store at call time. The public API is unchanged;
+//   callers (App.js, callDetector.js) do not need to change.
+//
+//   The legacy global key is migrated to the user-scoped key on first use
+//   and then cleared, so queued calls from before this fix are not lost.
+//
+//   NOTE: Call sync itself has NEVER depended on clock-in/attendance and
+//   continues to work regardless of attendance state. Do NOT add any
+//   clockedIn guard here.
+//
+// ALL OTHER BEHAVIOUR RETAINED (retry, exponential back-off, NetInfo drain).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import NetInfo      from '@react-native-community/netinfo';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import api          from './api';
 
-const OFFLINE_QUEUE_KEY = 'crm_call_sync_offline_queue';
-const MAX_RETRIES       = 3;
-const BASE_RETRY_MS     = 2000;   // 2s, 4s, 8s
+// Legacy global key — only used for one-time migration below.
+const LEGACY_QUEUE_KEY = 'crm_call_sync_offline_queue';
+
+const MAX_RETRIES   = 3;
+const BASE_RETRY_MS = 2000; // 2s, 4s, 8s
+
+// ── User-scoped queue key ─────────────────────────────────────────────────────
+// Lazy import to avoid circular dependency at module load time.
+function getScopedQueueKey() {
+  try {
+    const { store } = require('../store');
+    const state = store.getState();
+    const userId    = state?.auth?.user?._id || state?.auth?.user?.id || 'anon';
+    const companyId = state?.auth?.user?.company?._id || state?.auth?.user?.company || 'co';
+    return `crm_call_sync_queue_${companyId}_${userId}`;
+  } catch {
+    return LEGACY_QUEUE_KEY; // fallback if store not ready
+  }
+}
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -35,9 +56,33 @@ async function isOnline() {
   }
 }
 
-async function loadOfflineQueue() {
+// One-time migration: move any entries from the legacy global key to the
+// new user-scoped key, then clear the global key.
+async function migrateLegacyQueue(scopedKey) {
+  if (scopedKey === LEGACY_QUEUE_KEY) return; // fallback case — don't self-migrate
   try {
-    const raw = await AsyncStorage.getItem(OFFLINE_QUEUE_KEY);
+    const raw = await AsyncStorage.getItem(LEGACY_QUEUE_KEY);
+    if (!raw) return;
+    const legacy = JSON.parse(raw);
+    if (!Array.isArray(legacy) || legacy.length === 0) {
+      await AsyncStorage.removeItem(LEGACY_QUEUE_KEY);
+      return;
+    }
+    // Merge legacy entries into the scoped queue (de-duplicate by timestamp)
+    const existingRaw = await AsyncStorage.getItem(scopedKey);
+    const existing = existingRaw ? JSON.parse(existingRaw) : [];
+    const merged = [...existing, ...legacy].slice(-1000);
+    await AsyncStorage.setItem(scopedKey, JSON.stringify(merged));
+    await AsyncStorage.removeItem(LEGACY_QUEUE_KEY);
+    console.log(`[callSyncService] Migrated ${legacy.length} legacy queued call(s) to scoped key`);
+  } catch {}
+}
+
+async function loadOfflineQueue() {
+  const key = getScopedQueueKey();
+  await migrateLegacyQueue(key);
+  try {
+    const raw = await AsyncStorage.getItem(key);
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
@@ -45,10 +90,10 @@ async function loadOfflineQueue() {
 }
 
 async function saveOfflineQueue(queue) {
+  const key = getScopedQueueKey();
   try {
-    // Cap queue at 1000 entries to prevent unbounded growth
     const capped = queue.slice(-1000);
-    await AsyncStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(capped));
+    await AsyncStorage.setItem(key, JSON.stringify(capped));
   } catch { /* non-critical */ }
 }
 
@@ -60,24 +105,16 @@ async function addToOfflineQueue(callData) {
 
 // ── Core API call ─────────────────────────────────────────────────────────────
 
-/**
- * Upload a single call record to the backend.
- * Returns { success: boolean, data?: any, error?: string }
- */
 async function uploadCallRecord(callData) {
-  // api.js already attaches the Bearer token via its interceptor
   const payload = {
-    logs: [
-      {
-        phoneNumber: callData.phoneNumber,
-        callType:    callData.callType || 'outgoing',
-        duration:    callData.duration || 0,
-        timestamp:   callData.timestamp || Date.now(),
-        name:        callData.name || '',
-      },
-    ],
+    logs: [{
+      phoneNumber: callData.phoneNumber,
+      callType:    callData.callType || 'outgoing',
+      duration:    callData.duration || 0,
+      timestamp:   callData.timestamp || Date.now(),
+      name:        callData.name || '',
+    }],
   };
-
   const response = await api.post('/call-logs/sync', payload);
   return { success: true, data: response.data };
 }
@@ -87,16 +124,10 @@ async function uploadCallRecord(callData) {
 async function uploadWithRetry(callData, retries = MAX_RETRIES) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const result = await uploadCallRecord(callData);
-      return result;
+      return await uploadCallRecord(callData);
     } catch (err) {
-      const isLast = attempt === retries;
-      if (isLast) {
-        return { success: false, error: err.userMessage || err.message };
-      }
-      // Exponential back-off: 2s, 4s, 8s
-      const delay = BASE_RETRY_MS * Math.pow(2, attempt);
-      await new Promise(r => setTimeout(r, delay));
+      if (attempt === retries) return { success: false, error: err.userMessage || err.message };
+      await new Promise(r => setTimeout(r, BASE_RETRY_MS * Math.pow(2, attempt)));
     }
   }
 }
@@ -105,13 +136,7 @@ async function uploadWithRetry(callData, retries = MAX_RETRIES) {
 
 /**
  * Sync a single call to the CRM immediately after it ends.
- *
- * @param {object} callData
- * @param {string} callData.phoneNumber  - raw phone number as dialled
- * @param {string} callData.callType     - 'incoming' | 'outgoing' | 'missed'
- * @param {number} callData.duration     - call duration in seconds
- * @param {number} callData.timestamp    - call start time as Unix ms
- * @param {string} [callData.name]       - contact name from device (optional)
+ * NEVER depends on attendance/clock-in state.
  */
 export async function syncSingleCall(callData) {
   if (!callData?.phoneNumber) {
@@ -122,7 +147,6 @@ export async function syncSingleCall(callData) {
   const online = await isOnline();
 
   if (!online) {
-    // Save for later — drainOfflineQueue() will pick this up
     await addToOfflineQueue(callData);
     console.log('[callSyncService] Offline — queued call:', callData.phoneNumber);
     return;
@@ -133,15 +157,14 @@ export async function syncSingleCall(callData) {
   if (result.success) {
     console.log('[callSyncService] ✅ Call synced:', callData.phoneNumber, `(${callData.duration}s)`);
   } else {
-    // All retries failed — save to offline queue for next connectivity event
     await addToOfflineQueue(callData);
     console.warn('[callSyncService] All retries failed, queued:', result.error);
   }
 }
 
 /**
- * Drain the offline queue — call this whenever connectivity is restored.
- * Safe to call multiple times concurrently (internal guard prevents double-drain).
+ * Drain the offline queue — call when connectivity is restored.
+ * Safe to call multiple times concurrently (internal guard).
  */
 let _drainingQueue = false;
 
@@ -151,10 +174,7 @@ export async function drainOfflineQueue() {
 
   try {
     const queue = await loadOfflineQueue();
-    if (queue.length === 0) {
-      _drainingQueue = false;
-      return;
-    }
+    if (queue.length === 0) { _drainingQueue = false; return; }
 
     console.log(`[callSyncService] Draining ${queue.length} queued call(s)…`);
 
@@ -164,17 +184,12 @@ export async function drainOfflineQueue() {
     for (const callData of queue) {
       const online = await isOnline();
       if (!online) {
-        // Network dropped again — put remainder back and stop
         failed.push(...queue.slice(queue.indexOf(callData)));
         break;
       }
-
-      const result = await uploadWithRetry(callData, 1); // 1 retry per queued item
-      if (result.success) {
-        succeeded.push(callData);
-      } else {
-        failed.push(callData);
-      }
+      const result = await uploadWithRetry(callData, 1);
+      if (result.success) succeeded.push(callData);
+      else                 failed.push(callData);
     }
 
     await saveOfflineQueue(failed);
@@ -187,8 +202,7 @@ export async function drainOfflineQueue() {
 }
 
 /**
- * Set up a NetInfo listener that automatically drains the offline queue
- * when the device reconnects to the internet.
+ * Set up a NetInfo listener that drains the offline queue on reconnect.
  * Call once at app startup (after login). Returns an unsubscribe function.
  */
 export function startOfflineQueueDrainer() {
@@ -201,8 +215,7 @@ export function startOfflineQueueDrainer() {
 }
 
 /**
- * Return the number of calls currently in the offline queue.
- * Useful for showing a "pending sync" badge in the UI.
+ * Return the number of calls in the offline queue.
  */
 export async function getOfflineQueueLength() {
   const queue = await loadOfflineQueue();

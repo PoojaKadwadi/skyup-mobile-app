@@ -32,20 +32,30 @@ import { useTheme }                     from '../../theme/ThemeContext';
 import AttendanceWidget                 from '../../components/AttendanceWidget';
 import NotificationPermissionBanner    from '../../components/NotificationPermissionBanner';
 
-const AUTO_SYNC_SETUP_KEY = 'crm_auto_sync_setup_done';
+// FIX: user-scoped key so User B is not considered "already set up" because
+// User A set up recording sync on the same device in a previous session.
+function getAutoSyncKey() {
+  try {
+    const { store } = require('../../store');
+    const userId = store.getState()?.auth?.user?._id || store.getState()?.auth?.user?.id || 'anon';
+    return `crm_auto_sync_setup_done_${userId}`;
+  } catch {
+    return 'crm_auto_sync_setup_done';
+  }
+}
 
 // PERF FIX: Module-level cache so repeated AsyncStorage.getItem calls for this
-// key (useAutoSyncSetup hook) become memory reads
-// after the first access. Cleared to null on logout via clearAutoSyncCache().
+// key (useAutoSyncSetup hook) become memory reads after the first access.
+// Cleared to null on logout via clearAutoSyncCache() (called from authSlice).
 let _autoSyncSetupCache = null;
 async function isAutoSyncDone() {
   if (_autoSyncSetupCache !== null) return _autoSyncSetupCache === 'true';
-  try { _autoSyncSetupCache = await AsyncStorage.getItem(AUTO_SYNC_SETUP_KEY); } catch {}
+  try { _autoSyncSetupCache = await AsyncStorage.getItem(getAutoSyncKey()); } catch {}
   return _autoSyncSetupCache === 'true';
 }
 async function markAutoSyncDone() {
   _autoSyncSetupCache = 'true';
-  try { await AsyncStorage.setItem(AUTO_SYNC_SETUP_KEY, 'true'); } catch {}
+  try { await AsyncStorage.setItem(getAutoSyncKey(), 'true'); } catch {}
 }
 export function clearAutoSyncCache() { _autoSyncSetupCache = null; }
 

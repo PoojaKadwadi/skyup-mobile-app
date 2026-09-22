@@ -196,6 +196,16 @@ const doFollowUpCheck = async () => {
 const doSync = async ({ forceFullDay = false, fromForeground = false } = {}) => {
   if (isSyncing) return;
 
+  // FIX: abort if the user has logged out while sync was queued. Without this
+  // guard, a scheduled sync could run after logout and upload data under the
+  // wrong (or no) auth context — or fail with a 401 that then incorrectly
+  // triggers a forceLogout loop.
+  const authUser = store.getState()?.auth?.user;
+  if (!authUser) {
+    console.log('[Sync] Aborting — no authenticated user');
+    return;
+  }
+
   if (fromForeground) {
     const lastRan = await getTs(LAST_RAN_KEY);
     if (Date.now() - lastRan < MIN_FOREGROUND_WAIT_MS) return;

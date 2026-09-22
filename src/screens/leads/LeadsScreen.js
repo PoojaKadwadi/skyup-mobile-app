@@ -427,6 +427,10 @@ export default function LeadsScreen() {
   // causing the whole LeadsScreen to re-render. Granular selectors only re-render
   // when the specific field changes.
   const loading       = useSelector(s => s.leads.loading);
+  // FIX: subscribe to the error field from Redux so the list can show a real
+  // error state (with retry) instead of just showing an empty list when the
+  // fetch failed. Previously this field was never read here.
+  const leadsError    = useSelector(s => s.leads.error);
   const searchQuery   = useSelector(s => s.leads.searchQuery);
   const filterStatus  = useSelector(s => s.leads.filterStatus);
   const lastFetchedAt = useSelector(s => s.leads.lastFetchedAt);
@@ -885,6 +889,19 @@ export default function LeadsScreen() {
               <ActivityIndicator size="large" color={colors.blue} />
               <Text style={s.emptyTitle}>Loading leads…</Text>
               <Text style={s.emptySub}>This can take a moment on first load</Text>
+            </View>
+          ) : leadsError && totalLeads === 0 ? (
+            // FIX: show a real error state with retry when the fetch failed
+            // and there are no cached leads to display. Previously this fell
+            // through to the generic "No leads yet" empty state which gave
+            // the user no indication that something went wrong or how to fix it.
+            <View style={s.empty}>
+              <Icon name="wifi-off" size={52} color={colors.border} />
+              <Text style={s.emptyTitle}>Could not load leads</Text>
+              <Text style={s.emptySub}>{leadsError}</Text>
+              <TouchableOpacity onPress={onRefresh} style={s.clearBtnCenter}>
+                <Text style={s.clearBtnTxt}>Tap to retry</Text>
+              </TouchableOpacity>
             </View>
           ) : (
             <View style={s.empty}>

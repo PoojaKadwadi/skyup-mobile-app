@@ -50,14 +50,31 @@ const IMPORTANCE_HIGH = AndroidImportance?.HIGH ?? 4;
 // read/parse/write cycles per hour that the old inline approach caused.
 import { seenLeads, notified as notifiedDedup, scheduled as scheduledDedup } from './notifDedup';
 
-// ── AsyncStorage keys ─────────────────────────────────────────────────────────
-const SEEN_LEADS_KEY = 'notif_seen_lead_ids';
-const NOTIFIED_FOLLOWUP_KEY = 'notif_notified_followup_ids';
-const REASSIGN_COUNTS_KEY = 'notif_reassign_counts';
-const SOCKET_NOTIFIED_KEY = 'notif_socket_notified_ids';
-const SOCKET_REASSIGN_KEY = 'notif_socket_reassign_ids';
-const MEETING_NOTIFIED_KEY = 'notif_meeting_notified_ids';
-const MEETING_SUMMARY_KEY = 'notif_meeting_summary_date';
+// ── AsyncStorage keys — USER-SCOPED to prevent cross-user data leakage ────────
+// FIX: these keys were previously global. On a shared/multi-account device,
+// User B would see User A's seen-lead IDs and suppress notifications that
+// User B should receive (or vice-versa). Keys are now scoped to userId so
+// each user's dedup state is fully isolated.
+//
+// getUserSuffix() reads from the Redux store lazily (to avoid a circular
+// import at module load time). It returns '_anon' before login, then the
+// real userId once auth is established.
+function getUserSuffix() {
+  try {
+    const { store } = require('../store');
+    const userId = store.getState()?.auth?.user?._id || store.getState()?.auth?.user?.id;
+    return userId ? `_${userId}` : '_anon';
+  } catch { return '_anon'; }
+}
+
+// All keys are functions so they compute the suffix at call time (after login).
+const SEEN_LEADS_KEY        = () => `notif_seen_lead_ids${getUserSuffix()}`;
+const NOTIFIED_FOLLOWUP_KEY = () => `notif_notified_followup_ids${getUserSuffix()}`;
+const REASSIGN_COUNTS_KEY   = () => `notif_reassign_counts${getUserSuffix()}`;
+const SOCKET_NOTIFIED_KEY   = () => `notif_socket_notified_ids${getUserSuffix()}`;
+const SOCKET_REASSIGN_KEY   = () => `notif_socket_reassign_ids${getUserSuffix()}`;
+const MEETING_NOTIFIED_KEY  = () => `notif_meeting_notified_ids${getUserSuffix()}`;
+const MEETING_SUMMARY_KEY   = () => `notif_meeting_summary_date${getUserSuffix()}`;
 
 // ── Notification channel IDs ─────────────────────────────────────────────────
 const CHANNEL_NEW_LEAD = 'new_lead_channel_v2';
@@ -1053,7 +1070,7 @@ async function _maybeShowMeetingSummary(todaysFollowUps) {
   if (!notifee || !todaysFollowUps?.length) return;
   try {
     const todayStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-    const lastShown = await AsyncStorage.getItem(MEETING_SUMMARY_KEY);
+    const lastShown = await AsyncStorage.getItem(MEETING_SUMMARY_KEY());
     if (lastShown === todayStr) return; // already summarised today
 
     await _ensureMeetingChannel();
@@ -1087,7 +1104,7 @@ async function _maybeShowMeetingSummary(todaysFollowUps) {
       },
     });
 
-    await AsyncStorage.setItem(MEETING_SUMMARY_KEY, todayStr);
+    await AsyncStorage.setItem(MEETING_SUMMARY_KEY(), todayStr);
   } catch (e) {
     console.warn('[Notifications] _maybeShowMeetingSummary error:', e.message);
   }
@@ -1108,13 +1125,13 @@ export async function cancelMeetingFollowUp(meetingId, followUpDate) {
 export async function clearNotificationState() {
   try {
     await AsyncStorage.multiRemove([
-      SEEN_LEADS_KEY,
-      NOTIFIED_FOLLOWUP_KEY,
-      REASSIGN_COUNTS_KEY,
-      SOCKET_NOTIFIED_KEY,
-      SOCKET_REASSIGN_KEY,
-      MEETING_NOTIFIED_KEY,
-      MEETING_SUMMARY_KEY,
+      SEEN_LEADS_KEY(),
+      NOTIFIED_FOLLOWUP_KEY(),
+      REASSIGN_COUNTS_KEY(),
+      SOCKET_NOTIFIED_KEY(),
+      SOCKET_REASSIGN_KEY(),
+      MEETING_NOTIFIED_KEY(),
+      MEETING_SUMMARY_KEY(),
     ]);
 
     if (notifee) {
@@ -1152,7 +1169,7 @@ export async function showNewLeadNotification({
   if (!leadId) return;
 
   try {
-    const raw = await AsyncStorage.getItem(SOCKET_NOTIFIED_KEY);
+    const raw = await AsyncStorage.getItem(SOCKET_NOTIFIED_KEY());
 
     const seenIds = raw
       ? JSON.parse(raw)
@@ -1245,7 +1262,7 @@ export async function showReassignedLeadNotification({ leadId, leadName }) {
   if (!leadId) return;
 
   try {
-    const raw     = await AsyncStorage.getItem(SOCKET_REASSIGN_KEY);
+    const raw     = await AsyncStorage.getItem(SOCKET_REASSIGN_KEY());
     const seenIds = raw ? JSON.parse(raw) : [];
     const normalized = Array.isArray(seenIds) ? seenIds.map(String) : [];
 

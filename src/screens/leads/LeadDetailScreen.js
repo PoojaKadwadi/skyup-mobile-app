@@ -975,6 +975,10 @@ export default function LeadDetailScreen() {
 
   // ── Submit remark ───────────────────────────────────────────────────────────
   const handleSubmitRemark = async () => {
+    // FIX: guard against double-tap / rapid resubmission. The button is also
+    // disabled={submitting} in JSX, but a belt-and-suspenders check here
+    // prevents the async handler from running twice if state update lags.
+    if (submitting) return;
     if (!remark.trim()) { Alert.alert('Required', 'Please enter a call remark'); return; }
     if (!outcome)       { Alert.alert('Required', 'Please select a call outcome'); return; }
 
