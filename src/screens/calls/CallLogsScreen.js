@@ -201,8 +201,11 @@ export default function CallLogsScreen() {
   const loadTodayLogs = useCallback(async (userId = activeAgent) => {
     setLoading(true);
     try {
-      // Build query params — admin can filter by agent
-      const params = {};
+      // Build query params — admin can filter by agent.
+      // FIX: send tzOffset (device minutes ahead of UTC) so the backend computes
+      // the correct local-day window. Prevents calls near midnight being shown
+      // on the wrong day on IST and other non-UTC devices.
+      const params = { tzOffset: -new Date().getTimezoneOffset() };
       if (userId && userId !== 'all') params.userId = userId;
 
       const res  = await apiClient.get('/call-logs/today', { params });

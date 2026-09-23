@@ -175,6 +175,14 @@ export default function DayCallLogsScreen() {
   const [error,   setError]   = useState(null);
 
   const dateParam = useMemo(() => moment(selectedDate).format('YYYY-MM-DD'), [selectedDate]);
+
+  // FIX: send the device's UTC offset (minutes) so the backend can compute
+  // correct local-day boundaries. Without this, calls made between midnight
+  // and UTC-offset (e.g. 00:00–05:30 on IST devices) appear on the wrong day
+  // because the backend was using UTC midnight as the day boundary.
+  // new Date().getTimezoneOffset() returns minutes BEHIND UTC (negative for IST),
+  // so we negate it to get minutes AHEAD of UTC (IST = +330).
+  const tzOffset = useMemo(() => -new Date().getTimezoneOffset(), []);
   const isToday = useMemo(() => {
     const t = new Date(); t.setHours(0, 0, 0, 0);
     return t.getTime() === selectedDate.getTime();
@@ -184,7 +192,7 @@ export default function DayCallLogsScreen() {
     setLoading(true);
     setError(null);
     try {
-      const res = await apiClient.get('/call-logs', { params: { date: dateParam, limit: 200 } });
+      const res = await apiClient.get('/call-logs', { params: { date: dateParam, limit: 200, tzOffset } });
       const raw = res.data.logs || [];
       const valid = raw
         .map(l => ({ ...l, _tsMs: l.timestamp ? new Date(l.timestamp).getTime() : 0 }))
@@ -197,7 +205,7 @@ export default function DayCallLogsScreen() {
     } finally {
       setLoading(false);
     }
-  }, [dateParam]);
+  }, [dateParam, tzOffset]);
 
   useEffect(() => { load(); }, [load]);
 
