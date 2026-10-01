@@ -471,9 +471,7 @@ export async function checkAndNotifyFollowUps(leads) {
 
         await notifee.displayNotification({
           id: `followup_${dedupKey}`,
-
           title: `📞 ${candidate.label} — ${timeLabel}`,
-
           body:
             `${lead.name}${
               candidate.note
@@ -483,7 +481,9 @@ export async function checkAndNotifyFollowUps(leads) {
             (lead.Quality
               ? ` ${QUALITY_EMOJI[lead.Quality] ?? ''}`
               : ''),
-
+          // FIX: data must be at ROOT level (not inside android:{}) so
+          // handlePress can read notification.data?.leadId on tap.
+          data: { leadId: String(lead.id), type: 'follow_up' },
           android: {
             channelId: CHANNEL_FOLLOW_UP,
             importance: IMPORTANCE_HIGH,
@@ -493,11 +493,7 @@ export async function checkAndNotifyFollowUps(leads) {
             badgeCount: followupBadge,
             badgeIconType: 1,
 
-            data: {
-              leadId: String(lead.id),
-            },
-
-            pressAction: {
+              pressAction: {
               id: 'open_lead',
             },
           },
@@ -574,22 +570,33 @@ export function registerNotificationHandlers(
       return;
     }
 
-    if (
-      notification.id?.startsWith('followup_')
-    ) {
-      const leadId = notification.data?.leadId;
+    // FIX: use data.leadId (now at root for all lead notifications) +
+    // data.type for routing. Falls back to id-prefix for legacy notifications.
+    const dataLeadId = notification.data?.leadId;
+    const dataType   = notification.data?.type;
 
-      leadId
-        ? navigate('LeadDetail', { leadId })
-        : navigate('Leads');
+    if (dataLeadId) {
+      // Any notification that carries a leadId → open that specific lead
+      navigate('LeadDetail', { leadId: dataLeadId });
+      return;
+    }
+
+    if (notification.id?.startsWith('followup_')) {
+      navigate('Leads');
     } else if (
-      notification.id?.startsWith('meeting_')
+      notification.id?.startsWith('meeting_') ||
+      dataType === 'meeting'
     ) {
       navigate('ClientMeeting');
     } else if (
       notification.id?.startsWith('new_leads_') ||
-      notification.id?.startsWith('reassigned_')
+      notification.id?.startsWith('socket_lead_') ||
+      notification.id?.startsWith('reassigned_') ||
+      dataType === 'new_lead' ||
+      dataType === 'reassignment'
     ) {
+      navigate('Leads');
+    } else {
       navigate('Leads');
     }
   };
@@ -1214,11 +1221,10 @@ export async function showNewLeadNotification({
 
     await notifee.displayNotification({
       id: `socket_lead_${leadId}`,
-
       title: '🎯 New Lead Assigned',
-
       body: `${leadName}${sourceLine}`,
-
+      // FIX: data at root so tapping opens LeadDetail for this specific lead
+      data: { leadId: String(leadId), type: 'new_lead' },
       android: {
         channelId: CHANNEL_NEW_LEAD,
         importance: IMPORTANCE_HIGH,
@@ -1226,10 +1232,7 @@ export async function showNewLeadNotification({
         badgeCount: socketBadge,
         badgeIconType: 1,
         showWhen: true,
-
-        pressAction: {
-          id: 'open_leads',
-        },
+        pressAction: { id: 'open_lead' },
       },
 
       ios: {
@@ -1282,6 +1285,8 @@ export async function showReassignedLeadNotification({ leadId, leadName }) {
       id:    `reassigned_${leadId}`,
       title: '🔄 Lead Reassigned to You',
       body:  `${leadName} has been assigned to you`,
+      // FIX: data at root so tap opens the specific lead
+      data: { leadId: String(leadId), type: 'reassignment' },
       android: {
         channelId:     CHANNEL_NEW_LEAD,
         importance:    IMPORTANCE_HIGH,
@@ -1289,7 +1294,7 @@ export async function showReassignedLeadNotification({ leadId, leadName }) {
         badgeCount:    badge,
         badgeIconType: 1,
         showWhen:      true,
-        pressAction:   { id: 'open_leads' },
+        pressAction:   { id: 'open_lead' },
       },
       ios: {
         sound: 'default',

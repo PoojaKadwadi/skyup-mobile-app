@@ -13,7 +13,8 @@ try {
         const id = notification.id || '';
         nav.navigate('Main');
         if (id.startsWith('followup_')) {
-          const leadId = notification.android?.pressAction?.input;
+          // FIX: data is at root level, not inside android.pressAction.input
+          const leadId = notification.data?.leadId;
           if (leadId) setTimeout(() => nav.navigate('LeadDetail', { leadId }), 200);
           else        setTimeout(() => nav.navigate('Leads'), 200);
         } else if (id.startsWith('new_leads_') || id.startsWith('reassigned_') || id.startsWith('socket_lead_')) {
@@ -92,8 +93,10 @@ try {
             channelId:   CHANNEL_ID,
             importance:  IMPORTANCE_HIGH,
             smallIcon:   'ic_notification',
-            pressAction: { id: 'open_leads' },
+            pressAction: { id: 'open_lead' },
           },
+          // FIX: data at root so tap opens the specific lead
+          data: { leadId: data.leadId || '', type: 'new_lead' },
           ios: {
             sound: 'default',
             foregroundPresentationOptions: { alert: true, sound: true, badge: false },

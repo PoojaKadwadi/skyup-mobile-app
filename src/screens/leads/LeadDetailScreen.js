@@ -192,7 +192,12 @@ export default function LeadDetailScreen() {
   const { dark, colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  const storeLead = useSelector((s) => (s.leads?.items ?? []).find(l => l.id === leadId));
+  // FIX: use O(1) byId map instead of O(n) Array.find — with 500+ leads
+  // the old code ran 500 comparisons on EVERY Redux state update.
+  const storeLead = useSelector((s) => {
+    const idx = s.leads?.byId?.[leadId];
+    return idx !== undefined ? s.leads.items[idx] : null;
+  });
   const contactAccountEmail = useSelector((s) => s.auth?.user?.contactAccountEmail || '');
 
   // RAM FIX: Redux now stores slim leads (no callHistory/scheduledCalls).
