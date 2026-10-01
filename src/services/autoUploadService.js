@@ -46,6 +46,19 @@ const CHANNEL_ID    = 'auto_upload_service';
 const CHANNEL_NAME  = 'Auto-Upload Service';
 const NOTIF_ID      = 'auto-upload-fgs';
 
+// ── CRASH FIX (Android 15) ───────────────────────────────────────────────────
+// dataSync is capped at 6h/24h on Android 15+ → OS kills the app with
+// ForegroundServiceDidNotStopInTimeException. On API 34+ use "specialUse"
+// (no time limit; declared in AndroidManifest with a subtype property).
+// Below API 34 keep dataSync (no limit there, specialUse doesn't exist).
+const FGS_TYPE_SPECIAL_USE = 0x40000000;
+function getForegroundServiceType() {
+  if (Platform.OS === 'android' && Platform.Version >= 34) {
+    return AndroidForegroundServiceType?.FOREGROUND_SERVICE_TYPE_SPECIAL_USE ?? FGS_TYPE_SPECIAL_USE;
+  }
+  return AndroidForegroundServiceType?.FOREGROUND_SERVICE_TYPE_DATA_SYNC ?? 1;
+}
+
 let _running   = false;
 let _registered = false;
 
@@ -116,7 +129,7 @@ export async function startAutoUploadService() {
         asForegroundService:  true,
         // ✅ FIX — explicit long-running type instead of Notifee's default
         // "shortService" (which force-kills the app after 3 minutes).
-        foregroundServiceTypes: [AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_DATA_SYNC],
+        foregroundServiceTypes: [getForegroundServiceType()],
         ongoing:              true,
         smallIcon:            'ic_launcher',   // falls back to app icon
         importance:           AndroidImportance.LOW,

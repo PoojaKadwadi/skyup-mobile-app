@@ -52,6 +52,13 @@
          startForeground() instead of the previous 3-minute shortService crash. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
+    <!-- CRASH FIX (Android 15 only): dataSync FGS is capped at 6 hours per
+         24h on Android 15+. When the cap hits, the OS calls onTimeout() and,
+         since Notifee doesn't stop the service, the app is killed with
+         ForegroundServiceDidNotStopInTimeException. autoUploadService.js now
+         uses "specialUse" on Android 14+, which has no time limit. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
     <!-- Required for Linking.canOpenURL tel: on Android 11+ -->
     <queries>
         <intent>
@@ -112,8 +119,12 @@
       <service
         android:name="app.notifee.core.ForegroundService"
         android:exported="false"
-        android:foregroundServiceType="dataSync|shortService"
-        tools:replace="android:foregroundServiceType" />
+        android:foregroundServiceType="dataSync|shortService|specialUse"
+        tools:replace="android:foregroundServiceType">
+        <property
+          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+          android:value="Keeps the CRM alive after phone calls so call logs and call recordings are uploaded to the company CRM automatically." />
+      </service>
 
       <!-- Default icon used by FCM for system-tray notifications when the app is
            backgrounded/killed. Points at the white monochrome ic_notification
