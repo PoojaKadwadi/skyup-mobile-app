@@ -12,7 +12,7 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import {
   View, Text, FlatList, StyleSheet, TouchableOpacity,
-  Alert, ActivityIndicator, StatusBar, InteractionManager,
+  Alert, ActivityIndicator, StatusBar, InteractionManager, AppState,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import Icon              from 'react-native-vector-icons/MaterialCommunityIcons';
@@ -21,6 +21,7 @@ import moment            from 'moment';
 import { useTheme }      from '../../theme/ThemeContext';
 
 import { normalizePhone } from '../../services/phoneService';
+import { onSyncEvent } from '../../services/backgroundSyncService';
 import { store }          from '../../store';
 // SECURITY: call recordings are sensitive conversation audio — block
 // screenshots/screen-recording/Recent-Apps thumbnail while this screen is
@@ -427,13 +428,31 @@ export default function RecordingsScreen() {
     });
   }, [autoUploadPending]);
 
-  // Auto-scan on mount
-  useEffect(() => {
-    const task = InteractionManager.runAfterInteractions(() => {
-      scanRecordings(true);
-    });
-    return () => task.cancel();
+  // Auto-scan: on mount, whenever the screen is focused, every 60s while it is
+  // open, on app resume, and shortly after every call ends — no Rescan tap needed.
+  const scanRef = useRef(scanRecordings);
+  scanRef.current = scanRecordings;
+  const lastScanRef = useRef(0);
+  const autoScan = useCallback(() => {
+    if (queueRunningRef.current) return;          // uploads still running
+    if (Date.now() - lastScanRef.current < 20_000) return; // throttle
+    lastScanRef.current = Date.now();
+    scanRef.current(true);
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      const task = InteractionManager.runAfterInteractions(() => { lastScanRef.current = 0; autoScan(); });
+      const poll = setInterval(autoScan, 60 * 1000);
+      const appSub = AppState.addEventListener('change', (st) => { if (st === 'active') setTimeout(autoScan, 1500); });
+      const off = onSyncEvent((type) => {
+        // Dialers finish writing the file a few seconds after hang-up.
+        if (type === 'callEnded') { setTimeout(() => { lastScanRef.current = 0; autoScan(); }, 8000); setTimeout(() => { lastScanRef.current = 0; autoScan(); }, 30000); }
+        if (type === 'recordings') { lastScanRef.current = 0; autoScan(); }
+      });
+      return () => { task.cancel(); clearInterval(poll); appSub.remove(); off(); };
+    }, [autoScan])
+  );
 
   const keyExtractor = useCallback((item) => item.path, []);
 
@@ -472,7 +491,7 @@ export default function RecordingsScreen() {
             : <Icon name="folder-search-outline" size={18} color={colors.blueLight} />
           }
           <Text style={styles.scanBtnText}>
-            {loading ? 'Scanning…' : 'Rescan'}
+            {loading ? 'Scanning…' : 'Auto ✓'}
           </Text>
         </TouchableOpacity>
       </View>
@@ -493,12 +512,13 @@ export default function RecordingsScreen() {
               <Icon name="microphone-off" size={52} color={colors.border} />
               <Text style={styles.emptyTitle}>No recordings today</Text>
               <Text style={styles.emptySubtitle}>
-                No call recordings from today were found on your device.
-                {'\n\n'}Tap Rescan if you just completed a call.
+                No call recordings from today were found on your device yet.
+                {'\n\n'}This list checks automatically after every call and every minute.
+                Make sure your phone's dialer has auto call recording switched on.
               </Text>
               <TouchableOpacity style={styles.scanBtnLarge} onPress={() => scanRecordings(false)}>
                 <Icon name="folder-search-outline" size={20} color={colors.blueLight} />
-                <Text style={styles.scanBtnLargeText}>Rescan for Today's Recordings</Text>
+                <Text style={styles.scanBtnLargeText}>Check now</Text>
               </TouchableOpacity>
             </View>
           ) : null

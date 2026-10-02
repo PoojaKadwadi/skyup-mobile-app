@@ -108,6 +108,19 @@ let appStateListener     = null;
 let netInfoUnsubscribe   = null;
 let isSyncing            = false;
 let isCheckingFollowUps  = false;
+let logInterval          = null;
+
+// ── Sync events — screens subscribe so they refresh on their own ─────────────
+// Types: 'calllogs' (device call log pushed to server), 'recordings'
+// (a recording was uploaded), 'callEnded' (a phone call just finished).
+const _syncListeners = new Set();
+export function onSyncEvent(fn) {
+  _syncListeners.add(fn);
+  return () => _syncListeners.delete(fn);
+}
+function emitSyncEvent(type, payload = {}) {
+  _syncListeners.forEach((fn) => { try { fn(type, payload); } catch { /* ignore */ } });
+}
 
 // PERF FIX: In-memory cache for LAST_RAN_KEY so the AppState 'active' handler
 // never has to hit AsyncStorage (disk I/O on the JS bridge) on every screen-on event.
@@ -192,6 +205,79 @@ const doFollowUpCheck = async () => {
   }
 };
 
+
+// ── Call-log push (device call log → server) ─────────────────────────────────
+// Cheap: only reads entries newer than the last successful push. Shared by the
+// full sync, the quick "sync now" used by screens, and the post-call trigger.
+let _logSyncPromise = null;
+let _lastLogSyncAt  = 0;
+
+async function _knownNumbers() {
+  let set = getKnownLeadNumberSet();
+  if (set.size === 0) {
+    // Leads not loaded yet (app opened straight on a calls screen) — load them
+    // so the CRM-only filter works instead of uploading every personal call.
+    try { await store.dispatch(fetchLeads()); set = getKnownLeadNumberSet(); } catch { /* ignore */ }
+  }
+  return set;
+}
+
+async function _syncCallLogsCore({ forceFullDay = false } = {}) {
+  const todayMidnight = getTodayMidnightMs();
+  const now           = Date.now();
+  const lastLogSync = forceFullDay
+    ? todayMidnight
+    : Math.max(await getTs(LAST_SYNC_KEY, now), todayMidnight);
+
+  // Primary scope: the employee's registered work-SIM (null → all SIMs).
+  const workSimId = await getWorkSimAccountId();
+  const rawLogs = await getCallLogsSince(lastLogSync, workSimId);
+
+  // Secondary scope: only numbers that belong to a CRM lead (privacy).
+  const knownNumbers = await _knownNumbers();
+  const logs = knownNumbers.size > 0
+    ? rawLogs.filter(l => knownNumbers.has(normalizePhone(l.phoneNumber)))
+    : rawLogs;
+
+  console.log(`[Sync] Call logs since ${new Date(lastLogSync).toISOString()}: ${rawLogs.length} on device${workSimId ? ' (work SIM)' : ''}, ${logs.length} match a CRM lead`);
+
+  for (let i = 0; i < logs.length; i += LOG_BATCH_SIZE) {
+    const chunk = logs.slice(i, i + LOG_BATCH_SIZE);
+    // eslint-disable-next-line no-await-in-loop
+    await syncCallLogs(chunk);
+    // eslint-disable-next-line no-await-in-loop
+    await setTs(LAST_SYNC_KEY);
+  }
+  if (!logs.length) await setTs(LAST_SYNC_KEY);
+  _lastLogSyncAt = Date.now();
+  if (logs.length) emitSyncEvent('calllogs', { count: logs.length });
+  return logs.length;
+}
+
+/**
+ * Push new device call-log entries to the server right now.
+ * Throttled (15s) unless force=true; concurrent callers share one run.
+ * Screens call this on open / pull-to-refresh so nobody has to tap "Rescan".
+ */
+export async function syncCallLogsNow({ force = false } = {}) {
+  if (!store.getState()?.auth?.user) return 0;
+  if (_logSyncPromise) return _logSyncPromise;
+  if (!force && Date.now() - _lastLogSyncAt < 15_000) return 0;
+  _logSyncPromise = (async () => {
+    try {
+      const net = await NetInfo.fetch();
+      if (!net.isConnected) return 0;
+      return await _syncCallLogsCore({});
+    } catch (e) {
+      console.warn('[Sync] Quick call-log sync failed:', e.message);
+      return 0;
+    } finally {
+      _logSyncPromise = null;
+    }
+  })();
+  return _logSyncPromise;
+}
+
 // ── Core call-log + recording sync ────────────────────────────────────────────
 const doSync = async ({ forceFullDay = false, fromForeground = false } = {}) => {
   if (isSyncing) return;
@@ -220,39 +306,9 @@ const doSync = async ({ forceFullDay = false, fromForeground = false } = {}) => 
     const now           = Date.now();
 
     // ── Call log sync ─────────────────────────────────────────────────────────
-    const lastLogSync = forceFullDay
-      ? todayMidnight
-      : Math.max(await getTs(LAST_SYNC_KEY, now), todayMidnight);
-
-    // Primary scope: the employee's own registered work-SIM number — the
-    // actual number THEY use to call leads. If they haven't picked one yet
-    // (single-SIM phone, or just hasn't set it in Profile), workSimId is
-    // null and the query falls back to reading all SIMs on the device.
-    const workSimId = await getWorkSimAccountId();
-    const rawLogs = await getCallLogsSince(lastLogSync, workSimId);
-
-    // Secondary scope: only numbers matching a known CRM lead — see
-    // getKnownLeadNumberSet() above for why this exists and the trade-off
-    // with unmatched-call detection. Still applied even when a work SIM is
-    // set, since an agent could still place/receive a personal call on
-    // their work line.
-    const knownNumbers = getKnownLeadNumberSet();
-    const logs = knownNumbers.size > 0
-      ? rawLogs.filter(l => knownNumbers.has(normalizePhone(l.phoneNumber)))
-      : rawLogs; // no leads cached locally yet — don't silently drop everything
-
-    console.log(`[Sync] Call logs since ${new Date(lastLogSync).toISOString()}: ${rawLogs.length} found on device${workSimId ? ` (work SIM only)` : ' (all SIMs — no work SIM set)'}, ${logs.length} match a CRM lead`);
-
-    if (logs.length > 0) {
-      for (let i = 0; i < logs.length; i += LOG_BATCH_SIZE) {
-        const chunk = logs.slice(i, i + LOG_BATCH_SIZE);
-        await syncCallLogs(chunk);
-        await setTs(LAST_SYNC_KEY);
-        console.log(`[Sync] ✅ Chunk ${Math.floor(i / LOG_BATCH_SIZE) + 1}: uploaded ${chunk.length} call log(s)`);
-      }
-    } else {
-      await setTs(LAST_SYNC_KEY);
-    }
+    if (_logSyncPromise) { try { await _logSyncPromise; } catch { /* ignore */ } }
+    _logSyncPromise = _syncCallLogsCore({ forceFullDay }).finally(() => { _logSyncPromise = null; });
+    await _logSyncPromise;
 
     await setTs(LAST_RAN_KEY);
 
@@ -282,6 +338,7 @@ const doSync = async ({ forceFullDay = false, fromForeground = false } = {}) => 
       }
 
       const recResult = await syncRecordings(null, sinceMs, skipPhones);
+      if (recResult?.uploaded > 0) emitSyncEvent('recordings', { uploaded: recResult.uploaded });
       console.log(`[Sync] Recording sweep done: uploaded=${recResult.uploaded} skipped=${recResult.skipped} failed=${recResult.failed}`);
       await setTs(LAST_REC_SYNC_KEY);
     }
@@ -323,9 +380,14 @@ export const startBackgroundSync = () => {
   setTimeout(() => doSyncDeferred(), INITIAL_SYNC_DELAY_MS);
   syncInterval     = setInterval(() => doSyncDeferred(), SYNC_INTERVAL_MS);
   followUpInterval = setInterval(() => doFollowUpCheck(), FOLLOWUP_INTERVAL_MS);
+  // Lightweight call-log push every 2 min while the app is open, so Calls by
+  // Day stays current without waiting for the 10-min full sync.
+  logInterval      = setInterval(() => { syncCallLogsNow().catch(() => {}); }, 2 * 60 * 1000);
 
   appStateListener = AppState.addEventListener('change', (nextState) => {
     if (nextState !== 'active') return;
+    // Always push fresh call-log entries on resume (cheap, throttled).
+    setTimeout(() => { syncCallLogsNow().catch(() => {}); }, 1200);
     // PERF FIX: use in-memory _lastRanMs — no async, no AsyncStorage bridge call
     if (_lastRanMs > 0 && Date.now() - _lastRanMs >= MIN_FOREGROUND_WAIT_MS) {
       // FIX: 1500ms extra delay — the app-resume transition (shared-element,
@@ -369,6 +431,7 @@ export const startBackgroundSync = () => {
 export const stopBackgroundSync = () => {
   if (syncInterval)     { clearInterval(syncInterval);     syncInterval     = null; }
   if (followUpInterval) { clearInterval(followUpInterval); followUpInterval = null; }
+  if (logInterval)      { clearInterval(logInterval);      logInterval      = null; }
   if (appStateListener) { appStateListener.remove();       appStateListener = null; }
   if (netInfoUnsubscribe) { netInfoUnsubscribe();          netInfoUnsubscribe = null; }
   // Clear session-scoped dedup state on logout
@@ -395,6 +458,11 @@ export const triggerManualSync = async (forceFullDay = false) => {
 // periodic sweep doesn't re-attempt the same file within the same 10-min window.
 export const triggerPostCallRecordingSync = (phoneNumber, callStartedAt, leadName = '') => {
   console.log(`[Sync] 📞 Post-call sync queued for ${phoneNumber} startedAt=${new Date(callStartedAt).toISOString()}`);
+  emitSyncEvent('callEnded', { phoneNumber });
+  // The dialer writes the call-log row right after hang-up — push it twice
+  // (quick + a safety retry) so Calls by Day shows the call within seconds.
+  setTimeout(() => { syncCallLogsNow({ force: true }).catch(() => {}); }, 4_000);
+  setTimeout(() => { syncCallLogsNow({ force: true }).catch(() => {}); }, 20_000);
 
   enqueueUpload(async () => {
     const delays = [3_000, 10_000, 25_000, 45_000]; // FIX: added 45s for slow dialers / saved contacts
@@ -432,6 +500,7 @@ export const triggerPostCallRecordingSync = (phoneNumber, callStartedAt, leadNam
           // FIX: Mark this number as handled so the periodic sweep skips it
           _postCallSyncedNumbers.add(phoneNumber);
           _lastAutoUploadAt = Date.now();
+          emitSyncEvent('recordings', { phoneNumber, uploaded: result.uploaded });
           return; // stop retrying
         }
 
@@ -455,4 +524,4 @@ export const triggerPostCallRecordingSync = (phoneNumber, callStartedAt, leadNam
 };
 
 export const initBackgroundSync = startBackgroundSync;
-export default { startBackgroundSync, stopBackgroundSync, triggerManualSync, triggerPostCallRecordingSync };
+export default { startBackgroundSync, stopBackgroundSync, triggerManualSync, triggerPostCallRecordingSync, syncCallLogsNow, onSyncEvent };

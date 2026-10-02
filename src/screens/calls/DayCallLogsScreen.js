@@ -30,7 +30,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Modal, RefreshControl, SectionList, TextInput, ScrollView,
+  ActivityIndicator, Modal, RefreshControl, SectionList, TextInput, ScrollView, AppState,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useSelector }    from 'react-redux';
@@ -40,6 +40,8 @@ import { useTheme }       from '../../theme/ThemeContext';
 import apiClient          from '../../api/apiClient';
 import { normalizePhone } from '../../services/phoneService';
 import { statusLabel, statusColor } from '../../services/customizationService';
+import { syncCallLogsNow, onSyncEvent } from '../../services/backgroundSyncService';
+import FilterDropdown from '../../components/FilterDropdown';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -350,6 +352,7 @@ const TYPE_FILTERS = [
   { key: 'outgoing', label: 'Outgoing',  icon: 'phone-outgoing' },
   { key: 'incoming', label: 'Incoming',  icon: 'phone-incoming' },
   { key: 'missed',   label: 'Missed',    icon: 'phone-missed' },
+  { key: 'rejected', label: 'Rejected',  icon: 'phone-cancel' },
 ];
 const PAGE = 40; // render the not-called list in pages for speed
 
@@ -374,7 +377,7 @@ function matchesSearch(q, ...vals) {
 
 export default function DayCallLogsScreen() {
   const navigation = useNavigation();
-  const { colors } = useTheme();
+  const { colors, dark } = useTheme();
   const s          = useMemo(() => createStyles(colors), [colors]);
 
   const authUser = useSelector(st => st.auth?.user);
@@ -386,6 +389,10 @@ export default function DayCallLogsScreen() {
   const [pickerOpen,  setPickerOpen]  = useState(false);
   const [logs,        setLogs]        = useState([]);
   const [uncalled,    setUncalled]    = useState([]);
+  const [uncalledTotal, setUncalledTotal] = useState(0);
+  const [uncalledPage,  setUncalledPage]  = useState(1);
+  const [loadingMore,   setLoadingMore]   = useState(false);
+  const [syncing,       setSyncing]       = useState(false);
   const [loading,     setLoading]     = useState(false);
   const [refreshing,  setRefreshing]  = useState(false);
   const [error,       setError]       = useState(null);
@@ -395,7 +402,6 @@ export default function DayCallLogsScreen() {
   const [callType,   setCallType]   = useState('all');
   const [leadsOnly,  setLeadsOnly]  = useState(false);
   const [search,     setSearch]     = useState('');
-  const [showFilters, setShowFilters] = useState(false);
   const [notCalledShown, setNotCalledShown] = useState(PAGE);
 
   const dateParam = useMemo(() => moment(selectedDate).format('YYYY-MM-DD'), [selectedDate]);
@@ -405,7 +411,13 @@ export default function DayCallLogsScreen() {
     return t.getTime() === selectedDate.getTime();
   }, [selectedDate]);
 
-  // ── Fetch both lists in parallel (one function for load / refresh / focus) ─
+  // ── Fetch both lists (one function for load / refresh / focus / auto) ─────
+  // Call logs: ALL of the day's calls (pages of 500 until done) — the old
+  // fixed limit of 200 silently cut busy days off at 200.
+  // Not-called leads: first server page + the real total; more pages load on
+  // "Show more" so the count is never stuck at 200.
+  const LOG_PAGE = 500;
+  const UNCALLED_PAGE = 100;
   const reqIdRef = useRef(0);
   const fetchAll = useCallback(async (mode = 'load') => {
     const reqId = ++reqIdRef.current;
@@ -413,37 +425,97 @@ export default function DayCallLogsScreen() {
     else if (mode === 'load') setLoading(true);
     if (mode !== 'silent') setError(null);
     try {
-      const params = { date: dateParam, limit: 200, tzOffset };
+      const base = { date: dateParam, tzOffset };
+      const getAllLogs = async () => {
+        const first = await apiClient.get('/call-logs', { params: { ...base, page: 1, limit: LOG_PAGE } });
+        let all = first.data.logs || [];
+        const pages = Math.min(first.data.totalPages || 1, 20); // 10,000 calls/day ceiling
+        for (let p = 2; p <= pages; p++) {
+          // eslint-disable-next-line no-await-in-loop
+          const r = await apiClient.get('/call-logs', { params: { ...base, page: p, limit: LOG_PAGE } });
+          all = all.concat(r.data.logs || []);
+        }
+        return all;
+      };
       const [logsRes, uncalledRes] = await Promise.allSettled([
-        apiClient.get('/call-logs',          { params }),
-        apiClient.get('/call-logs/uncalled', { params }),
+        getAllLogs(),
+        apiClient.get('/call-logs/uncalled', { params: { ...base, page: 1, limit: UNCALLED_PAGE } }),
       ]);
       if (reqId !== reqIdRef.current) return; // a newer request superseded this one
-      if (logsRes.status === 'fulfilled') setLogs(normLogs(logsRes.value.data.logs));
+      if (logsRes.status === 'fulfilled') setLogs(normLogs(logsRes.value));
       else if (mode !== 'silent') {
         setLogs([]);
         setError(logsRes.reason?.response?.data?.message || 'Could not load call logs.');
       }
-      if (uncalledRes.status === 'fulfilled') setUncalled(uncalledRes.value.data.leads || []);
-      else if (mode !== 'silent') setUncalled([]);
+      if (uncalledRes.status === 'fulfilled') {
+        const d = uncalledRes.value.data || {};
+        setUncalled(d.leads || []);
+        setUncalledTotal(Number(d.total) || (d.leads || []).length);
+        setUncalledPage(1);
+      } else if (mode !== 'silent') { setUncalled([]); setUncalledTotal(0); }
     } finally {
       if (reqId === reqIdRef.current) { setLoading(false); setRefreshing(false); }
     }
   }, [dateParam, tzOffset]);
 
-  // Load when date changes
-  useEffect(() => { setNotCalledShown(PAGE); fetchAll('load'); }, [fetchAll]);
+  // Next page of not-called leads from the server.
+  const loadMoreUncalled = useCallback(async () => {
+    if (loadingMore || uncalled.length >= uncalledTotal) return;
+    setLoadingMore(true);
+    try {
+      const next = uncalledPage + 1;
+      const r = await apiClient.get('/call-logs/uncalled', { params: { date: dateParam, tzOffset, page: next, limit: UNCALLED_PAGE } });
+      const more = r.data?.leads || [];
+      setUncalled(prev => {
+        const seen = new Set(prev.map(l => String(l._id)));
+        return prev.concat(more.filter(l => !seen.has(String(l._id))));
+      });
+      setUncalledPage(next);
+      if (r.data?.total != null) setUncalledTotal(Number(r.data.total));
+    } catch { /* keep what we have */ } finally { setLoadingMore(false); }
+  }, [loadingMore, uncalled.length, uncalledTotal, uncalledPage, dateParam, tzOffset]);
 
-  // Silent refresh when coming BACK to this screen (not on the first focus —
-  // the effect above already loads, which used to double every request).
+  // Push this phone's newest calls to the server, then reload — so the list is
+  // always current without anyone tapping "Rescan".
+  const syncThenFetch = useCallback(async (mode = 'silent', force = false) => {
+    setSyncing(true);
+    try { await syncCallLogsNow({ force }); } catch { /* still show server data */ }
+    finally { setSyncing(false); }
+    return fetchAll(mode);
+  }, [fetchAll]);
+
+  // Load when date changes (show server data at once, then sync in background)
+  useEffect(() => {
+    setNotCalledShown(PAGE);
+    fetchAll('load').then(() => { if (isToday) syncThenFetch('silent'); });
+  }, [fetchAll]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Refresh when coming BACK to this screen, and auto-refresh every 60s while
+  // it is open (today only). Also refresh on app resume.
   const firstFocusRef = useRef(true);
   useFocusEffect(
     useCallback(() => {
-      if (firstFocusRef.current) { firstFocusRef.current = false; return undefined; }
-      const timer = setTimeout(() => fetchAll('silent'), 350);
-      return () => clearTimeout(timer);
-    }, [fetchAll])
+      let timer = null;
+      if (!firstFocusRef.current) timer = setTimeout(() => syncThenFetch('silent'), 350);
+      firstFocusRef.current = false;
+      const poll = isToday ? setInterval(() => syncThenFetch('silent'), 60 * 1000) : null;
+      const appSub = AppState.addEventListener('change', (st) => {
+        if (st === 'active') setTimeout(() => syncThenFetch('silent'), 1500);
+      });
+      return () => { if (timer) clearTimeout(timer); if (poll) clearInterval(poll); appSub.remove(); };
+    }, [syncThenFetch, isToday])
   );
+
+  // Background sync pushed new calls / a call just ended → refresh quietly.
+  useEffect(() => {
+    let t = null;
+    const off = onSyncEvent((type) => {
+      if (type !== 'calllogs' && type !== 'recordings' && type !== 'callEnded') return;
+      if (t) clearTimeout(t);
+      t = setTimeout(() => fetchAll('silent'), type === 'callEnded' ? 6000 : 800);
+    });
+    return () => { off(); if (t) clearTimeout(t); };
+  }, [fetchAll]);
 
   // ── Nav ───────────────────────────────────────────────────────────────────
   const goPrev = useCallback(() => {
@@ -485,17 +557,22 @@ export default function DayCallLogsScreen() {
     };
   }, [uncalled, logs, calledLeadIds, callType, leadsOnly, q]);
 
+  const summaryNotCalledRef = useRef(0);
+  summaryNotCalledRef.current = Math.max(0, uncalledTotal - uncalled.filter(l => calledLeadIds.has(String(l._id))).length);
+
   const sections = useMemo(() => {
     const out = [];
     const want = (k) => view === 'all' || view === k;
     if (want('notCalled') && filtered.notCalled.length && callType === 'all') {
-      out.push({ key: 'notCalled', total: filtered.notCalled.length, data: filtered.notCalled.slice(0, notCalledShown) });
+      // With a search active only loaded rows can match; otherwise use the server total.
+      const total = q ? filtered.notCalled.length : Math.max(filtered.notCalled.length, summaryNotCalledRef.current);
+      out.push({ key: 'notCalled', total, data: filtered.notCalled.slice(0, notCalledShown) });
     }
     if (want('pending') && filtered.pending.length) out.push({ key: 'pending', data: filtered.pending });
     if (want('done') && filtered.done.length)       out.push({ key: 'done', data: filtered.done });
     if (view === 'all' && filtered.other.length)   out.push({ key: 'other', data: filtered.other });
     return out;
-  }, [filtered, view, callType, notCalledShown]);
+  }, [filtered, view, callType, notCalledShown, q, uncalledTotal]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const summary = useMemo(() => ({
     total:     logs.length,
@@ -503,9 +580,10 @@ export default function DayCallLogsScreen() {
     outgoing:  logs.filter(l => l.callType === 'outgoing').length,
     missed:    logs.filter(l => l.callType === 'missed').length,
     talkSecs:  logs.reduce((a, l) => a + (Number(l.duration) || 0), 0),
-    notCalled: uncalled.filter(l => !calledLeadIds.has(String(l._id))).length,
+    // Server total minus the loaded ones that were called today.
+    notCalled: Math.max(0, uncalledTotal - uncalled.filter(l => calledLeadIds.has(String(l._id))).length),
     pending:   logs.filter(l => !isDone(l) && (l.matchedLead?._id || l.matchedLeadId)).length,
-  }), [logs, uncalled, calledLeadIds]);
+  }), [logs, uncalled, uncalledTotal, calledLeadIds]);
 
   const activeFilterCount = (callType !== 'all' ? 1 : 0) + (leadsOnly ? 1 : 0);
   const dayLabel = isToday ? 'Today' : moment(selectedDate).format('ddd, DD MMM YYYY');
@@ -519,13 +597,21 @@ export default function DayCallLogsScreen() {
 
   const renderSectionHeader = useCallback(({ section }) => <SectionHeader section={section} s={s} />, [s]);
 
+  const showMoreNotCalled = useCallback(() => {
+    setNotCalledShown(n => n + PAGE);
+    // Running out of loaded rows → fetch the next server page.
+    if (notCalledShown + PAGE >= uncalled.length) loadMoreUncalled();
+  }, [notCalledShown, uncalled.length, loadMoreUncalled]);
+
   const renderSectionFooter = useCallback(({ section }) => (
     section.key === 'notCalled' && section.total > section.data.length ? (
-      <TouchableOpacity style={s.moreBtn} onPress={() => setNotCalledShown(n => n + PAGE)}>
-        <Text style={s.moreTxt}>Show {Math.min(PAGE, section.total - section.data.length)} more · {section.total - section.data.length} left</Text>
+      <TouchableOpacity style={s.moreBtn} onPress={showMoreNotCalled} disabled={loadingMore}>
+        {loadingMore
+          ? <ActivityIndicator size="small" color={colors.blue || '#2563EB'} />
+          : <Text style={s.moreTxt}>Show {Math.min(PAGE, section.total - section.data.length)} more · {section.total - section.data.length} left</Text>}
       </TouchableOpacity>
     ) : null
-  ), [s]);
+  ), [s, showMoreNotCalled, loadingMore, colors]);
 
   const keyExtractor = useCallback((item, i) => (
     item._id ? String(item._id) : `${item.phoneNumber || ''}-${item._tsMs || i}`
@@ -534,8 +620,8 @@ export default function DayCallLogsScreen() {
   const Stat = ({ icon, color, value, label, onPress, active }) => (
     <TouchableOpacity style={[s.stat, active && { borderColor: color, backgroundColor: color + '14' }]} onPress={onPress} activeOpacity={0.7}>
       <Icon name={icon} size={15} color={color} />
-      <Text style={s.statVal}>{value}</Text>
-      <Text style={s.statLbl} numberOfLines={1}>{label}</Text>
+      <Text style={[s.statVal, { color: dark ? '#FFFFFF' : '#111827' }]}>{value}</Text>
+      <Text style={[s.statLbl, { color: dark ? '#B7BCD4' : '#4A5270' }]} numberOfLines={1}>{label}</Text>
     </TouchableOpacity>
   );
 
@@ -549,12 +635,8 @@ export default function DayCallLogsScreen() {
         </TouchableOpacity>
         <View style={{ flex: 1, marginLeft: 12 }}>
           <Text style={s.title}>Calls by Day</Text>
-          <Text style={s.subtitle}>{isAdmin ? 'Company-wide' : 'Your calls'} · auto-synced</Text>
+          <Text style={s.subtitle}>{isAdmin ? 'Company-wide' : 'Your calls'} · {syncing ? 'syncing…' : 'auto-synced'}</Text>
         </View>
-        <TouchableOpacity onPress={() => setShowFilters(v => !v)} style={[s.filterBtn, (showFilters || activeFilterCount) && s.filterBtnOn]}>
-          <Icon name="filter-variant" size={18} color={(showFilters || activeFilterCount) ? '#fff' : colors.textPrimary} />
-          {activeFilterCount > 0 && <Text style={s.filterBadge}>{activeFilterCount}</Text>}
-        </TouchableOpacity>
       </View>
 
       {/* Date navigation */}
@@ -573,7 +655,7 @@ export default function DayCallLogsScreen() {
       </View>
 
       {/* Stat tiles (tap to filter) */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.statsRow}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.hScroll} contentContainerStyle={s.statsRow}>
         <Stat icon="phone" color="#2563EB" value={summary.total} label="Calls"
           active={callType === 'all' && view === 'all'} onPress={() => { setCallType('all'); setView('all'); }} />
         <Stat icon="phone-outgoing" color="#2563EB" value={summary.outgoing} label="Outgoing"
@@ -607,41 +689,40 @@ export default function DayCallLogsScreen() {
         ) : null}
       </View>
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.tabsRow}>
-        {VIEW_TABS.map(t => (
-          <TouchableOpacity key={t.key} onPress={() => setView(t.key)} style={[s.tab, view === t.key && s.tabOn]}>
-            <Text style={[s.tabTxt, view === t.key && s.tabTxtOn]}>{t.label}</Text>
+      {/* Filters — same pills as the Leads page, wrapping so all are visible */}
+      <View style={s.filterWrap}>
+        <FilterDropdown
+          label="Show"
+          value={view}
+          options={VIEW_TABS.map(t => ({ value: t.key, label: t.label }))}
+          onChange={setView}
+          dark={dark} colors={colors}
+        />
+        <FilterDropdown
+          label="Call type"
+          value={callType}
+          options={TYPE_FILTERS.map(t => ({ value: t.key, label: t.label }))}
+          onChange={setCallType}
+          dark={dark} colors={colors}
+        />
+        <FilterDropdown
+          label="Numbers"
+          value={leadsOnly ? 'leads' : 'all'}
+          options={[{ value: 'all', label: 'All numbers' }, { value: 'leads', label: 'CRM leads only' }]}
+          onChange={(v) => setLeadsOnly(v === 'leads')}
+          dark={dark} colors={colors}
+        />
+        {(activeFilterCount > 0 || view !== 'all' || q) ? (
+          <TouchableOpacity
+            onPress={() => { setView('all'); setCallType('all'); setLeadsOnly(false); setSearch(''); }}
+            style={[s.clearPill, { borderColor: dark ? '#7F1D1D' : '#FECACA', backgroundColor: dark ? '#3B1212' : '#FEF2F2' }]}
+            activeOpacity={0.75}
+          >
+            <Icon name="close" size={13} color={dark ? '#FCA5A5' : '#DC2626'} />
+            <Text style={[s.clearPillTxt, { color: dark ? '#FCA5A5' : '#DC2626' }]}>Clear</Text>
           </TouchableOpacity>
-        ))}
-      </ScrollView>
-
-      {showFilters && (
-        <View style={s.filterPanel}>
-          <Text style={s.filterLabel}>Call type</Text>
-          <View style={s.chipRow}>
-            {TYPE_FILTERS.map(t => (
-              <TouchableOpacity key={t.key} onPress={() => setCallType(t.key)} style={[s.fChip, callType === t.key && s.fChipOn]}>
-                <Icon name={t.icon} size={13} color={callType === t.key ? '#fff' : colors.textSec || colors.textMuted} />
-                <Text style={[s.fChipTxt, callType === t.key && { color: '#fff' }]}>{t.label}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <Text style={s.filterLabel}>Numbers</Text>
-          <View style={s.chipRow}>
-            <TouchableOpacity onPress={() => setLeadsOnly(false)} style={[s.fChip, !leadsOnly && s.fChipOn]}>
-              <Text style={[s.fChipTxt, !leadsOnly && { color: '#fff' }]}>All numbers</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => setLeadsOnly(true)} style={[s.fChip, leadsOnly && s.fChipOn]}>
-              <Text style={[s.fChipTxt, leadsOnly && { color: '#fff' }]}>CRM leads only</Text>
-            </TouchableOpacity>
-          </View>
-          {activeFilterCount > 0 && (
-            <TouchableOpacity onPress={() => { setCallType('all'); setLeadsOnly(false); }} style={{ marginTop: 6 }}>
-              <Text style={{ color: colors.blue || '#2563EB', fontWeight: '700', fontSize: 13 }}>Clear filters</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-      )}
+        ) : null}
+      </View>
 
       {/* Body */}
       {loading ? (
@@ -683,7 +764,7 @@ export default function DayCallLogsScreen() {
           removeClippedSubviews
           keyboardShouldPersistTaps="handled"
           refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={() => fetchAll('refresh')} tintColor={colors.blue || '#2563EB'} />
+            <RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); syncThenFetch('refresh', true); }} tintColor={colors.blue || '#2563EB'} />
           }
         />
       )}
@@ -783,17 +864,23 @@ function __buildStyles(colors) {
     filterBtn:    { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border },
     filterBtnOn:  { backgroundColor: blue, borderColor: blue },
     filterBadge:  { position: 'absolute', top: -4, right: -4, minWidth: 16, height: 16, borderRadius: 8, backgroundColor: red, color: '#fff', fontSize: 10, fontWeight: '800', textAlign: 'center', overflow: 'hidden' },
-    statsRow:     { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 4, gap: 8 },
-    stat:         { width: 92, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+    // Horizontal rows must NOT flex — inside the column layout they were being
+    // squashed, cutting the stat labels and hiding the tab text.
+    hScroll:      { flexGrow: 0, flexShrink: 0 },
+    statsRow:     { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 4, gap: 8, alignItems: 'stretch' },
+    stat:         { width: 96, minHeight: 78, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
     statVal:      { fontSize: 18, fontWeight: '800', color: colors.textPrimary, marginTop: 4 },
     statLbl:      { fontSize: 11, color: colors.textMuted, fontWeight: '600', marginTop: 1 },
     searchWrap:   { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 10, paddingHorizontal: 12, height: 42, borderRadius: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
     searchInput:  { flex: 1, color: colors.textPrimary, fontSize: 14, paddingVertical: 0 },
-    tabsRow:      { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
-    tab:          { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, borderWidth: 1, borderColor: colors.border },
+    tabsRow:      { paddingHorizontal: 16, paddingVertical: 10, gap: 8, alignItems: 'center' },
+    tab:          { paddingHorizontal: 14, paddingVertical: 7, minHeight: 34, justifyContent: 'center', borderRadius: 20, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
     tabOn:        { backgroundColor: blue, borderColor: blue },
     tabTxt:       { fontSize: 13, fontWeight: '700', color: colors.textSec || colors.textMuted },
     tabTxtOn:     { color: '#fff' },
+    filterWrap:   { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', paddingHorizontal: 16, paddingTop: 10, paddingBottom: 8, gap: 8 },
+    clearPill:    { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 20, borderWidth: 2 },
+    clearPillTxt: { fontSize: 12, fontWeight: '800' },
     filterPanel:  { marginHorizontal: 16, marginBottom: 6, padding: 12, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
     filterLabel:  { fontSize: 11, fontWeight: '800', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 },
     chipRow:      { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 },

@@ -14,6 +14,7 @@ import { uploadRecording, getLeadCallLogs } from '../api/callLogsApi';
 import { requestStoragePermission }         from '../services/permissionsService';
 import { buildScanDirs }                    from '../services/recordingPathService';
 import { normalizePhone }                   from '../services/phoneService';
+import { onSyncEvent }                      from '../services/backgroundSyncService';
 
 // Mask phone digits inside a filename for display only.
 // The actual filename is still used for upload/matching — this is display-only.
@@ -557,6 +558,25 @@ function LeadRecordingsSection({ lead }) {
     return () => task.cancel();
   }, [lead?.mobile, lead?.id]); // lead.id added so re-opening different lead re-scans
 
+  // Auto re-scan after a call to THIS lead ends (dialer writes the file a few
+  // seconds later) and whenever a recording upload finishes — no Rescan tap.
+  useEffect(() => {
+    if (!lead?.mobile || Platform.OS !== 'android') return undefined;
+    const mine = normalizePhone(lead.mobile);
+    const timers = [];
+    const rescan = () => {
+      scanCacheRef.current = { leadId: null, ts: 0, results: [] };
+      doScanRef.current && doScanRef.current(false, Date.now() - SEVEN_DAYS_MS).catch(() => {});
+    };
+    const off = onSyncEvent((type, payload) => {
+      const p = payload?.phoneNumber ? normalizePhone(payload.phoneNumber) : null;
+      if (p && p !== mine) return;
+      if (type === 'callEnded') { timers.push(setTimeout(rescan, 8000), setTimeout(rescan, 30000)); }
+      if (type === 'recordings') rescan();
+    });
+    return () => { off(); timers.forEach(clearTimeout); };
+  }, [lead?.mobile]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const totalCount = recordings.length;
 
   return (
@@ -581,7 +601,7 @@ function LeadRecordingsSection({ lead }) {
           {loading
             ? <ActivityIndicator size="small" color="#fff" />
             : <Icon name="refresh" size={14} color="#fff" />}
-          <Text style={styles.rescanBtnText}>{loading ? 'Scanning…' : 'Rescan'}</Text>
+          <Text style={styles.rescanBtnText}>{loading ? 'Scanning…' : 'Refresh'}</Text>
         </TouchableOpacity>
       </View>
 
@@ -611,7 +631,7 @@ function LeadRecordingsSection({ lead }) {
           <Icon name="microphone-off" size={32} color={colors.textMuted} />
           <Text style={styles.emptyText}>No recordings found</Text>
           <Text style={styles.emptyHint}>
-            Tap Rescan after a call, or check that your dialer saves recordings to storage.
+            Recordings appear here automatically a few seconds after a call. Make sure your dialer's auto call recording is on.
           </Text>
         </View>
       )}
