@@ -13,7 +13,8 @@ if not exist "%ANDROID_HOME%" (
 echo sdk.dir=%ANDROID_HOME:\=\\%> android\local.properties
 
 if not exist android\app\google-services.json (
-  echo [!] android\app\google-services.json missing - app will build but push notifications won't work.
+  echo [X] android\app\google-services.json is missing. Copy your Firebase file there first.
+  pause & exit /b 1
 )
 
 echo [1/3] Installing packages...

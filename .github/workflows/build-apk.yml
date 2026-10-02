@@ -44,7 +44,7 @@ jobs:
         env:
           GSJ: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
-          if [ -n "$GSJ" ]; then echo "$GSJ" > android/app/google-services.json; echo "google-services.json added"; else echo "No GOOGLE_SERVICES_JSON secret - push notifications disabled"; fi
+          if [ -n "$GSJ" ]; then echo "$GSJ" > android/app/google-services.json; echo "google-services.json added"; else echo "::error::Add the GOOGLE_SERVICES_JSON repository secret (contents of google-services.json)"; exit 1; fi
 
       - name: Add release keystore
         env:

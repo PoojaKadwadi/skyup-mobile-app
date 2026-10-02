@@ -3,7 +3,7 @@
 One universal APK (`SkyUpCRM-v1.1.0.apk`) that installs on any Android 7.0+ phone (32-bit and 64-bit).
 
 ## Option A – Windows PC (5 min after first setup)
-1. Put `google-services.json` (Firebase console → Project settings → Android app) in `android\app\`.
+1. Put `google-services.json` (Firebase console → Project settings → Android app) in `android\app\` — **required**, the build stops without it.
 2. Double-click **`build-apk.bat`** (uses SDK at `D:\Android\Sdk`, or whatever `ANDROID_HOME` says).
 3. The folder with `SkyUpCRM-v1.1.0.apk` opens automatically. Send it on WhatsApp / Drive.
 

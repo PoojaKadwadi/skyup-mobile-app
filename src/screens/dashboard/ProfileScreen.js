@@ -36,6 +36,7 @@ export default function ProfileScreen() {
   const [availableSims, setAvailableSims] = React.useState([]);
   const [workSimId,     setWorkSimId]     = React.useState(null);
   const [detectingSims, setDetectingSims] = React.useState(false);
+  const [showOldSims,   setShowOldSims]   = React.useState(false);
   const [customPath,     setCustomPath]     = React.useState(null);   // saved folder
   const [browsedPath,    setBrowsedPath]    = React.useState(null);   // currently browsing
   const [browseEntries,  setBrowseEntries]  = React.useState([]);     // folder contents
@@ -49,6 +50,8 @@ export default function ProfileScreen() {
     // Auto-upload is always on (no manual upload) — make sure the service runs.
     setAutoUpload(true).catch(() => {});
     getWorkSimAccountId().then(setWorkSimId).catch(() => {});
+    // Show the SIM list straight away (no button tap needed).
+    getAvailableSims().then((sims) => { if (Array.isArray(sims)) setAvailableSims(sims); }).catch(() => {});
   }, []);
 
   // Scan recent call logs for distinct SIM identifiers, so the employee can
@@ -282,8 +285,14 @@ export default function ProfileScreen() {
               </View>
             </View>
 
-            {availableSims.map((sim) => {
+            {availableSims
+              .filter((sim) => showOldSims || sim.isRecent !== false || workSimId === sim.phoneAccountId)
+              .map((sim) => {
               const on = workSimId === sim.phoneAccountId;
+              const last = sim.lastUsed ? moment(sim.lastUsed) : null;
+              const lastTxt = last
+                ? (last.isSame(moment(), 'day') ? 'today' : last.isSame(moment().subtract(1, 'day'), 'day') ? 'yesterday' : last.format('DD MMM YYYY'))
+                : null;
               return (
                 <TouchableOpacity
                   key={sim.phoneAccountId}
@@ -292,16 +301,33 @@ export default function ProfileScreen() {
                   style={[styles.simOption, on && styles.simOptionOn]}
                 >
                   <Icon name={on ? 'radiobox-marked' : 'radiobox-blank'} size={20} color={on ? '#22C55E' : colors.textMuted} />
-                  <Text style={[styles.simOptionText, on && { color: colors.textPrimary, fontWeight: '700' }]} numberOfLines={1}>{sim.label}</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.simOptionText, on && { color: colors.textPrimary, fontWeight: '700' }]} numberOfLines={1}>{sim.label}</Text>
+                    {sim.count ? (
+                      <Text style={styles.simOptionSub} numberOfLines={1}>
+                        {sim.count} call{sim.count === 1 ? '' : 's'}{lastTxt ? ` · last used ${lastTxt}` : ''}
+                      </Text>
+                    ) : null}
+                  </View>
                   {on && <Text style={styles.simWorkTag}>WORK</Text>}
                 </TouchableOpacity>
               );
             })}
 
+            {availableSims.some((sim) => sim.isRecent === false && workSimId !== sim.phoneAccountId) && (
+              <TouchableOpacity onPress={() => setShowOldSims((v) => !v)} style={styles.simOldToggle} activeOpacity={0.7}>
+                <Text style={styles.simOldToggleTxt}>
+                  {showOldSims
+                    ? 'Hide old SIMs'
+                    : `Show ${availableSims.filter((sim) => sim.isRecent === false && workSimId !== sim.phoneAccountId).length} old SIM(s) not used in 30 days`}
+                </Text>
+              </TouchableOpacity>
+            )}
+
             <TouchableOpacity onPress={handleDetectSims} disabled={detectingSims} style={styles.simDetectBtn} activeOpacity={0.7}>
               {detectingSims
                 ? <ActivityIndicator size="small" color={colors.blue} />
-                : <Icon name="cellphone-search" size={16} color={colors.blue} />}
+                : <Icon name="refresh" size={16} color={colors.blue} />}
               <Text style={styles.simDetectText}>
                 {detectingSims ? 'Detecting SIMs…' : availableSims.length ? 'Re-detect SIMs' : 'Detect SIMs from recent calls'}
               </Text>
@@ -531,7 +557,10 @@ function __buildStyles(colors) {
   simOption:       { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingVertical: 12,
                      borderTopWidth: 1, borderTopColor: colors.border },
   simOptionOn:     { backgroundColor: '#22C55E10' },
-  simOptionText:   { flex: 1, fontSize: 14, color: colors.textSec },
+  simOptionText:   { fontSize: 14, color: colors.textSec || colors.textPrimary },
+  simOptionSub:    { fontSize: 11, color: colors.textMuted, marginTop: 2 },
+  simOldToggle:    { paddingVertical: 10, alignItems: 'center', borderTopWidth: 1, borderTopColor: colors.border },
+  simOldToggleTxt: { fontSize: 12, fontWeight: '700', color: colors.textMuted },
   simWorkTag:      { fontSize: 10, fontWeight: '800', color: '#22C55E', letterSpacing: 1,
                      borderWidth: 1, borderColor: '#22C55E66', borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 },
   simDetectBtn:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 14,

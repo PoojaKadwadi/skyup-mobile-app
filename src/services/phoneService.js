@@ -206,24 +206,44 @@ export async function getAvailableSims() {
     const granted = await requestCallLogPermission();
     if (!granted) return [];
 
-    const raw = await CallLogs.loadAll({ limit: '100' }).catch(() => CallLogs.loadAll());
+    const raw = await CallLogs.loadAll({ limit: '500' }).catch(() => CallLogs.loadAll());
     const logs = Array.isArray(raw) ? mapRawLogs(raw) : [];
 
-    const seen = new Map(); // phoneAccountId -> label
-    let simIndex = 1;
+    // Group by SIM account: how many calls + when it was last used.
+    // FIX: on Android 15 the call-log library returns the raw account id
+    // ("2", "4", "5" …) as the "display name" when it can't resolve the SIM
+    // name — those numbers were being shown to the user. Numeric / id-equal
+    // names are now ignored and the SIM gets a friendly label instead. Old
+    // SIM cards that were swapped out long ago also used to show up as extra
+    // options; they're now marked as "not used recently".
+    const byId = new Map();
     for (const log of logs) {
-      if (log.phoneAccountId && !seen.has(log.phoneAccountId)) {
-        // Prefer the display name from the OS. If unavailable (common on some
-        // Samsung/Xiaomi devices where simDisplayName is null), fall back to
-        // "SIM 1", "SIM 2" etc. — clearer than just showing the raw account ID.
-        const label = log.simDisplayName
-          ? log.simDisplayName
-          : `SIM ${simIndex}`;
-        seen.set(log.phoneAccountId, label);
-        simIndex++;
-      }
+      const id = log.phoneAccountId;
+      if (!id) continue;
+      const ts = parseInt(log.timestamp, 10) || 0;
+      const cur = byId.get(id) || { phoneAccountId: id, name: null, count: 0, lastUsed: 0 };
+      cur.count += 1;
+      if (ts > cur.lastUsed) cur.lastUsed = ts;
+      const dn = (log.simDisplayName || '').trim();
+      if (dn && dn !== id && !/^\d+$/.test(dn) && !cur.name) cur.name = dn;
+      byId.set(id, cur);
     }
-    return Array.from(seen.entries()).map(([phoneAccountId, label]) => ({ phoneAccountId, label }));
+
+    const RECENT_MS = 30 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const list = Array.from(byId.values())
+      .sort((a, b) => b.lastUsed - a.lastUsed)
+      .map((sim, i) => ({
+        ...sim,
+        isRecent: now - sim.lastUsed <= RECENT_MS,
+        label: sim.name || `SIM ${i + 1}`,
+      }));
+    // Number the unnamed recent SIMs 1, 2 … in "most recently used" order.
+    let n = 0;
+    for (const sim of list) {
+      if (!sim.name) { n += 1; sim.label = sim.isRecent ? `SIM ${n}` : `Old SIM ${n}`; }
+    }
+    return list;
   } catch (e) {
     console.error('[phoneService] getAvailableSims error:', e.message);
     return [];

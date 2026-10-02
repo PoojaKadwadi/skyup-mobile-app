@@ -6,12 +6,15 @@ project.ext {
     hermesEnabled = true
 }
 // Firebase (push notifications) needs android/app/google-services.json.
-// If it's missing the APK still builds — only push notifications are off.
-if (file("google-services.json").exists()) {
-    apply plugin: "com.google.gms.google-services"
-} else {
-    println("⚠️  android/app/google-services.json not found — building WITHOUT Firebase push notifications.")
+// An APK built without it opens and then crashes, so the build now STOPS
+// with a clear message instead of producing a broken app.
+if (!file("google-services.json").exists()) {
+    throw new GradleException(
+        "\n\n❌ android/app/google-services.json is missing.\n" +
+        "   Copy your Firebase google-services.json into android/app/ and build again.\n" +
+        "   (Firebase console → Project settings → Your apps → Android → google-services.json)\n")
 }
+apply plugin: "com.google.gms.google-services"
 
 def enableProguardInReleaseBuilds = true
 

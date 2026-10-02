@@ -1,3 +1,31 @@
+// ── 0. Crash catcher — MUST be first ─────────────────────────────────────────
+// A JavaScript error used to close the whole app with Android's
+// "SkyUp CRM closed because this app has a bug" dialog and no clue why.
+// Now the app stays open and shows the actual error text (screenshot it and
+// send it to the developer). The last error is also kept for the next launch.
+try {
+  const { Alert } = require('react-native');
+  const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+  const prev = global.ErrorUtils && global.ErrorUtils.getGlobalHandler && global.ErrorUtils.getGlobalHandler();
+  let shown = false;
+  if (global.ErrorUtils && global.ErrorUtils.setGlobalHandler) {
+    global.ErrorUtils.setGlobalHandler((error, isFatal) => {
+      const msg = String((error && (error.message || error)) || 'Unknown error');
+      const stack = String((error && error.stack) || '').split('\n').slice(0, 6).join('\n');
+      try { AsyncStorage.setItem('last_js_crash', JSON.stringify({ at: new Date().toISOString(), msg, stack, isFatal: !!isFatal })); } catch (_) { /* ignore */ }
+      if (isFatal && !shown) {
+        shown = true;
+        try {
+          Alert.alert('App error — please screenshot this', `${msg}\n\n${stack}`, [{ text: 'OK', onPress: () => { shown = false; } }]);
+          return; // keep the app alive instead of letting Android kill it
+        } catch (_) { /* fall through to default handler */ }
+      }
+      if (!isFatal) return;
+      if (prev) prev(error, isFatal);
+    });
+  }
+} catch (_) { /* never let the catcher itself break startup */ }
+
 // ── 1. Notifee background handler — MUST be first ────────────────────────────
 try {
   const notifee = require('@notifee/react-native').default;
