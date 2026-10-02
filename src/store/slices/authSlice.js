@@ -24,6 +24,10 @@ import { clearNotificationState }              from '../../services/notification
 // authSlice indirectly via useSelector).
 function clearPerUserCaches() {
   try {
+    const { clearCustomization } = require('../../services/customizationService');
+    if (typeof clearCustomization === 'function') clearCustomization();
+  } catch { /* non-critical */ }
+  try {
     const { clearAutoSyncCache } = require('../../screens/dashboard/DashboardScreen');
     if (typeof clearAutoSyncCache === 'function') clearAutoSyncCache();
   } catch { /* non-critical */ }

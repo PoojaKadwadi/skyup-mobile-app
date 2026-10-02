@@ -465,7 +465,16 @@ function StatusChip({ label, count, color }) {
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
+// PERF: StyleSheet objects are cached per theme — rows/cards that call
+// createStyles(colors) no longer rebuild the whole sheet on every mount.
+const __styleCache = new WeakMap();
 function createStyles(colors) {
+  if (colors && __styleCache.has(colors)) return __styleCache.get(colors);
+  const out = __buildStyles(colors);
+  if (colors) __styleCache.set(colors, out);
+  return out;
+}
+function __buildStyles(colors) {
   return StyleSheet.create({
   container:        { flex: 1, backgroundColor: colors.bg },
   header:           { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 52, paddingBottom: 16, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },

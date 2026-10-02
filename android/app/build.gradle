@@ -5,7 +5,13 @@ apply plugin: "com.facebook.react"
 project.ext {
     hermesEnabled = true
 }
-apply plugin: "com.google.gms.google-services"
+// Firebase (push notifications) needs android/app/google-services.json.
+// If it's missing the APK still builds — only push notifications are off.
+if (file("google-services.json").exists()) {
+    apply plugin: "com.google.gms.google-services"
+} else {
+    println("⚠️  android/app/google-services.json not found — building WITHOUT Firebase push notifications.")
+}
 
 def enableProguardInReleaseBuilds = true
 
@@ -31,16 +37,16 @@ configurations.all {
         applicationId "com.skyupcrm"
         minSdkVersion 24
         targetSdkVersion 35
-        versionCode 2
-        versionName "1.0.1"
+        versionCode 3
+        versionName "1.1.0"
     }
 
+    // ONE universal APK that installs on every Android phone (32-bit and
+    // 64-bit ARM). Per-ABI split APKs were removed: sharing the wrong split
+    // (e.g. arm64 on a 32-bit phone) was a cause of "app crashes after install".
     splits {
         abi {
-            enable true
-            reset()
-            include "armeabi-v7a", "arm64-v8a"
-            universalApk true
+            enable false
         }
     }
 
@@ -67,19 +73,11 @@ configurations.all {
             if (project.hasProperty('MYAPP_RELEASE_STORE_FILE')) {
                 signingConfig signingConfigs.release
             } else {
-                gradle.taskGraph.whenReady { graph ->
-                    def assemblingRelease = graph.allTasks.any {
-                        def n = it.name.toLowerCase()
-                        n.contains('assemblerelease') || n.contains('bundlerelease') || n.contains('packagerelease')
-                    }
-                    if (assemblingRelease) {
-                        throw new GradleException(
-                            "Release keystore not configured. Set MYAPP_RELEASE_STORE_FILE, " +
-                            "MYAPP_RELEASE_STORE_PASSWORD, MYAPP_RELEASE_KEY_ALIAS and " +
-                            "MYAPP_RELEASE_KEY_PASSWORD (e.g. in ~/.gradle/gradle.properties) " +
-                            "before running assembleRelease / bundleRelease.")
-                    }
-                }
+                // No release keystore configured → sign with the bundled key so the
+                // APK still installs on any phone (fine for direct/WhatsApp sharing;
+                // use your own release keystore for Play Store uploads).
+                println("⚠️  No release keystore set — signing the release APK with android/app/debug.keystore.")
+                signingConfig signingConfigs.debug
             }
             minifyEnabled enableProguardInReleaseBuilds
             shrinkResources enableProguardInReleaseBuilds
@@ -87,12 +85,11 @@ configurations.all {
         }
     }
 
+    // Friendly APK file name: SkyUpCRM-v1.1.0.apk
     applicationVariants.all { variant ->
-        variant.outputs.each { output ->
-            def abiCodes = ["armeabi-v7a": 1, "arm64-v8a": 2]
-            def abi = output.getFilter(com.android.build.OutputFile.ABI)
-            if (abi != null) {
-                output.versionCodeOverride = abiCodes.get(abi) * 1000 + variant.versionCode
+        variant.outputs.all { output ->
+            if (variant.buildType.name == "release") {
+                outputFileName = "SkyUpCRM-v${variant.versionName}.apk"
             }
         }
     }

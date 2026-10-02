@@ -14,7 +14,7 @@ import { checkAllPermissions, requestCallPermission,
 import { getAvailableSims, getWorkSimAccountId, setWorkSimAccountId } from '../../services/phoneService';
 import { triggerManualSync }        from '../../services/backgroundSyncService';
 import { getCustomRecordingPath, setCustomRecordingPath } from '../../services/recordingPathService';
-import { isAutoUploadEnabled, setAutoUpload } from '../../services/autoUploadService';
+import { setAutoUpload } from '../../services/autoUploadService';
 import { useTheme }                 from '../../theme/ThemeContext';
 import moment from 'moment';
 
@@ -42,13 +42,12 @@ export default function ProfileScreen() {
   const [browseLoading,  setBrowseLoading]  = React.useState(false);
   const [showBrowser,    setShowBrowser]    = React.useState(false);
   const [browserStack,   setBrowserStack]   = React.useState([]);     // navigation history
-  const [autoUpload,     setAutoUploadState] = React.useState(true);  // in-app toggle
-  const [autoUploadBusy, setAutoUploadBusy]  = React.useState(false);
 
   React.useEffect(() => {
     checkAllPermissions().then(setPerms);
     getCustomRecordingPath().then(setCustomPath);
-    isAutoUploadEnabled().then(setAutoUploadState).catch(() => {});
+    // Auto-upload is always on (no manual upload) — make sure the service runs.
+    setAutoUpload(true).catch(() => {});
     getWorkSimAccountId().then(setWorkSimId).catch(() => {});
   }, []);
 
@@ -79,26 +78,6 @@ export default function ProfileScreen() {
     const next = workSimId === phoneAccountId ? null : phoneAccountId;
     setWorkSimId(next);
     await setWorkSimAccountId(next);
-  };
-
-  // Toggle the auto-upload foreground service on/off and persist the choice.
-  const handleAutoUploadToggle = async (next) => {
-    setAutoUploadBusy(true);
-    setAutoUploadState(next); // optimistic
-    try {
-      await setAutoUpload(next);
-      if (next) {
-        Alert.alert(
-          'Auto-upload ON',
-          'A small ongoing notification keeps the app active so recordings upload automatically after each call. You can turn this off anytime.',
-        );
-      }
-    } catch (e) {
-      setAutoUploadState(!next); // revert on failure
-      Alert.alert('Could not change setting', e?.message || 'Please try again.');
-    } finally {
-      setAutoUploadBusy(false);
-    }
   };
 
   // ── Folder browser logic ───────────────────────────────────────────────────
@@ -216,29 +195,22 @@ export default function ProfileScreen() {
           </View>
         </View>
 
-        {/* Auto-Upload Recordings */}
+        {/* Call recording sync — always on, nothing to tap */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Auto-Upload Recordings</Text>
+          <Text style={styles.sectionTitle}>Call Recordings</Text>
           <View style={styles.infoCard}>
-            <View style={styles.toggleRow}>
-              <View style={{ flex: 1, paddingRight: 12 }}>
-                <Text style={styles.toggleLabel}>Upload after every call</Text>
-                <Text style={styles.toggleHint}>
-                  Keeps the app active (shows a small ongoing notification) so call
-                  recordings upload automatically right after a call ends — even on
-                  phones that aggressively close background apps.
+            <View style={styles.simHeader}>
+              <View style={[styles.simIconWrap, { backgroundColor: '#22C55E22' }]}>
+                <Icon name="cloud-sync" size={20} color="#22C55E" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.simStatusTitle}>Auto-sync is ON</Text>
+                <Text style={styles.simStatusHint}>
+                  Every incoming and outgoing call is logged, and its recording is uploaded
+                  automatically after the call ends. A small ongoing notification keeps this
+                  running in the background.
                 </Text>
               </View>
-              {autoUploadBusy
-                ? <ActivityIndicator size="small" color={colors.blue} />
-                : (
-                  <Switch
-                    value={autoUpload}
-                    onValueChange={handleAutoUploadToggle}
-                    trackColor={{ false: colors.border, true: '#1D4ED8' }}
-                    thumbColor={autoUpload ? '#60A5FA' : colors.textSec}
-                  />
-                )}
             </View>
           </View>
         </View>
@@ -292,41 +264,48 @@ export default function ProfileScreen() {
 
         {/* Work SIM (multi-SIM devices) — scopes call-log sync to this number only */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Work SIM (Call Log Sync)</Text>
+          <Text style={styles.sectionTitle}>Work SIM · Call Log Sync</Text>
           <View style={styles.infoCard}>
-            <Text style={{ fontSize: 12, color: '#8B92A9', marginBottom: 10 }}>
-              If your phone has two SIMs, pick which one is your work number.
-              Only calls made on that SIM will sync to the CRM — your personal
-              SIM's calls stay private. Leave unset if you only have one SIM.
-            </Text>
-            {availableSims.length === 0 ? (
-              <TouchableOpacity onPress={handleDetectSims} disabled={detectingSims} style={{ paddingVertical: 8 }}>
-                <Text style={{ color: '#2563EB', fontWeight: '600', fontSize: 13 }}>
-                  {detectingSims ? 'Detecting…' : '📱 Detect SIMs from recent calls'}
+            <View style={styles.simHeader}>
+              <View style={[styles.simIconWrap, { backgroundColor: workSimId ? '#22C55E22' : '#F59E0B22' }]}>
+                <Icon name={workSimId ? 'sim' : 'sim-alert'} size={20} color={workSimId ? '#22C55E' : '#F59E0B'} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.simStatusTitle}>
+                  {workSimId ? 'Work SIM selected' : 'All SIMs are syncing'}
                 </Text>
-              </TouchableOpacity>
-            ) : (
-              <>
-                {availableSims.map((sim) => (
-                  <TouchableOpacity
-                    key={sim.phoneAccountId}
-                    onPress={() => handleSelectWorkSim(sim.phoneAccountId)}
-                    style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border }}
-                  >
-                    <Text style={{ fontSize: 13, color: colors.text }}>{sim.label}</Text>
-                    {workSimId === sim.phoneAccountId && <Icon name="check-circle" size={18} color="#22C55E" />}
-                  </TouchableOpacity>
-                ))}
-                <TouchableOpacity onPress={handleDetectSims} disabled={detectingSims} style={{ paddingVertical: 8 }}>
-                  <Text style={{ color: '#8B92A9', fontSize: 12 }}>{detectingSims ? 'Detecting…' : 'Re-detect SIMs'}</Text>
+                <Text style={styles.simStatusHint}>
+                  {workSimId
+                    ? "Only calls on your work SIM sync to the CRM. Personal SIM calls stay private."
+                    : 'Dual-SIM phone? Pick your work SIM so personal calls are never synced.'}
+                </Text>
+              </View>
+            </View>
+
+            {availableSims.map((sim) => {
+              const on = workSimId === sim.phoneAccountId;
+              return (
+                <TouchableOpacity
+                  key={sim.phoneAccountId}
+                  onPress={() => handleSelectWorkSim(sim.phoneAccountId)}
+                  activeOpacity={0.7}
+                  style={[styles.simOption, on && styles.simOptionOn]}
+                >
+                  <Icon name={on ? 'radiobox-marked' : 'radiobox-blank'} size={20} color={on ? '#22C55E' : colors.textMuted} />
+                  <Text style={[styles.simOptionText, on && { color: colors.textPrimary, fontWeight: '700' }]} numberOfLines={1}>{sim.label}</Text>
+                  {on && <Text style={styles.simWorkTag}>WORK</Text>}
                 </TouchableOpacity>
-              </>
-            )}
-            {workSimId ? (
-              <Text style={{ fontSize: 11, color: '#22C55E', marginTop: 6 }}>✓ Syncing only your work SIM's calls</Text>
-            ) : (
-              <Text style={{ fontSize: 11, color: '#F59E0B', marginTop: 6 }}>⚠ No work SIM set — syncing calls from all SIMs on this device</Text>
-            )}
+              );
+            })}
+
+            <TouchableOpacity onPress={handleDetectSims} disabled={detectingSims} style={styles.simDetectBtn} activeOpacity={0.7}>
+              {detectingSims
+                ? <ActivityIndicator size="small" color={colors.blue} />
+                : <Icon name="cellphone-search" size={16} color={colors.blue} />}
+              <Text style={styles.simDetectText}>
+                {detectingSims ? 'Detecting SIMs…' : availableSims.length ? 'Re-detect SIMs' : 'Detect SIMs from recent calls'}
+              </Text>
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -495,7 +474,16 @@ function PermRow({ label, granted, onRequest }) {
   );
 }
 
+// PERF: StyleSheet objects are cached per theme — rows/cards that call
+// createStyles(colors) no longer rebuild the whole sheet on every mount.
+const __styleCache = new WeakMap();
 function createStyles(colors) {
+  if (colors && __styleCache.has(colors)) return __styleCache.get(colors);
+  const out = __buildStyles(colors);
+  if (colors) __styleCache.set(colors, out);
+  return out;
+}
+function __buildStyles(colors) {
   return StyleSheet.create({
   container:    { flex: 1, backgroundColor: colors.bg },
   profileCard:  { alignItems: 'center', paddingTop: 64, paddingBottom: 28,
@@ -534,6 +522,21 @@ function createStyles(colors) {
                   backgroundColor: colors.red + '20', marginHorizontal: 20, borderRadius: 16,
                   height: 54, borderWidth: 1, borderColor: colors.red + '40' },
   logoutText:   { color: colors.red, fontSize: 16, fontWeight: '700' },
+
+  // ── Work SIM / auto-sync cards ────────────────────────────────────────────
+  simHeader:       { flexDirection: 'row', alignItems: 'flex-start', padding: 14, gap: 12 },
+  simIconWrap:     { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  simStatusTitle:  { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 3 },
+  simStatusHint:   { fontSize: 12, color: colors.textMuted, lineHeight: 17 },
+  simOption:       { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingVertical: 12,
+                     borderTopWidth: 1, borderTopColor: colors.border },
+  simOptionOn:     { backgroundColor: '#22C55E10' },
+  simOptionText:   { flex: 1, fontSize: 14, color: colors.textSec },
+  simWorkTag:      { fontSize: 10, fontWeight: '800', color: '#22C55E', letterSpacing: 1,
+                     borderWidth: 1, borderColor: '#22C55E66', borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 },
+  simDetectBtn:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 14,
+                     borderTopWidth: 1, borderTopColor: colors.border },
+  simDetectText:   { color: colors.blue, fontSize: 14, fontWeight: '700' },
 
   // ── Recording folder section ──────────────────────────────────────────────
   pathRow:         { flexDirection: 'row', alignItems: 'center', padding: 14,

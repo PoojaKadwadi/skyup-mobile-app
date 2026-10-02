@@ -44,7 +44,7 @@ const INITIAL_SYNC_DELAY_MS  =  5 * 1000;       // 5s delay before first sync (w
 const SYNC_INTERVAL_MS       = 10 * 60 * 1000;  // 10 min interval (was 3 min — too aggressive)
 const FOLLOWUP_INTERVAL_MS   =  5 * 60 * 1000;  // 5 min follow-up check (was 2 min)
 const MIN_FOREGROUND_WAIT_MS =  5 * 60 * 1000;  // 5 min min between foreground syncs (was 1 min)
-const REC_SYNC_INTERVAL_MS   = 15 * 60 * 1000;  // 15 min recording sweep (was 10 min)
+const REC_SYNC_INTERVAL_MS   = 5 * 60 * 1000;   // 5 min recording sweep — every call recording auto-uploads (no manual upload)
 const LOG_BATCH_SIZE         = 50;
 
 // FIX (clock/timezone bug): this used to compute midnight in the DEVICE's

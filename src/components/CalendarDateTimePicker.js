@@ -246,7 +246,16 @@ export default function CalendarDateTimePicker({ value, onConfirm, onCancel, min
 
 const CELL = 40;
 
+// PERF: StyleSheet objects are cached per theme — rows/cards that call
+// createStyles(colors) no longer rebuild the whole sheet on every mount.
+const __styleCache = new WeakMap();
 function createStyles(colors) {
+  if (colors && __styleCache.has(colors)) return __styleCache.get(colors);
+  const out = __buildStyles(colors);
+  if (colors) __styleCache.set(colors, out);
+  return out;
+}
+function __buildStyles(colors) {
   return StyleSheet.create({
   card:        { backgroundColor: colors.surface, borderRadius: 16, padding: 14,
                  borderWidth: 1, borderColor: colors.border, marginTop: 8 },

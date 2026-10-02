@@ -27,6 +27,8 @@ import { postMeetingRemark }                        from '../../api/meetingsApi'
 import { scheduleMeetingFollowUp }                  from '../../services/notificationService';
 import moment                                      from 'moment';
 import { useTheme }                                from '../../theme/ThemeContext';
+import useCustomization                            from '../../hooks/useCustomization';
+import { industriesList, servicesList, leadField, leadServicesOf } from '../../services/customizationService';
 
 // Visit types offered when the agent logs a Client Meeting from the remark modal.
 const MEETING_TYPES = ['In-Person', 'Site Visit', 'Demo', 'Video Call', 'Phone Call'];
@@ -43,26 +45,8 @@ const STATUS_OPTIONS = ['New', 'In Progress', 'Interested', 'Converted', 'Not In
 // multi-tenant on the backend now, so the industry/service pickers are no
 // longer gated on a single hardcoded company. See the comment at their
 // render site below.
-const INDUSTRIES = [
-  'Healthcare', 'Education', 'Real Estate', 'Logistics', 'Finance',
-  'IT Solutions', 'Digital Marketing', 'Construction', 'Local Business',
-  'Interior Designers', 'Professional Services',
-];
-// FIX: this list was a hardcoded duplicate of the backend's SERVICES array
-// (utils/templateNameResolver.js) and had drifted out of sync — missing
-// "AI Voice Agent" (already valid on the backend before this fix) and the
-// 5 newly-added services below. Every string here MUST exactly match the
-// backend's SERVICES array — leadController.js's patchLead validates
-// against that exact list and silently drops any service value it doesn't
-// recognise (see VALID_NURTURE_SERVICES there), so a mismatch here would
-// mean picking one of these does nothing when saved.
-const SERVICES = [
-  'SEO', 'Paid Ads', 'Website Design & Development', 'AI Automation',
-  'CRM', 'Video Editing', 'Graphic Design', 'Social Media Marketing',
-  'AI Voice Agent',
-  'Custom Software', 'WhatsApp Automation & Chatbots', 'ERP Systems',
-  'Mobile Applications', 'Branding',
-];
+// Industry / service lists come from the company's Customize CRM settings
+// (services/customizationService.js) — see the picker in the remark modal.
 
 // ── Sector-wise outcome structure ────────────────────────────────────────────
 // Sector 1 — NOT ANSWERED: call was not picked up
@@ -550,7 +534,20 @@ export default function LeadDetailScreen() {
   const [remark,          setRemark]          = useState('');
   const [outcome,         setOutcome]         = useState('');
   const [industry,        setIndustry]        = useState('');
-  const [service,         setService]         = useState('');
+  const [services,        setServices]        = useState([]);
+  const [industryOther,   setIndustryOther]   = useState(false);
+  const cust = useCustomization();
+  const INDUSTRIES = industriesList(cust);
+  const SERVICES   = servicesList(cust);
+  const indField   = leadField('industry', cust);
+  const svcField   = leadField('service', cust);
+  const allowIndustryOther = indField.allowOther !== false;
+  const multiService = svcField.multiple !== false;
+  const isListedIndustry = (v) => INDUSTRIES.some(x => x.toLowerCase() === String(v || '').toLowerCase());
+  const openIndustry = (v) => { setIndustry(v || ''); setIndustryOther(!!v && !isListedIndustry(v)); };
+  const toggleService = (v) => setServices(prev => (prev.includes(v)
+    ? prev.filter(x => x !== v)
+    : (multiService ? [...prev, v] : [v])));
   const [statusUpdate,    setStatusUpdate]    = useState(''); // optional status change from remark modal
   const [submitting,      setSubmitting]      = useState(false);
   const [crmCallLogs,     setCrmCallLogs]     = useState([]);
@@ -662,8 +659,8 @@ export default function LeadDetailScreen() {
 
     // Show the modal immediately — do NOT wait on any network/disk work.
     setShowRemarkModal(true);
-    setIndustry(lead?.industry || '');
-    setService(lead?.service   || '');
+    openIndustry(lead?.industry || '');
+    setServices(leadServicesOf(lead));
     setStatusUpdate(lead?.status || '');
 
     // Defer the heavy call-log read + uploads so they never block the modal
@@ -889,7 +886,8 @@ export default function LeadDetailScreen() {
     setRemark('');
     setOutcome('');
     setIndustry('');
-    setService('');
+    setIndustryOther(false);
+    setServices([]);
     setStatusUpdate('');
     setFollowUpDate(null);
     setPickerTempDate(new Date());
@@ -1042,7 +1040,7 @@ export default function LeadDetailScreen() {
       setSubmitting(true);
       try {
         await dispatch(submitCallRemark({
-          leadId, remark: trimmed, outcome, industry, service,
+          leadId, remark: trimmed, outcome, industry: industry.trim(), service: services,
           followUpDate: followUpDate || null, document: null, recording: null,
         })).unwrap();
 
@@ -1130,7 +1128,7 @@ export default function LeadDetailScreen() {
     // the backend's shouldSchedule check correctly evaluates against
     // followUpDate/outcome regardless of whether status happened to change.
     dispatch(submitCallRemark({
-      leadId, remark: trimmed, outcome, industry, service,
+      leadId, remark: trimmed, outcome, industry: industry.trim(), service: services,
       followUpDate: followUp, document: null, recording: null,
       status: effectiveStatus || lead?.status,
     }))
@@ -1564,8 +1562,8 @@ export default function LeadDetailScreen() {
           style={styles.remarkBtn}
           onPress={() => {
             setShowRemarkModal(true);
-            setIndustry(lead?.industry || '');
-            setService(lead?.service   || '');
+            openIndustry(lead?.industry || '');
+            setServices(leadServicesOf(lead));
             setStatusUpdate(lead?.status || '');
           }}
           activeOpacity={0.8}
@@ -1901,30 +1899,61 @@ export default function LeadDetailScreen() {
                 app and gate on that; there is no entitlements endpoint in the
                 mobile client today.) */}
             <>
-                <Text style={styles.modalLabel}>Industry <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text></Text>
+                {indField.visible !== false && (<>
+                <Text style={styles.modalLabel}>{indField.label || 'Industry'} <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text></Text>
                 <View style={styles.outcomeRow}>
-                  {INDUSTRIES.map(ind => (
+                  {INDUSTRIES.map(ind => {
+                    const on = !industryOther && industry === ind;
+                    return (
+                      <TouchableOpacity
+                        key={ind}
+                        style={[styles.outcomeChip, on && styles.outcomeChipActive]}
+                        onPress={() => { setIndustryOther(false); setIndustry(on ? '' : ind); }}
+                      >
+                        <Text style={[styles.outcomeChipText, on && styles.outcomeChipTextActive]}>{ind}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                  {allowIndustryOther && (
                     <TouchableOpacity
-                      key={ind}
-                      style={[styles.outcomeChip, industry === ind && styles.outcomeChipActive]}
-                      onPress={() => setIndustry(industry === ind ? '' : ind)}
+                      style={[styles.outcomeChip, industryOther && styles.outcomeChipActive]}
+                      onPress={() => { const next = !industryOther; setIndustryOther(next); if (!next || isListedIndustry(industry)) setIndustry(''); }}
                     >
-                      <Text style={[styles.outcomeChipText, industry === ind && styles.outcomeChipTextActive]}>{ind}</Text>
+                      <Text style={[styles.outcomeChipText, industryOther && styles.outcomeChipTextActive]}>Other</Text>
                     </TouchableOpacity>
-                  ))}
+                  )}
                 </View>
-                <Text style={[styles.modalLabel, { marginTop: 10 }]}>Service <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text></Text>
+                {allowIndustryOther && industryOther && (
+                  <TextInput
+                    style={[styles.remarkInput, { minHeight: 44, marginBottom: 8 }]}
+                    placeholder="Type the industry…"
+                    placeholderTextColor={colors.textMuted}
+                    value={isListedIndustry(industry) ? '' : industry}
+                    onChangeText={setIndustry}
+                    maxLength={80}
+                  />
+                )}
+                </>)}
+                {svcField.visible !== false && (<>
+                <Text style={[styles.modalLabel, { marginTop: 10 }]}>
+                  {(svcField.label || 'Service') + (multiService ? 's' : '')}{' '}
+                  <Text style={{ fontWeight: '400', color: colors.textMuted }}>{multiService ? '(select all that apply)' : '(optional)'}</Text>
+                </Text>
                 <View style={styles.outcomeRow}>
-                  {SERVICES.map(svc => (
-                    <TouchableOpacity
-                      key={svc}
-                      style={[styles.outcomeChip, service === svc && styles.outcomeChipActive]}
-                      onPress={() => setService(service === svc ? '' : svc)}
-                    >
-                      <Text style={[styles.outcomeChipText, service === svc && styles.outcomeChipTextActive]}>{svc}</Text>
-                    </TouchableOpacity>
-                  ))}
+                  {[...SERVICES, ...services.filter(x => !SERVICES.includes(x))].map(svc => {
+                    const on = services.includes(svc);
+                    return (
+                      <TouchableOpacity
+                        key={svc}
+                        style={[styles.outcomeChip, on && styles.outcomeChipActive]}
+                        onPress={() => toggleService(svc)}
+                      >
+                        <Text style={[styles.outcomeChipText, on && styles.outcomeChipTextActive]}>{on && multiService ? '✓ ' : ''}{svc}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
                 </View>
+                </>)}
             </>
 
             <Text style={styles.modalLabel}>Remark *</Text>
@@ -2026,7 +2055,16 @@ export default function LeadDetailScreen() {
   );
 }
 
+// PERF: StyleSheet objects are cached per theme — rows/cards that call
+// createStyles(colors) no longer rebuild the whole sheet on every mount.
+const __styleCache = new WeakMap();
 function createStyles(colors) {
+  if (colors && __styleCache.has(colors)) return __styleCache.get(colors);
+  const out = __buildStyles(colors);
+  if (colors) __styleCache.set(colors, out);
+  return out;
+}
+function __buildStyles(colors) {
 return StyleSheet.create({
   container:          { flex: 1, backgroundColor: colors.bg },
   header:             { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingTop: 52, paddingBottom: 14, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },

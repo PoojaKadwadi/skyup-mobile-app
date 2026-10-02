@@ -37,6 +37,8 @@ import {
 import CallButton                    from '../../components/CallButton';
 import { RADIUS, FONT }              from '../../theme/tokens';
 import { useTheme }                  from '../../theme/ThemeContext';
+import useCustomization from '../../hooks/useCustomization';
+import { industriesList } from '../../services/customizationService';
 
 function maskPhone(phone) {
   if (!phone) return '—';
@@ -47,11 +49,8 @@ function maskPhone(phone) {
 
 const STATUS_FILTERS   = ['all', 'New', 'In Progress', 'Interested', 'Converted', 'Not Interested'];
 const QUALITY_FILTERS  = ['All', 'Hot', 'Warm', 'Cold'];
-const INDUSTRY_FILTERS = [
-  'All', 'Healthcare', 'Education', 'Real Estate', 'Logistics', 'Finance',
-  'IT Solutions', 'Digital Marketing', 'Construction', 'Local Business',
-  'Interior Designers', 'Professional Services', 'Untagged',
-];
+// Industry filter options = company's Industries list (Customize CRM) +
+// any "Other" industries actually present on leads + Untagged.
 const SORT_OPTIONS = [
   { label: 'Recent',      value: 'recent'    },
   { label: 'Newest',      value: 'date_desc' },
@@ -465,9 +464,13 @@ export default function LeadsScreen() {
   // sort criteria change, so the user always starts reading the new result
   // set from the beginning.
   const listRef = useRef(null);
-  useEffect(() => {
-    listRef.current?.scrollToOffset?.({ offset: 0, animated: false });
-  }, [searchQuery, filterStatus, filterTemp, filterIndustry, filterSource, filterDate, sortBy, followUpOnly]);
+  const scrollToTop = useCallback((animated = false) => {
+    // Twice: once now, once after the new rows have rendered — a single call
+    // fired before the re-render was being undone, leaving the list "stuck"
+    // mid-way after clearing a filter.
+    listRef.current?.scrollToOffset?.({ offset: 0, animated });
+    requestAnimationFrame(() => listRef.current?.scrollToOffset?.({ offset: 0, animated: false }));
+  }, []);
 
   // ── BUG FIX: new leads shouldn't pop into view while the user is reading ──
   // further down the list. `displayed` is live — a brand-new lead (pushed via
@@ -484,6 +487,15 @@ export default function LeadsScreen() {
   const [frozenList,      setFrozenList]      = useState(null); // null = not frozen
   const [pendingNewCount, setPendingNewCount] = useState(0);
 
+  // Any change of search / filter / sort = a NEW result set → always start
+  // at the top and never "freeze" onto the old (filtered) list.
+  const filterKey = [
+    searchQuery, filterStatus, filterTemp, filterIndustry, filterSource,
+    filterDate, sortBy, followUpOnly ? 1 : 0,
+    customFrom ? +customFrom : '', customTo ? +customTo : '',
+  ].join('|');
+  const lastFilterKeyRef = useRef(filterKey);
+
   const isDefaultView =
     !localSearch && filterStatus === 'all' && filterTemp === 'All' &&
     filterIndustry === 'All' && filterSource === 'All' && filterDate === 'all' &&
@@ -497,11 +509,20 @@ export default function LeadsScreen() {
     setFrozenList(null);
     setPendingNewCount(0);
     frozenAnchorIdRef.current = null;
+    isNearTopRef.current = true;
     listRef.current?.scrollToOffset?.({ offset: 0, animated: true });
   }, []);
 
   // Source options built from whatever's actually in the data (csv, meta,
   // excel, manual, etc.) so this never goes stale as new sources appear.
+  const cust = useCustomization();
+  const industryFilters = useMemo(() => {
+    const list = industriesList(cust);
+    const extra = new Set();
+    allItems.forEach(l => { if (l.industry && !list.includes(l.industry)) extra.add(l.industry); });
+    return ['All', ...list, ...Array.from(extra).sort(), 'Untagged'];
+  }, [cust, allItems]);
+
   const sourceOptions = useMemo(() => {
     const seen = new Set();
     let hasUntagged = false;
@@ -563,6 +584,7 @@ export default function LeadsScreen() {
     setLocalSearch('');
     if (debounceRef.current) clearTimeout(debounceRef.current);
     dispatch(setSearchQuery(''));
+    listRef.current?.scrollToOffset?.({ offset: 0, animated: false });
   }, [dispatch]);
 
   const onRefresh = useCallback(() => { dispatch(fetchLeads()); }, [dispatch]);
@@ -593,7 +615,7 @@ export default function LeadsScreen() {
     // Sort
     if (sortBy === 'recent') {
       // Most recently called or created — uses _raw_date which is max(createdAt, lastCalledAt)
-      res = [...res].sort((a, b) => (b._raw_date || 0) - (a._raw_date || 0));
+      res.sort((a, b) => (b._raw_date || 0) - (a._raw_date || 0));
     } else if (sortBy === 'date_desc') {
       const withTs = res.map(l => ({ l, ts: +(new Date(l.date || 0)) }));
       withTs.sort((a, b) => b.ts - a.ts);
@@ -603,9 +625,9 @@ export default function LeadsScreen() {
       withTs.sort((a, b) => a.ts - b.ts);
       res = withTs.map(x => x.l);
     } else if (sortBy === 'name_asc') {
-      res = [...res].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      res.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     } else if (sortBy === 'status') {
-      res = [...res].sort((a, b) => (a.status || '').localeCompare(b.status || ''));
+      res.sort((a, b) => (a.status || '').localeCompare(b.status || ''));
     }
     return res;
   }, [filteredLeads, allItems, sortBy, filterTemp, filterIndustry, filterSource, filterDate, customFrom, customTo, followUpOnly]);
@@ -613,6 +635,18 @@ export default function LeadsScreen() {
   const prevDisplayedRef = useRef(displayed);
   useEffect(() => {
     const prevList = prevDisplayedRef.current;
+
+    if (lastFilterKeyRef.current !== filterKey) {
+      // Filters changed (incl. "Clear") → live list, back to the beginning.
+      lastFilterKeyRef.current = filterKey;
+      if (frozenList) setFrozenList(null);
+      if (pendingNewCount) setPendingNewCount(0);
+      frozenAnchorIdRef.current = null;
+      isNearTopRef.current = true;
+      prevDisplayedRef.current = displayed;
+      scrollToTop(false);
+      return;
+    }
 
     if (!isDefaultView || isNearTopRef.current) {
       // Live mode: either not in the scenario this applies to, or the user
@@ -645,7 +679,7 @@ export default function LeadsScreen() {
     setPendingNewCount(idx === -1 ? pendingNewCount : idx);
     prevDisplayedRef.current = displayed;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [displayed, isDefaultView]);
+  }, [displayed, isDefaultView, filterKey]);
 
   const visibleList = frozenList || displayed;
 
@@ -666,7 +700,12 @@ export default function LeadsScreen() {
     setCustomTo(null);
     setSortBy('recent');
     setFollowUpOnly(false);
-  }, [dispatch, handleSearchClear]);
+    setFrozenList(null);
+    setPendingNewCount(0);
+    frozenAnchorIdRef.current = null;
+    isNearTopRef.current = true;
+    scrollToTop(false);
+  }, [dispatch, handleSearchClear, scrollToTop]);
 
   const hasActiveFilters = !!(
     localSearch || filterStatus !== 'all' || filterTemp !== 'All' ||
@@ -829,7 +868,7 @@ export default function LeadsScreen() {
         <FilterDropdown
           label="Industry"
           value={filterIndustry}
-          options={INDUSTRY_FILTERS}
+          options={industryFilters}
           onChange={setFilterIndustry}
           dark={dark} colors={colors}
         />
@@ -873,7 +912,6 @@ export default function LeadsScreen() {
         updateCellsBatchingPeriod={50}
         windowSize={7}
         removeClippedSubviews={true}
-        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         refreshControl={
           <RefreshControl
             refreshing={loading} onRefresh={onRefresh}
@@ -933,7 +971,16 @@ function Separator() {
   return <View style={s.sep} />;
 }
 
+// PERF: StyleSheet objects are cached per theme — rows/cards that call
+// createStyles(colors) no longer rebuild the whole sheet on every mount.
+const __styleCache = new WeakMap();
 function createStyles(colors) {
+  if (colors && __styleCache.has(colors)) return __styleCache.get(colors);
+  const out = __buildStyles(colors);
+  if (colors) __styleCache.set(colors, out);
+  return out;
+}
+function __buildStyles(colors) {
   return StyleSheet.create({
     root: { flex: 1, backgroundColor: colors.bg },
 

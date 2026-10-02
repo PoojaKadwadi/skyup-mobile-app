@@ -27,10 +27,10 @@
 //  7. Timezone offset fix (tzOffset param) on both API calls.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Modal, RefreshControl, SectionList,
+  ActivityIndicator, Modal, RefreshControl, SectionList, TextInput, ScrollView,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useSelector }    from 'react-redux';
@@ -39,6 +39,7 @@ import moment             from 'moment';
 import { useTheme }       from '../../theme/ThemeContext';
 import apiClient          from '../../api/apiClient';
 import { normalizePhone } from '../../services/phoneService';
+import { statusLabel, statusColor } from '../../services/customizationService';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -63,6 +64,7 @@ const SECTION_CFG = {
   notCalled: { color: '#EF4444', icon: 'phone-remove-outline',  label: 'Not Called'     },
   pending:   { color: '#F59E0B', icon: 'clock-alert-outline',   label: 'Remark Pending' },
   done:      { color: '#10B981', icon: 'check-circle-outline',  label: 'Done'           },
+  other:     { color: '#64748B', icon: 'phone-outline',         label: 'Other numbers'  },
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -176,64 +178,57 @@ function DayPickerModal({ visible, selectedDate, onSelect, onClose, colors }) {
 }
 
 // ─── Lead card (for "Not Called" section) ────────────────────────────────────
+// PERF: cards receive the shared StyleSheet (`s`) from the screen instead of
+// each card building its own with StyleSheet.create — that was N style
+// objects per render on long lists.
 
-const NotCalledCard = React.memo(function NotCalledCard({ item, onPress, colors }) {
-  const s           = useMemo(() => createStyles(colors), [colors]);
-  const statusColor = STATUS_COLORS[item.status] || '#64748B';
-  const initials    = getInitials(item.name);
+const NotCalledCard = React.memo(function NotCalledCard({ item, onPress, colors, s }) {
+  const stColor = statusColor(item.status) || STATUS_COLORS[item.status] || '#64748B';
   const nextFU      = getNextFollowUp(item);
   const remark      = (item.remark || item.initialRemark || '').trim();
   const days        = item.daysSinceAssigned ?? 0;
 
   return (
-    <TouchableOpacity
-      style={[s.card, s.cardNotCalled]}
-      onPress={() => onPress(item._id)}
-      activeOpacity={0.75}
-    >
-      <View style={[s.avatar, { backgroundColor: statusColor + '22' }]}>
-        <Text style={[s.avatarTxt, { color: statusColor }]}>{initials}</Text>
+    <TouchableOpacity style={[s.card, s.cardNotCalled]} onPress={() => onPress(item._id)} activeOpacity={0.75}>
+      <View style={[s.avatar, { backgroundColor: stColor + '22' }]}>
+        <Text style={[s.avatarTxt, { color: stColor }]}>{getInitials(item.name)}</Text>
       </View>
 
       <View style={s.cardBody}>
         <View style={s.nameRow}>
           <Text style={s.leadName} numberOfLines={1}>{item.name || maskPhone(item.mobile)}</Text>
-          <Icon name="chevron-right" size={14} color={colors.textMuted} style={{ marginLeft: 4 }} />
+          <View style={[s.waitPill, days > 0 && s.waitPillLate]}>
+            <Icon name="timer-sand" size={10} color="#EF4444" />
+            <Text style={s.waitTxt}>{waitingLabel(days)}</Text>
+          </View>
         </View>
-
         <Text style={s.phoneText}>{maskPhone(item.mobile || item.primaryPhone)}</Text>
 
         <View style={s.badgeRow}>
           {item.status ? (
-            <View style={[s.badge, { backgroundColor: statusColor + '18' }]}>
-              <Text style={[s.badgeTxt, { color: statusColor }]}>{item.status}</Text>
+            <View style={[s.badge, { backgroundColor: stColor + '18' }]}>
+              <Text style={[s.badgeTxt, { color: stColor }]}>{statusLabel(item.status)}</Text>
             </View>
           ) : null}
           {item.campaign ? (
             <View style={[s.badge, { backgroundColor: colors.border }]}>
-              <Text style={[s.badgeTxt, { color: colors.textMuted }]}>{item.campaign}</Text>
+              <Text style={[s.badgeTxt, { color: colors.textMuted }]} numberOfLines={1}>{item.campaign}</Text>
             </View>
           ) : null}
         </View>
 
-        {/* Initial/campaign remark */}
-        {remark ? (
-          <Text style={s.initialRemark} numberOfLines={2}>"{remark}"</Text>
-        ) : null}
+        {remark ? <Text style={s.initialRemark} numberOfLines={1}>"{remark}"</Text> : null}
 
-        {/* Waiting days */}
-        <View style={s.waitRow}>
-          <Icon name="timer-sand" size={11} color="#EF4444" />
-          <Text style={s.waitTxt}>{waitingLabel(days)}</Text>
-        </View>
-
-        {/* Follow-up badge */}
         {nextFU ? (
           <View style={s.fuRow}>
             <Icon name="calendar-clock" size={11} color="#8B5CF6" />
-            <Text style={s.fuTxt}>Follow-up: {moment(nextFU).format('DD MMM, hh:mm A')}</Text>
+            <Text style={s.fuTxt}>Follow-up {moment(nextFU).format('DD MMM, hh:mm A')}</Text>
           </View>
         ) : null}
+      </View>
+
+      <View style={s.callNowBtn}>
+        <Icon name="phone" size={16} color="#fff" />
       </View>
     </TouchableOpacity>
   );
@@ -241,19 +236,18 @@ const NotCalledCard = React.memo(function NotCalledCard({ item, onPress, colors 
 
 // ─── Call log card (for "Pending" and "Done" sections) ───────────────────────
 
-const CallLogCard = React.memo(function CallLogCard({ item, onPress, colors }) {
-  const s    = useMemo(() => createStyles(colors), [colors]);
+const CallLogCard = React.memo(function CallLogCard({ item, onPress, colors, s }) {
   const cfg  = CALL_TYPE_CFG[item.callType] || CALL_TYPE_CFG.incoming;
   const lead = item.matchedLead;
   const time = item.timestamp ? fmtTime(new Date(item.timestamp).getTime()) : '—';
   const dur  = formatDuration(item.duration);
   const done = isDone(item);
   const rm   = done ? (item.remark || '').trim() : null;
-  const statusColor  = lead?.status ? (STATUS_COLORS[lead.status] || '#64748B') : '#64748B';
+  const stColor  = lead?.status ? (statusColor(lead.status) || STATUS_COLORS[lead.status] || '#64748B') : '#64748B';
   const displayName  = lead?.name || item.name || null;
-  const initials     = displayName ? getInitials(displayName) : null;
   const nextFU       = getNextFollowUp(lead);
   const isNavigable  = !!(lead?._id || item.matchedLeadId);
+  const hasRecording = Array.isArray(item.recordings) && item.recordings.length > 0;
 
   const handlePress = useCallback(() => {
     if (isNavigable) onPress(lead?._id || item.matchedLeadId);
@@ -265,73 +259,62 @@ const CallLogCard = React.memo(function CallLogCard({ item, onPress, colors }) {
       onPress={isNavigable ? handlePress : undefined}
       activeOpacity={isNavigable ? 0.75 : 1}
     >
-      {/* Avatar or icon */}
-      {initials ? (
-        <View style={[s.avatar, { backgroundColor: statusColor + '22' }]}>
-          <Text style={[s.avatarTxt, { color: statusColor }]}>{initials}</Text>
-        </View>
-      ) : (
-        <View style={[s.avatar, { backgroundColor: cfg.color + '20' }]}>
-          <Icon name={cfg.icon} size={20} color={cfg.color} />
-        </View>
-      )}
+      <View style={[s.avatar, { backgroundColor: cfg.color + '1F' }]}>
+        <Icon name={cfg.icon} size={20} color={cfg.color} />
+      </View>
 
       <View style={s.cardBody}>
         <View style={s.nameRow}>
-          <Text style={s.leadName} numberOfLines={1}>
-            {displayName || maskPhone(item.phoneNumber)}
-          </Text>
-          {isNavigable && (
-            <Icon name="chevron-right" size={14} color={colors.textMuted} style={{ marginLeft: 4 }} />
-          )}
+          <Text style={s.leadName} numberOfLines={1}>{displayName || maskPhone(item.phoneNumber)}</Text>
+          <Text style={s.timeTxt}>{time}</Text>
         </View>
-
-        {displayName && <Text style={s.phoneText}>{maskPhone(item.phoneNumber)}</Text>}
+        <Text style={s.phoneText}>
+          {displayName ? maskPhone(item.phoneNumber) : (isNavigable ? '' : 'Not a lead')}
+        </Text>
 
         <View style={s.badgeRow}>
           <View style={[s.badge, { backgroundColor: cfg.color + '18' }]}>
-            <Icon name={cfg.icon} size={10} color={cfg.color} />
             <Text style={[s.badgeTxt, { color: cfg.color }]}>{cfg.label}</Text>
           </View>
-          {lead?.status && (
-            <View style={[s.badge, { backgroundColor: statusColor + '18' }]}>
-              <Text style={[s.badgeTxt, { color: statusColor }]}>{lead.status}</Text>
-            </View>
-          )}
-          {dur && (
+          {dur ? (
             <View style={[s.badge, { backgroundColor: colors.border }]}>
               <Icon name="timer-outline" size={10} color={colors.textMuted} />
               <Text style={[s.badgeTxt, { color: colors.textMuted }]}>{dur}</Text>
             </View>
-          )}
+          ) : null}
+          {lead?.status ? (
+            <View style={[s.badge, { backgroundColor: stColor + '18' }]}>
+              <Text style={[s.badgeTxt, { color: stColor }]}>{statusLabel(lead.status)}</Text>
+            </View>
+          ) : null}
+          {hasRecording ? (
+            <View style={[s.badge, { backgroundColor: '#7C3AED18' }]}>
+              <Icon name="microphone" size={10} color="#7C3AED" />
+              <Text style={[s.badgeTxt, { color: '#7C3AED' }]}>Recorded</Text>
+            </View>
+          ) : null}
         </View>
 
-        {done ? (
+        {isNavigable ? (done ? (
           <View style={s.remarkRow}>
-            <Icon name="check-circle" size={11} color="#10B981" />
-            <Text style={s.remarkTxt} numberOfLines={2}>"{rm}"</Text>
+            <Icon name="check-circle" size={12} color="#10B981" />
+            <Text style={s.remarkTxt} numberOfLines={2}>{rm}</Text>
           </View>
         ) : (
-          <View style={s.remarkRow}>
-            <Icon name="clock-alert-outline" size={11} color="#F59E0B" />
-            <Text style={s.pendingTxt}>Remark pending — tap to add</Text>
+          <View style={s.pendingPill}>
+            <Icon name="pencil-plus-outline" size={12} color="#F59E0B" />
+            <Text style={s.pendingTxt}>Add remark</Text>
           </View>
-        )}
+        )) : null}
 
-        {nextFU && (
+        {nextFU ? (
           <View style={s.fuRow}>
             <Icon name="calendar-clock" size={11} color="#8B5CF6" />
-            <Text style={s.fuTxt}>Follow-up: {moment(nextFU).format('DD MMM, hh:mm A')}</Text>
+            <Text style={s.fuTxt}>Follow-up {moment(nextFU).format('DD MMM, hh:mm A')}</Text>
           </View>
-        )}
+        ) : null}
 
-        {item.user?.name && (
-          <Text style={s.agentTxt}>👤 {item.user.name}</Text>
-        )}
-      </View>
-
-      <View style={{ alignItems: 'flex-end', paddingTop: 2 }}>
-        <Text style={s.timeTxt}>{time}</Text>
+        {item.user?.name ? <Text style={s.agentTxt}>👤 {item.user.name}</Text> : null}
       </View>
     </TouchableOpacity>
   );
@@ -339,25 +322,53 @@ const CallLogCard = React.memo(function CallLogCard({ item, onPress, colors }) {
 
 // ─── Section header ───────────────────────────────────────────────────────────
 
-const SectionHeader = React.memo(function SectionHeader({ section, colors }) {
+const SectionHeader = React.memo(function SectionHeader({ section, s }) {
   const cfg = SECTION_CFG[section.key];
   return (
-    <View style={{
-      flexDirection: 'row', alignItems: 'center', gap: 6,
-      paddingHorizontal: 20, paddingTop: 18, paddingBottom: 8,
-    }}>
-      <Icon name={cfg.icon} size={14} color={cfg.color} />
-      <Text style={{
-        fontSize: 12, fontWeight: '800', color: cfg.color,
-        letterSpacing: 0.6, textTransform: 'uppercase',
-      }}>
-        {cfg.label} · {section.data.length}
-      </Text>
+    <View style={s.sectionHead}>
+      <View style={[s.sectionDot, { backgroundColor: cfg.color }]} />
+      <Text style={[s.sectionTitle, { color: cfg.color }]}>{cfg.label}</Text>
+      <View style={[s.sectionCount, { backgroundColor: cfg.color + '1F' }]}>
+        <Text style={[s.sectionCountTxt, { color: cfg.color }]}>{section.total ?? section.data.length}</Text>
+      </View>
     </View>
   );
 });
 
 const Separator = () => <View style={{ height: 8 }} />;
+
+// ─── Filters ──────────────────────────────────────────────────────────────────
+
+const VIEW_TABS = [
+  { key: 'all',       label: 'All' },
+  { key: 'notCalled', label: 'Not called' },
+  { key: 'pending',   label: 'Remark pending' },
+  { key: 'done',      label: 'Done' },
+];
+const TYPE_FILTERS = [
+  { key: 'all',      label: 'All calls', icon: 'phone' },
+  { key: 'outgoing', label: 'Outgoing',  icon: 'phone-outgoing' },
+  { key: 'incoming', label: 'Incoming',  icon: 'phone-incoming' },
+  { key: 'missed',   label: 'Missed',    icon: 'phone-missed' },
+];
+const PAGE = 40; // render the not-called list in pages for speed
+
+function normLogs(raw) {
+  return (raw || [])
+    .map(l => ({ ...l, _tsMs: l.timestamp ? new Date(l.timestamp).getTime() : 0 }))
+    .filter(l => l._tsMs && !isNaN(l._tsMs))
+    .sort((a, b) => b._tsMs - a._tsMs);
+}
+
+function matchesSearch(q, ...vals) {
+  if (!q) return true;
+  const digits = q.replace(/\D/g, '');
+  return vals.some(v => {
+    const str = String(v || '').toLowerCase();
+    if (str.includes(q)) return true;
+    return digits.length >= 3 && str.replace(/\D/g, '').includes(digits);
+  });
+}
 
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
@@ -379,6 +390,14 @@ export default function DayCallLogsScreen() {
   const [refreshing,  setRefreshing]  = useState(false);
   const [error,       setError]       = useState(null);
 
+  // Filters
+  const [view,       setView]       = useState('all');
+  const [callType,   setCallType]   = useState('all');
+  const [leadsOnly,  setLeadsOnly]  = useState(false);
+  const [search,     setSearch]     = useState('');
+  const [showFilters, setShowFilters] = useState(false);
+  const [notCalledShown, setNotCalledShown] = useState(PAGE);
+
   const dateParam = useMemo(() => moment(selectedDate).format('YYYY-MM-DD'), [selectedDate]);
   const tzOffset  = useMemo(() => -new Date().getTimezoneOffset(), []);
   const isToday   = useMemo(() => {
@@ -386,94 +405,59 @@ export default function DayCallLogsScreen() {
     return t.getTime() === selectedDate.getTime();
   }, [selectedDate]);
 
-  // ── Fetch both lists in parallel ──────────────────────────────────────────
-  const fetchAll = useCallback(async (isRefresh = false) => {
-    if (isRefresh) setRefreshing(true);
-    else           setLoading(true);
-    setError(null);
-
+  // ── Fetch both lists in parallel (one function for load / refresh / focus) ─
+  const reqIdRef = useRef(0);
+  const fetchAll = useCallback(async (mode = 'load') => {
+    const reqId = ++reqIdRef.current;
+    if (mode === 'refresh') setRefreshing(true);
+    else if (mode === 'load') setLoading(true);
+    if (mode !== 'silent') setError(null);
     try {
       const params = { date: dateParam, limit: 200, tzOffset };
-
       const [logsRes, uncalledRes] = await Promise.allSettled([
         apiClient.get('/call-logs',          { params }),
-        apiClient.get('/call-logs/uncalled',  { params }),
+        apiClient.get('/call-logs/uncalled', { params }),
       ]);
-
-      // Call logs
-      if (logsRes.status === 'fulfilled') {
-        const raw = logsRes.value.data.logs || [];
-        setLogs(
-          raw
-            .map(l => ({ ...l, _tsMs: l.timestamp ? new Date(l.timestamp).getTime() : 0 }))
-            .filter(l => l._tsMs && !isNaN(l._tsMs))
-            .sort((a, b) => b._tsMs - a._tsMs)
-        );
-      } else {
+      if (reqId !== reqIdRef.current) return; // a newer request superseded this one
+      if (logsRes.status === 'fulfilled') setLogs(normLogs(logsRes.value.data.logs));
+      else if (mode !== 'silent') {
         setLogs([]);
         setError(logsRes.reason?.response?.data?.message || 'Could not load call logs.');
       }
-
-      // Uncalled leads
-      if (uncalledRes.status === 'fulfilled') {
-        setUncalled(uncalledRes.value.data.leads || []);
-      } else {
-        setUncalled([]);
-      }
+      if (uncalledRes.status === 'fulfilled') setUncalled(uncalledRes.value.data.leads || []);
+      else if (mode !== 'silent') setUncalled([]);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (reqId === reqIdRef.current) { setLoading(false); setRefreshing(false); }
     }
   }, [dateParam, tzOffset]);
 
   // Load when date changes
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  useEffect(() => { setNotCalledShown(PAGE); fetchAll('load'); }, [fetchAll]);
 
-  // Silent refresh when returning from LeadDetail (after logging remark / making a call)
+  // Silent refresh when coming BACK to this screen (not on the first focus —
+  // the effect above already loads, which used to double every request).
+  const firstFocusRef = useRef(true);
   useFocusEffect(
     useCallback(() => {
-      let alive = true;
-      const timer = setTimeout(async () => {
-        if (!alive || loading) return;
-        try {
-          const params = { date: dateParam, limit: 200, tzOffset };
-          const [lr, ur] = await Promise.allSettled([
-            apiClient.get('/call-logs',         { params }),
-            apiClient.get('/call-logs/uncalled', { params }),
-          ]);
-          if (!alive) return;
-          if (lr.status === 'fulfilled') {
-            const raw = lr.value.data.logs || [];
-            setLogs(
-              raw
-                .map(l => ({ ...l, _tsMs: l.timestamp ? new Date(l.timestamp).getTime() : 0 }))
-                .filter(l => l._tsMs && !isNaN(l._tsMs))
-                .sort((a, b) => b._tsMs - a._tsMs)
-            );
-          }
-          if (ur.status === 'fulfilled') setUncalled(ur.value.data.leads || []);
-        } catch { /* silent */ }
-      }, 350);
-      return () => { alive = false; clearTimeout(timer); };
-    }, [dateParam, tzOffset, loading])
+      if (firstFocusRef.current) { firstFocusRef.current = false; return undefined; }
+      const timer = setTimeout(() => fetchAll('silent'), 350);
+      return () => clearTimeout(timer);
+    }, [fetchAll])
   );
 
   // ── Nav ───────────────────────────────────────────────────────────────────
   const goPrev = useCallback(() => {
     const d = new Date(selectedDate); d.setDate(d.getDate() - 1); setSelectedDate(d);
   }, [selectedDate]);
-
   const goNext = useCallback(() => {
     if (isToday) return;
     const d = new Date(selectedDate); d.setDate(d.getDate() + 1); setSelectedDate(d);
   }, [selectedDate, isToday]);
-
   const openLead = useCallback((leadId) => {
     if (leadId) navigation.navigate('LeadDetail', { leadId });
   }, [navigation]);
 
-  // ── Build sections ────────────────────────────────────────────────────────
-  // Exclude from "Not Called" any lead that appears in call logs (already called)
+  // ── Build sections (with filters) ─────────────────────────────────────────
   const calledLeadIds = useMemo(() => {
     const ids = new Set();
     for (const log of logs) {
@@ -483,46 +467,94 @@ export default function DayCallLogsScreen() {
     return ids;
   }, [logs]);
 
+  const q = search.trim().toLowerCase();
+
+  const filtered = useMemo(() => {
+    const notCalled = uncalled
+      .filter(l => !calledLeadIds.has(String(l._id)))
+      .filter(l => matchesSearch(q, l.name, l.mobile, l.primaryPhone, l.campaign));
+    const callLogs = logs
+      .filter(l => callType === 'all' || l.callType === callType)
+      .filter(l => !leadsOnly || l.matchedLead?._id || l.matchedLeadId)
+      .filter(l => matchesSearch(q, l.matchedLead?.name, l.name, l.phoneNumber, l.remark));
+    return {
+      notCalled,
+      pending: callLogs.filter(l => !isDone(l) && (l.matchedLead?._id || l.matchedLeadId)),
+      done:    callLogs.filter(l => isDone(l)),
+      other:   callLogs.filter(l => !isDone(l) && !(l.matchedLead?._id || l.matchedLeadId)),
+    };
+  }, [uncalled, logs, calledLeadIds, callType, leadsOnly, q]);
+
   const sections = useMemo(() => {
-    const notCalledLeads = uncalled.filter(l => !calledLeadIds.has(String(l._id)));
-    const pendingLogs    = logs.filter(l => !isDone(l));
-    const doneLogs       = logs.filter(l =>  isDone(l));
-    const result = [];
-    if (notCalledLeads.length) result.push({ key: 'notCalled', data: notCalledLeads });
-    if (pendingLogs.length)    result.push({ key: 'pending',   data: pendingLogs    });
-    if (doneLogs.length)       result.push({ key: 'done',      data: doneLogs       });
-    return result;
-  }, [uncalled, logs, calledLeadIds]);
+    const out = [];
+    const want = (k) => view === 'all' || view === k;
+    if (want('notCalled') && filtered.notCalled.length && callType === 'all') {
+      out.push({ key: 'notCalled', total: filtered.notCalled.length, data: filtered.notCalled.slice(0, notCalledShown) });
+    }
+    if (want('pending') && filtered.pending.length) out.push({ key: 'pending', data: filtered.pending });
+    if (want('done') && filtered.done.length)       out.push({ key: 'done', data: filtered.done });
+    if (view === 'all' && filtered.other.length)   out.push({ key: 'other', data: filtered.other });
+    return out;
+  }, [filtered, view, callType, notCalledShown]);
 
   const summary = useMemo(() => ({
     total:     logs.length,
     incoming:  logs.filter(l => l.callType === 'incoming').length,
     outgoing:  logs.filter(l => l.callType === 'outgoing').length,
     missed:    logs.filter(l => l.callType === 'missed').length,
-    notCalled: sections.find(s => s.key === 'notCalled')?.data.length ?? 0,
-    pending:   sections.find(s => s.key === 'pending')?.data.length   ?? 0,
-  }), [logs, sections]);
+    talkSecs:  logs.reduce((a, l) => a + (Number(l.duration) || 0), 0),
+    notCalled: uncalled.filter(l => !calledLeadIds.has(String(l._id))).length,
+    pending:   logs.filter(l => !isDone(l) && (l.matchedLead?._id || l.matchedLeadId)).length,
+  }), [logs, uncalled, calledLeadIds]);
 
-  const dayLabel = isToday
-    ? 'Today'
-    : moment(selectedDate).format('dddd, DD MMM YYYY');
-
+  const activeFilterCount = (callType !== 'all' ? 1 : 0) + (leadsOnly ? 1 : 0);
+  const dayLabel = isToday ? 'Today' : moment(selectedDate).format('ddd, DD MMM YYYY');
   const isEmpty  = !loading && sections.length === 0;
+
+  const renderItem = useCallback(({ item, section }) => (
+    section.key === 'notCalled'
+      ? <NotCalledCard item={item} onPress={openLead} colors={colors} s={s} />
+      : <CallLogCard item={item} onPress={openLead} colors={colors} s={s} />
+  ), [openLead, colors, s]);
+
+  const renderSectionHeader = useCallback(({ section }) => <SectionHeader section={section} s={s} />, [s]);
+
+  const renderSectionFooter = useCallback(({ section }) => (
+    section.key === 'notCalled' && section.total > section.data.length ? (
+      <TouchableOpacity style={s.moreBtn} onPress={() => setNotCalledShown(n => n + PAGE)}>
+        <Text style={s.moreTxt}>Show {Math.min(PAGE, section.total - section.data.length)} more · {section.total - section.data.length} left</Text>
+      </TouchableOpacity>
+    ) : null
+  ), [s]);
+
+  const keyExtractor = useCallback((item, i) => (
+    item._id ? String(item._id) : `${item.phoneNumber || ''}-${item._tsMs || i}`
+  ), []);
+
+  const Stat = ({ icon, color, value, label, onPress, active }) => (
+    <TouchableOpacity style={[s.stat, active && { borderColor: color, backgroundColor: color + '14' }]} onPress={onPress} activeOpacity={0.7}>
+      <Icon name={icon} size={15} color={color} />
+      <Text style={s.statVal}>{value}</Text>
+      <Text style={s.statLbl} numberOfLines={1}>{label}</Text>
+    </TouchableOpacity>
+  );
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <View style={s.root}>
-
       {/* Header */}
       <View style={s.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()}
-          hitSlop={{top:10,bottom:10,left:10,right:10}}>
+        <TouchableOpacity onPress={() => navigation.goBack()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Icon name="arrow-left" size={24} color={colors.textPrimary} />
         </TouchableOpacity>
         <View style={{ flex: 1, marginLeft: 12 }}>
           <Text style={s.title}>Calls by Day</Text>
-          <Text style={s.subtitle}>{isAdmin ? 'Company-wide' : 'Your calls'}</Text>
+          <Text style={s.subtitle}>{isAdmin ? 'Company-wide' : 'Your calls'} · auto-synced</Text>
         </View>
+        <TouchableOpacity onPress={() => setShowFilters(v => !v)} style={[s.filterBtn, (showFilters || activeFilterCount) && s.filterBtnOn]}>
+          <Icon name="filter-variant" size={18} color={(showFilters || activeFilterCount) ? '#fff' : colors.textPrimary} />
+          {activeFilterCount > 0 && <Text style={s.filterBadge}>{activeFilterCount}</Text>}
+        </TouchableOpacity>
       </View>
 
       {/* Date navigation */}
@@ -531,37 +563,83 @@ export default function DayCallLogsScreen() {
           <Icon name="chevron-left" size={22} color={colors.textPrimary} />
         </TouchableOpacity>
         <TouchableOpacity style={s.dateLbl} onPress={() => setPickerOpen(true)}>
-          <Icon name="calendar" size={16} color={colors.blue || '#2563EB'} />
+          <Icon name="calendar-month" size={16} color={colors.blue || '#2563EB'} />
           <Text style={s.dateTxt}>{dayLabel}</Text>
+          <Icon name="menu-down" size={18} color={colors.textMuted} />
         </TouchableOpacity>
         <TouchableOpacity onPress={goNext} style={s.dateBtn} disabled={isToday}>
-          <Icon name="chevron-right" size={22}
-            color={isToday ? colors.textMuted : colors.textPrimary} />
+          <Icon name="chevron-right" size={22} color={isToday ? colors.textMuted : colors.textPrimary} />
         </TouchableOpacity>
       </View>
 
-      {/* Summary bar */}
-      {(logs.length > 0 || summary.notCalled > 0) && !loading && (
-        <View style={s.summaryBar}>
-          <Text style={s.summaryTxt}>
-            {summary.total} call{summary.total !== 1 ? 's' : ''} · {summary.incoming} in · {summary.outgoing} out · {summary.missed} missed
-          </Text>
-          <View style={s.summaryChips}>
-            {summary.notCalled > 0 && (
-              <View style={[s.chip, { backgroundColor: '#EF444418' }]}>
-                <Text style={[s.chipTxt, { color: '#EF4444' }]}>
-                  {summary.notCalled} not called
-                </Text>
-              </View>
-            )}
-            {summary.pending > 0 && (
-              <View style={[s.chip, { backgroundColor: '#F59E0B18' }]}>
-                <Text style={[s.chipTxt, { color: '#F59E0B' }]}>
-                  {summary.pending} pending
-                </Text>
-              </View>
-            )}
+      {/* Stat tiles (tap to filter) */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.statsRow}>
+        <Stat icon="phone" color="#2563EB" value={summary.total} label="Calls"
+          active={callType === 'all' && view === 'all'} onPress={() => { setCallType('all'); setView('all'); }} />
+        <Stat icon="phone-outgoing" color="#2563EB" value={summary.outgoing} label="Outgoing"
+          active={callType === 'outgoing'} onPress={() => setCallType(t => (t === 'outgoing' ? 'all' : 'outgoing'))} />
+        <Stat icon="phone-incoming" color="#059669" value={summary.incoming} label="Incoming"
+          active={callType === 'incoming'} onPress={() => setCallType(t => (t === 'incoming' ? 'all' : 'incoming'))} />
+        <Stat icon="phone-missed" color="#EF4444" value={summary.missed} label="Missed"
+          active={callType === 'missed'} onPress={() => setCallType(t => (t === 'missed' ? 'all' : 'missed'))} />
+        <Stat icon="phone-remove-outline" color="#EF4444" value={summary.notCalled} label="Not called"
+          active={view === 'notCalled'} onPress={() => { setCallType('all'); setView(v => (v === 'notCalled' ? 'all' : 'notCalled')); }} />
+        <Stat icon="clock-alert-outline" color="#F59E0B" value={summary.pending} label="Remark pending"
+          active={view === 'pending'} onPress={() => setView(v => (v === 'pending' ? 'all' : 'pending'))} />
+        <Stat icon="timer-outline" color="#8B5CF6" value={formatDuration(summary.talkSecs) || '0s'} label="Talk time" />
+      </ScrollView>
+
+      {/* Search + tabs */}
+      <View style={s.searchWrap}>
+        <Icon name="magnify" size={18} color={colors.textMuted} />
+        <TextInput
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Search name, number, remark…"
+          placeholderTextColor={colors.textMuted}
+          style={s.searchInput}
+          returnKeyType="search"
+        />
+        {search ? (
+          <TouchableOpacity onPress={() => setSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Icon name="close-circle" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+        ) : null}
+      </View>
+
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.tabsRow}>
+        {VIEW_TABS.map(t => (
+          <TouchableOpacity key={t.key} onPress={() => setView(t.key)} style={[s.tab, view === t.key && s.tabOn]}>
+            <Text style={[s.tabTxt, view === t.key && s.tabTxtOn]}>{t.label}</Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
+      {showFilters && (
+        <View style={s.filterPanel}>
+          <Text style={s.filterLabel}>Call type</Text>
+          <View style={s.chipRow}>
+            {TYPE_FILTERS.map(t => (
+              <TouchableOpacity key={t.key} onPress={() => setCallType(t.key)} style={[s.fChip, callType === t.key && s.fChipOn]}>
+                <Icon name={t.icon} size={13} color={callType === t.key ? '#fff' : colors.textSec || colors.textMuted} />
+                <Text style={[s.fChipTxt, callType === t.key && { color: '#fff' }]}>{t.label}</Text>
+              </TouchableOpacity>
+            ))}
           </View>
+          <Text style={s.filterLabel}>Numbers</Text>
+          <View style={s.chipRow}>
+            <TouchableOpacity onPress={() => setLeadsOnly(false)} style={[s.fChip, !leadsOnly && s.fChipOn]}>
+              <Text style={[s.fChipTxt, !leadsOnly && { color: '#fff' }]}>All numbers</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setLeadsOnly(true)} style={[s.fChip, leadsOnly && s.fChipOn]}>
+              <Text style={[s.fChipTxt, leadsOnly && { color: '#fff' }]}>CRM leads only</Text>
+            </TouchableOpacity>
+          </View>
+          {activeFilterCount > 0 && (
+            <TouchableOpacity onPress={() => { setCallType('all'); setLeadsOnly(false); }} style={{ marginTop: 6 }}>
+              <Text style={{ color: colors.blue || '#2563EB', fontWeight: '700', fontSize: 13 }}>Clear filters</Text>
+            </TouchableOpacity>
+          )}
         </View>
       )}
 
@@ -575,47 +653,37 @@ export default function DayCallLogsScreen() {
         <View style={s.center}>
           <Icon name="alert-circle-outline" size={40} color={colors.textMuted} />
           <Text style={s.emptyTxt}>{error}</Text>
-          <TouchableOpacity onPress={() => fetchAll()} style={s.retryBtn}>
+          <TouchableOpacity onPress={() => fetchAll('load')} style={s.retryBtn}>
             <Text style={s.retryTxt}>Retry</Text>
           </TouchableOpacity>
         </View>
       ) : isEmpty ? (
         <View style={s.center}>
-          <Icon name="phone-check-outline" size={52} color={colors.textMuted} />
-          <Text style={s.emptyTitle}>All clear for {dayLabel}</Text>
+          <Icon name={q || activeFilterCount || view !== 'all' ? 'filter-remove-outline' : 'phone-check-outline'} size={52} color={colors.textMuted} />
+          <Text style={s.emptyTitle}>{q || activeFilterCount || view !== 'all' ? 'Nothing matches these filters' : `All clear for ${dayLabel}`}</Text>
           <Text style={s.emptyTxt}>
-            {isToday
-              ? 'No calls yet today and no pending leads.'
-              : 'No calls and no uncalled leads on this date.'}
+            {q || activeFilterCount || view !== 'all'
+              ? 'Try a different search or clear the filters.'
+              : isToday ? 'No calls yet today and no pending leads.' : 'No calls and no uncalled leads on this date.'}
           </Text>
         </View>
       ) : (
         <SectionList
           sections={sections}
-          keyExtractor={(item, i) =>
-            item._id
-              ? String(item._id)
-              : `${item.phoneNumber || ''}-${item._tsMs || i}`
-          }
-          renderItem={({ item, section }) =>
-            section.key === 'notCalled' ? (
-              <NotCalledCard item={item} onPress={openLead} colors={colors} />
-            ) : (
-              <CallLogCard item={item} onPress={openLead} colors={colors} />
-            )
-          }
-          renderSectionHeader={({ section }) => (
-            <SectionHeader section={section} colors={colors} />
-          )}
+          keyExtractor={keyExtractor}
+          renderItem={renderItem}
+          renderSectionHeader={renderSectionHeader}
+          renderSectionFooter={renderSectionFooter}
           ItemSeparatorComponent={Separator}
           contentContainerStyle={s.listContent}
           stickySectionHeadersEnabled={false}
+          initialNumToRender={12}
+          maxToRenderPerBatch={10}
+          windowSize={7}
+          removeClippedSubviews
+          keyboardShouldPersistTaps="handled"
           refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={() => fetchAll(true)}
-              tintColor={colors.blue || '#2563EB'}
-            />
+            <RefreshControl refreshing={refreshing} onRefresh={() => fetchAll('refresh')} tintColor={colors.blue || '#2563EB'} />
           }
         />
       )}
@@ -633,7 +701,16 @@ export default function DayCallLogsScreen() {
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
+// PERF: StyleSheet objects are cached per theme — rows/cards that call
+// createStyles(colors) no longer rebuild the whole sheet on every mount.
+const __styleCache = new WeakMap();
 function createStyles(colors) {
+  if (colors && __styleCache.has(colors)) return __styleCache.get(colors);
+  const out = __buildStyles(colors);
+  if (colors) __styleCache.set(colors, out);
+  return out;
+}
+function __buildStyles(colors) {
   const blue   = colors.blue   || '#2563EB';
   const green  = '#10B981';
   const amber  = '#F59E0B';
@@ -701,6 +778,43 @@ function createStyles(colors) {
 
     agentTxt: { fontSize: 10, color: colors.textMuted, marginTop: 4 },
     timeTxt:  { fontSize: 12, fontWeight: '600', color: colors.textSec || colors.textMuted },
+
+    // Filters / stats / tabs
+    filterBtn:    { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border },
+    filterBtnOn:  { backgroundColor: blue, borderColor: blue },
+    filterBadge:  { position: 'absolute', top: -4, right: -4, minWidth: 16, height: 16, borderRadius: 8, backgroundColor: red, color: '#fff', fontSize: 10, fontWeight: '800', textAlign: 'center', overflow: 'hidden' },
+    statsRow:     { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 4, gap: 8 },
+    stat:         { width: 92, paddingVertical: 10, paddingHorizontal: 10, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+    statVal:      { fontSize: 18, fontWeight: '800', color: colors.textPrimary, marginTop: 4 },
+    statLbl:      { fontSize: 11, color: colors.textMuted, fontWeight: '600', marginTop: 1 },
+    searchWrap:   { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 10, paddingHorizontal: 12, height: 42, borderRadius: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+    searchInput:  { flex: 1, color: colors.textPrimary, fontSize: 14, paddingVertical: 0 },
+    tabsRow:      { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
+    tab:          { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, borderWidth: 1, borderColor: colors.border },
+    tabOn:        { backgroundColor: blue, borderColor: blue },
+    tabTxt:       { fontSize: 13, fontWeight: '700', color: colors.textSec || colors.textMuted },
+    tabTxtOn:     { color: '#fff' },
+    filterPanel:  { marginHorizontal: 16, marginBottom: 6, padding: 12, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+    filterLabel:  { fontSize: 11, fontWeight: '800', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 },
+    chipRow:      { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 },
+    fChip:        { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 18, borderWidth: 1, borderColor: colors.border },
+    fChipOn:      { backgroundColor: blue, borderColor: blue },
+    fChipTxt:     { fontSize: 12, fontWeight: '700', color: colors.textSec || colors.textMuted },
+
+    // Section header
+    sectionHead:     { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 4, paddingTop: 16, paddingBottom: 8 },
+    sectionDot:      { width: 8, height: 8, borderRadius: 4 },
+    sectionTitle:    { fontSize: 12, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase' },
+    sectionCount:    { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10 },
+    sectionCountTxt: { fontSize: 11, fontWeight: '800' },
+    moreBtn:         { alignItems: 'center', paddingVertical: 12, marginTop: 8, borderRadius: 12, borderWidth: 1, borderColor: colors.border, borderStyle: 'dashed' },
+    moreTxt:         { color: blue, fontWeight: '700', fontSize: 13 },
+
+    // Card extras
+    waitPill:     { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 8, backgroundColor: red + '14', marginLeft: 6 },
+    waitPillLate: { backgroundColor: red + '24' },
+    pendingPill:  { flexDirection: 'row', alignItems: 'center', gap: 5, alignSelf: 'flex-start', paddingHorizontal: 9, paddingVertical: 4, borderRadius: 8, backgroundColor: amber + '18', marginTop: 2 },
+    callNowBtn:   { width: 34, height: 34, borderRadius: 17, backgroundColor: green, alignItems: 'center', justifyContent: 'center', alignSelf: 'center' },
 
     // Empty / center
     center:     { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, paddingTop: 60 },

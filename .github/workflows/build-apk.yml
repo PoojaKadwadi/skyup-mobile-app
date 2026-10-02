@@ -1,0 +1,85 @@
+# Builds an installable Android APK in the cloud (GitHub Actions).
+# Push to GitHub -> Actions tab -> "Build Android APK" -> Run workflow.
+# The APK appears under the run's "Artifacts" (and as a Release when you push a tag like v1.1.0).
+#
+# Optional repository secrets (Settings -> Secrets and variables -> Actions):
+#   GOOGLE_SERVICES_JSON      - full contents of google-services.json (needed for push notifications)
+#   RELEASE_KEYSTORE_BASE64   - base64 of your .keystore file (keep the SAME key for every update)
+#   RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD
+# Without the keystore secrets the APK is signed with the debug key (still installs fine).
+
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install JS dependencies
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Add google-services.json
+        env:
+          GSJ: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GSJ" ]; then echo "$GSJ" > android/app/google-services.json; echo "google-services.json added"; else echo "No GOOGLE_SERVICES_JSON secret - push notifications disabled"; fi
+
+      - name: Add release keystore
+        env:
+          KS: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          SP: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KA: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KP: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KS" ]; then
+            echo "$KS" | base64 -d > android/app/release.keystore
+            {
+              echo "MYAPP_RELEASE_STORE_FILE=release.keystore"
+              echo "MYAPP_RELEASE_KEY_ALIAS=$KA"
+              echo "MYAPP_RELEASE_STORE_PASSWORD=$SP"
+              echo "MYAPP_RELEASE_KEY_PASSWORD=$KP"
+            } >> android/gradle.properties
+            echo "Release keystore configured"
+          else
+            echo "No keystore secret - signing with debug key"
+          fi
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkyUpCRM-APK
+          path: android/app/build/outputs/apk/release/*.apk
+
+      - name: Publish release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: android/app/build/outputs/apk/release/*.apk

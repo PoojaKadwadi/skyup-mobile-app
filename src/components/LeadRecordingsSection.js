@@ -358,6 +358,16 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// ── Serial auto-upload queue (no manual Upload button) ───────────────────────
+// Rows enqueue themselves; uploads run one at a time so the network isn't
+// flooded when a lead has many recordings.
+let _uploadChain = Promise.resolve();
+function enqueueUpload(task) {
+  const run = _uploadChain.then(task, task);
+  _uploadChain = run.catch(() => {});
+  return run;
+}
+
 // ── Recording row ─────────────────────────────────────────────────────────────
 // PERF FIX: uploadedSet is now passed from the parent (loaded once) instead of
 // each row independently calling AsyncStorage. This reduces N async reads to 1.
@@ -372,6 +382,8 @@ function RecordingRow({ item, leadId, phoneNumber, uploadedSet }) {
   const [status, setStatus] = useState(() => uploadedSet.has(fileKey) ? 'done' : 'idle');
 
   const handleUpload = async () => {
+    setStatus('queued');
+    await enqueueUpload(async () => {
     setStatus('uploading');
     try {
       const fileMs  = item.modifiedAt ? new Date(item.modifiedAt).getTime() : Date.now();
@@ -385,9 +397,14 @@ function RecordingRow({ item, leadId, phoneNumber, uploadedSet }) {
       setStatus('done');
     } catch (e) {
       setStatus('failed');
-      Alert.alert('Upload Failed', e.message || 'Could not upload recording.');
     }
+    });
   };
+
+  // Upload automatically as soon as an un-synced recording is shown.
+  useEffect(() => {
+    if (status === 'idle') handleUpload();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <View style={styles.recRow}>
@@ -416,20 +433,17 @@ function RecordingRow({ item, leadId, phoneNumber, uploadedSet }) {
         <ActivityIndicator size="small" color="#7C3AED" style={{ paddingHorizontal: 12 }} />
       ) : status === 'checking' ? (
         <ActivityIndicator size="small" color={colors.textMuted} style={{ paddingHorizontal: 12 }} />
-      ) : (
-        <TouchableOpacity
-          style={[styles.uploadBtn, status === 'failed' && styles.uploadBtnFailed]}
-          onPress={handleUpload}
-        >
-          <Icon
-            name={status === 'failed' ? 'reload' : 'cloud-upload-outline'}
-            size={14}
-            color={status === 'failed' ? '#EF4444' : '#A78BFA'}
-          />
-          <Text style={[styles.uploadBtnText, status === 'failed' && { color: '#EF4444' }]}>
-            {status === 'failed' ? 'Retry' : 'Upload'}
-          </Text>
+      ) : status === 'failed' ? (
+        // Auto-retry: tapping is optional — the background sweep retries too.
+        <TouchableOpacity style={[styles.uploadBtn, styles.uploadBtnFailed]} onPress={handleUpload}>
+          <Icon name="reload" size={14} color="#EF4444" />
+          <Text style={[styles.uploadBtnText, { color: '#EF4444' }]}>Retrying</Text>
         </TouchableOpacity>
+      ) : (
+        <View style={styles.uploadBtn}>
+          <Icon name="cloud-clock-outline" size={14} color="#A78BFA" />
+          <Text style={styles.uploadBtnText}>Syncing</Text>
+        </View>
       )}
     </View>
   );
@@ -605,7 +619,16 @@ function LeadRecordingsSection({ lead }) {
   );
 }
 
+// PERF: StyleSheet objects are cached per theme — rows/cards that call
+// createStyles(colors) no longer rebuild the whole sheet on every mount.
+const __styleCache = new WeakMap();
 function createStyles(colors) {
+  if (colors && __styleCache.has(colors)) return __styleCache.get(colors);
+  const out = __buildStyles(colors);
+  if (colors) __styleCache.set(colors, out);
+  return out;
+}
+function __buildStyles(colors) {
   return StyleSheet.create({
   section:         { paddingHorizontal: 16, marginBottom: 20 },
   sectionHeader:   { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10, gap: 8 },

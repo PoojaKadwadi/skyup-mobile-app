@@ -64,14 +64,10 @@ let _registered = false;
 
 // ── Preference helpers ────────────────────────────────────────────────────────
 // Default ON — most users want auto-upload; they can turn it off in settings.
+// Auto-upload is now ALWAYS ON (no manual upload / no toggle in the app):
+// every call's recording is uploaded automatically. Old "off" prefs are ignored.
 export async function isAutoUploadEnabled() {
-  try {
-    const raw = await AsyncStorage.getItem(PREF_KEY);
-    if (raw === null) return true;          // default ON
-    return raw === 'true';
-  } catch {
-    return true;
-  }
+  return true;
 }
 
 async function setAutoUploadPref(enabled) {

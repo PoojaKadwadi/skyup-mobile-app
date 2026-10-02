@@ -240,11 +240,13 @@ function formatSize(bytes) {
 // PERF: memoized row. Receives only its OWN isUploading/isDone booleans (not the
 // whole uploading/uploaded maps), so changing one file's status re-renders only
 // that row instead of the entire list.
-const RecordingRow = memo(function RecordingRow({ item, isUploading, isDone, onUpload }) {
+// No manual upload: every recording is uploaded automatically (see the
+// auto-upload queue in RecordingsScreen + backgroundSyncService). Rows only
+// show status: Syncing → Synced (or Retrying / No number).
+const RecordingRow = memo(function RecordingRow({ item, isUploading, isDone, isFailed }) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const phone = extractPhone(item.name);
-  const handleUpload = useCallback(() => onUpload(item), [onUpload, item]);
 
   return (
     <View style={styles.card}>
@@ -272,12 +274,9 @@ const RecordingRow = memo(function RecordingRow({ item, isUploading, isDone, onU
           <Icon name="check-circle" size={18} color={colors.greenLight} />
         </View>
       ) : phone ? (
-        <TouchableOpacity
-          style={[styles.statusBadge, styles.statusBadgeUpload]}
-          onPress={handleUpload}
-        >
-          <Icon name="cloud-upload-outline" size={18} color={colors.blueLight} />
-        </TouchableOpacity>
+        <View style={[styles.statusBadge, styles.statusBadgeUpload]}>
+          <Icon name={isFailed ? 'cloud-refresh' : 'cloud-clock-outline'} size={18} color={isFailed ? colors.amber || '#F59E0B' : colors.blueLight} />
+        </View>
       ) : (
         <View style={styles.statusBadge}>
           <Icon name="cloud-clock-outline" size={18} color={colors.textSec} />
@@ -285,7 +284,7 @@ const RecordingRow = memo(function RecordingRow({ item, isUploading, isDone, onU
       )}
 
       <Text style={isDone ? styles.autoLabelDone : styles.autoLabelPending}>
-        {isUploading ? 'Uploading' : isDone ? 'Uploaded' : phone ? 'Upload' : 'Pending'}
+        {isUploading ? 'Syncing' : isDone ? 'Synced' : !phone ? 'No number' : isFailed ? 'Retrying' : 'Queued'}
       </Text>
     </View>
   );
@@ -327,19 +326,18 @@ export default function RecordingsScreen() {
   const [loading,       setLoading]       = useState(false);
   const [uploading,     setUploading]     = useState({});
   const [uploaded,      setUploaded]      = useState({});
+  const [failed,        setFailed]        = useState({});
+  const queueRunningRef = useRef(false);
   const uploadedSetRef  = useRef(new Set());
 
   useEffect(() => {
     loadUploadedSet().then(set => { uploadedSetRef.current = set; });
   }, []);
 
-  // ── Manual upload handler (for recordings that weren't auto-uploaded) ────
+  // ── Automatic upload (no button) — one file at a time, silent ────────────
   const handleUpload = useCallback(async (item) => {
     const phone = extractPhone(item.name);
-    if (!phone) {
-      Alert.alert('Cannot Upload', 'No phone number found in filename. Cannot associate this recording with a call.');
-      return;
-    }
+    if (!phone) return;
 
     const fileMs  = new Date(item.modifiedAt).getTime();
     const fileKey = makeFileKey(item.name, phone, fileMs);
@@ -363,12 +361,30 @@ export default function RecordingsScreen() {
       uploadedSetRef.current.add(fileKey);
       await saveUploadedSet(uploadedSetRef.current);
       setUploaded(prev => ({ ...prev, [item.path]: true }));
+      setFailed(prev => ({ ...prev, [item.path]: false }));
     } catch (e) {
-      Alert.alert('Upload Failed', e.message || 'Could not upload recording.');
+      setFailed(prev => ({ ...prev, [item.path]: true })); // retried on next scan
     } finally {
       setUploading(prev => ({ ...prev, [item.path]: false }));
     }
   }, []);
+
+  // Upload every not-yet-synced recording automatically, oldest first.
+  const autoUploadPending = useCallback(async (list, doneMap) => {
+    if (queueRunningRef.current) return;
+    queueRunningRef.current = true;
+    try {
+      const pending = list
+        .filter(rec => extractPhone(rec.name) && !doneMap[rec.path])
+        .sort((a, b) => new Date(a.modifiedAt) - new Date(b.modifiedAt));
+      for (const rec of pending) {
+        // eslint-disable-next-line no-await-in-loop
+        await handleUpload(rec);
+      }
+    } finally {
+      queueRunningRef.current = false;
+    }
+  }, [handleUpload]);
 
   const scanRecordings = useCallback((silent = false) => {
     setLoading(true);
@@ -394,6 +410,7 @@ export default function RecordingsScreen() {
         });
         setUploaded(initialUploaded);
         setRecordings(found);
+        autoUploadPending(found, initialUploaded);
 
         if (!silent && found.length === 0) {
           Alert.alert(
@@ -408,7 +425,7 @@ export default function RecordingsScreen() {
         setLoading(false);
       }
     });
-  }, []);
+  }, [autoUploadPending]);
 
   // Auto-scan on mount
   useEffect(() => {
@@ -425,9 +442,9 @@ export default function RecordingsScreen() {
       item={item}
       isUploading={uploading[item.path] || false}
       isDone={uploaded[item.path] || false}
-      onUpload={handleUpload}
+      isFailed={failed[item.path] || false}
     />
-  ), [uploading, uploaded, handleUpload]);
+  ), [uploading, uploaded, failed]);
 
   // FIX: moment instead of Intl
   const todayLabel = moment().format('ddd, DD MMM');
@@ -491,7 +508,16 @@ export default function RecordingsScreen() {
   );
 }
 
+// PERF: StyleSheet objects are cached per theme — rows/cards that call
+// createStyles(colors) no longer rebuild the whole sheet on every mount.
+const __styleCache = new WeakMap();
 function createStyles(colors) {
+  if (colors && __styleCache.has(colors)) return __styleCache.get(colors);
+  const out = __buildStyles(colors);
+  if (colors) __styleCache.set(colors, out);
+  return out;
+}
+function __buildStyles(colors) {
 return StyleSheet.create({
   container:          { flex: 1, backgroundColor: colors.bg },
   header:             { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 52, paddingBottom: 14, backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },

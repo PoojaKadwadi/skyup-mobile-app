@@ -140,7 +140,9 @@ export const addCallRemark = async(leadId, { remark, outcome, followUpDate, indu
     const payload = { remark, outcome };
     if (followUpDate)           payload.followUpDate = followUpDate;
     if (industry !== undefined) payload.industry     = industry;
-    if (service  !== undefined) payload.service      = service;
+    // `service` may be an array (multi-select) — send services[] + first as service.
+    if (Array.isArray(service)) { payload.services = service; payload.service = service[0] || ''; }
+    else if (service !== undefined) payload.service = service;
     // ── Include status in the same PATCH so it's one atomic request ──────────
     // Previously status was sent as a separate patchLead call, creating a race
     // condition between two concurrent PATCH requests. Sending both together
@@ -203,7 +205,8 @@ export const addCallRemarkWithAttachments = async(
     form.append('outcome', outcome);
     if (followUpDate)           form.append('followUpDate', followUpDate);
     if (industry !== undefined) form.append('industry', industry);
-    if (service  !== undefined) form.append('service',  service);
+    if (Array.isArray(service)) { form.append('services', service.join(',')); form.append('service', service[0] || ''); }
+    else if (service !== undefined) form.append('service',  service);
     if (status   !== undefined) form.append('status',   status);
 
     if (document) {
@@ -338,6 +341,7 @@ function formatLead(lead) {
         // like the value had been wiped on refresh, even on a save that had
         // actually succeeded on the backend.
         service: lead.service || '',
+        services: Array.isArray(lead.services) ? lead.services : (lead.service ? [lead.service] : []),
         status: lead.status || 'New',
         date: lead.date,
         // FIX: store as numeric timestamp (ms) not a Date object.

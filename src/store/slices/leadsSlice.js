@@ -190,7 +190,8 @@ export const submitCallRemark = createAsyncThunk(
         // (e.g. multipart upload path returns the full lead; plain JSON path
         // returns the updated lead doc — both have industry/service/status).
         industry:     updatedLead?.industry     ?? industry,
-        service:      updatedLead?.service      ?? service,
+        service:      updatedLead?.service      ?? (Array.isArray(service) ? (service[0] || '') : service),
+        services:     updatedLead?.services     ?? (Array.isArray(service) ? service : undefined),
         status:       updatedLead?.status       ?? status,
         followUpDate: updatedLead?.followUpDate ?? followUpDate,
       };
@@ -300,7 +301,7 @@ const leadsSlice = createSlice({
     });
 
     builder.addCase(submitCallRemark.fulfilled, (state, action) => {
-      const { leadId, remark, outcome, followUpDate, industry, service, status, hasDocument, hasRecording } = action.payload;
+      const { leadId, remark, outcome, followUpDate, industry, service, services, status, hasDocument, hasRecording } = action.payload;
 
       // Update the full cache with the new callHistory entry
       if (_fullLeadCache.has(leadId)) {
@@ -321,6 +322,7 @@ const leadsSlice = createSlice({
           ...(followUpDate !== undefined ? { followUpDate } : {}),
           ...(industry     !== undefined ? { industry }    : {}),
           ...(service      !== undefined ? { service  }    : {}),
+          ...(services     !== undefined ? { services }    : {}),
           callHistory: [...(full.callHistory || []), newEntry],
         });
       }
