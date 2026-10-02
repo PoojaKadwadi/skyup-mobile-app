@@ -48,6 +48,20 @@ function getScopedConfirmedKey() {
 let messaging = null;
 try {
   messaging = require('@react-native-firebase/messaging').default;
+  // CRASH FIX: if the APK was built WITHOUT android/app/google-services.json,
+  // Firebase has no default app and every messaging() call throws
+  // "No Firebase App '[DEFAULT]' has been created" — uncaught, that closed the
+  // app on launch. Treat that exactly like "Firebase not installed": push
+  // notifications are simply off, everything else keeps working.
+  try {
+    const firebaseApp = require('@react-native-firebase/app').default;
+    if (!firebaseApp || !Array.isArray(firebaseApp.apps) || firebaseApp.apps.length === 0) {
+      console.warn('[FCMToken] Firebase not configured (google-services.json missing) — push notifications disabled.');
+      messaging = null;
+    }
+  } catch (_) {
+    messaging = null;
+  }
 } catch (e) {
   console.warn(
     '[FCMToken] @react-native-firebase/messaging not installed.\n' +
@@ -113,13 +127,17 @@ export async function registerFCMToken() {
 export function startFCMTokenRefreshListener() {
   if (!messaging) return () => {};
 
-  const unsubscribe = messaging().onTokenRefresh(async (newToken) => {
-    console.log('[FCMToken] Token refreshed — updating backend');
-    await AsyncStorage.removeItem(getScopedConfirmedKey()).catch(() => {});
-    await sendTokenToBackend(newToken);
-  });
-
-  return unsubscribe;
+  try {
+    const unsubscribe = messaging().onTokenRefresh(async (newToken) => {
+      console.log('[FCMToken] Token refreshed — updating backend');
+      await AsyncStorage.removeItem(getScopedConfirmedKey()).catch(() => {});
+      await sendTokenToBackend(newToken);
+    });
+    return unsubscribe;
+  } catch (e) {
+    console.warn('[FCMToken] onTokenRefresh unavailable:', e.message);
+    return () => {};
+  }
 }
 
 export async function clearFCMToken() {
@@ -197,12 +215,16 @@ export function handleFCMBackgroundMessages() {
 export function startFCMForegroundListener() {
   if (!messaging) return () => {};
 
-  const unsubscribe = messaging().onMessage(async (remoteMessage) => {
-    console.log('[FCMToken] Foreground FCM message received:', remoteMessage.data?.type);
-    await displayFCMNotification(remoteMessage.data);
-  });
-
-  return unsubscribe;
+  try {
+    const unsubscribe = messaging().onMessage(async (remoteMessage) => {
+      console.log('[FCMToken] Foreground FCM message received:', remoteMessage.data?.type);
+      try { await displayFCMNotification(remoteMessage.data); } catch (_) { /* ignore */ }
+    });
+    return unsubscribe;
+  } catch (e) {
+    console.warn('[FCMToken] onMessage unavailable:', e.message);
+    return () => {};
+  }
 }
 
 export function getFCMNavigationTarget(data) {
@@ -261,12 +283,15 @@ export function registerFCMNotificationOpenHandlers(navigationRef) {
     if (target) navigate(target.screen, target.params);
   };
 
-  const unsubscribeOpened = messaging().onNotificationOpenedApp(handleOpen);
-
-  messaging()
-    .getInitialNotification()
-    .then(remoteMessage => { if (remoteMessage) handleOpen(remoteMessage); })
-    .catch(e => console.warn('[FCMToken] getInitialNotification error:', e.message));
-
-  return unsubscribeOpened;
+  try {
+    const unsubscribeOpened = messaging().onNotificationOpenedApp(handleOpen);
+    messaging()
+      .getInitialNotification()
+      .then(remoteMessage => { if (remoteMessage) handleOpen(remoteMessage); })
+      .catch(e => console.warn('[FCMToken] getInitialNotification error:', e.message));
+    return unsubscribeOpened;
+  } catch (e) {
+    console.warn('[FCMToken] notification-open handlers unavailable:', e.message);
+    return () => {};
+  }
 }

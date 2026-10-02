@@ -113,9 +113,10 @@ const NAMED_COLORS = {
 function findStatus(key, c = _state) {
   const list = Array.isArray(c?.statuses) ? c.statuses : [];
   const k = String(key || '').toLowerCase();
-  return list.find((x) => String(x.key).toLowerCase() === k)
-      || list.find((x) => String(x.label || '').toLowerCase() === k)
-      || list.find((x) => (x.aliases || []).some((a) => String(a).toLowerCase() === k))
+  if (!k) return null;
+  return list.find((x) => x && String(x.key).toLowerCase() === k)
+      || list.find((x) => x && String(x.label || '').toLowerCase() === k)
+      || list.find((x) => x && Array.isArray(x.aliases) && x.aliases.some((a) => String(a).toLowerCase() === k))
       || null;
 }
 /** Display label for a stored status key (falls back to the key itself). */
@@ -123,6 +124,6 @@ export const statusLabel = (key, c = _state) => (findStatus(key, c)?.label || ke
 /** Hex colour for a status (company colour name → hex), or null if unknown. */
 export function statusColor(key, c = _state) {
   const col = findStatus(key, c)?.color;
-  if (!col) return null;
-  return col.startsWith('#') ? col : (NAMED_COLORS[col] || null);
+  if (!col || typeof col !== 'string') return null;
+  return col.startsWith('#') ? col : (NAMED_COLORS[col.toLowerCase()] || null);
 }
