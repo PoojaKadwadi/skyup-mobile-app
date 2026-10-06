@@ -32,7 +32,7 @@ import { useNavigation, useRoute,
 import Icon                             from 'react-native-vector-icons/MaterialCommunityIcons';
 import {
   fetchLeads, fetchLeadsDelta, loadLeadsSmart, selectFilteredLeads,
-  setSearchQuery, setFilterStatus, isFollowUpDue,
+  setSearchQuery, setFilterStatus, isFollowUpDue, getEffectiveFollowUp, getScheduledFollowUp,
 } from '../../store/slices/leadsSlice';
 import CallButton                    from '../../components/CallButton';
 import { RADIUS, FONT }              from '../../theme/tokens';
@@ -353,6 +353,39 @@ function TempBadge({ temp }) {
   );
 }
 
+// "📅 Today 1:00 PM" chip for an agent-set follow-up (red when overdue).
+// Plain string formatting (no Intl/toLocale*) — cheap on Hermes for long lists.
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function fmtFollowUp(d) {
+  const now = new Date();
+  const dayKey = (x) => x.getFullYear() * 10000 + x.getMonth() * 100 + x.getDate();
+  const tmr = new Date(now); tmr.setDate(now.getDate() + 1);
+  const h = d.getHours(), m = d.getMinutes();
+  const time = `${h % 12 || 12}:${m < 10 ? '0' : ''}${m} ${h < 12 ? 'am' : 'pm'}`;
+  const k = dayKey(d);
+  const day = k === dayKey(now) ? 'Today' : k === dayKey(tmr) ? 'Tomorrow'
+            : `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+  return { label: `${day} ${time}`, overdue: d.getTime() < now.getTime() };
+}
+
+function FollowUpChip({ item }) {
+  const { colors } = useTheme();
+  // Recomputed only when this lead's follow-up data changes.
+  const info = useMemo(() => {
+    const d = getScheduledFollowUp(item);
+    return d ? fmtFollowUp(d) : null;
+  }, [item.pendingScheduledCalls, item.followUpDate]);
+  if (!info) return null;
+  const { label, overdue } = info;
+  const clr  = overdue ? colors.red : colors.amber;
+  return (
+    <View style={[badge.wrap, { backgroundColor: clr + '1A', borderWidth: 1, borderColor: clr + '55' }]}>
+      <Icon name="calendar-clock" size={10} color={clr} />
+      <Text style={[badge.txt, { color: clr }]}>{label}</Text>
+    </View>
+  );
+}
+
 const LeadRow = memo(function LeadRow({ item, leadId, onPress, onCallStart }) {
   const { colors } = useTheme();
   const s  = useMemo(() => createStyles(colors), [colors]);
@@ -382,6 +415,7 @@ const LeadRow = memo(function LeadRow({ item, leadId, onPress, onCallStart }) {
         <View style={s.tagRow}>
           <StatusBadge status={item.status} />
           <TempBadge temp={item.Quality || item.temperature} />
+          <FollowUpChip item={item} />
         </View>
         {item.campaign && item.campaign !== '—' && (
           <Text style={s.leadCampaign} numberOfLines={1}>{item.campaign}</Text>
@@ -394,7 +428,8 @@ const LeadRow = memo(function LeadRow({ item, leadId, onPress, onCallStart }) {
               color={item.remarkIsManual ? colors.purpleLight : colors.textMuted}
               style={s.remarkIcon}
             />
-            <Text style={s.remark}>"{item.remark}"</Text>
+            {/* 2 lines max — Facebook form leads carry very long auto remarks */}
+            <Text style={s.remark} numberOfLines={2}>"{item.remark}"</Text>
           </View>
         ) : null}
       </View>
@@ -432,6 +467,7 @@ export default function LeadsScreen() {
   const leadsError    = useSelector(s => s.leads.error);
   const searchQuery   = useSelector(s => s.leads.searchQuery);
   const filterStatus  = useSelector(s => s.leads.filterStatus);
+  const filtersResetAt = useSelector(s => s.leads.filtersResetAt);
   const lastFetchedAt = useSelector(s => s.leads.lastFetchedAt);
 
   // Same derivation as CallLogsScreen.js's isAdmin — the backend already
@@ -595,7 +631,10 @@ export default function LeadsScreen() {
 
   const displayed = useMemo(() => {
     let res = followUpOnly ? [...allItems] : [...filteredLeads];
-    if (followUpOnly)          res = res.filter(isFollowUpDue);
+    // Follow-ups list: everything due today/overdue (incl. auto next-day
+    // follow-ups, same rule as the Dashboard count) PLUS agent-set follow-ups
+    // on later days, so a follow-up the agent just added is always visible.
+    if (followUpOnly)          res = res.filter(l => isFollowUpDue(l) || !!getScheduledFollowUp(l));
     if (filterTemp !== 'All')  res = res.filter(l => (l.Quality || l.temperature) === filterTemp);
     if (filterIndustry !== 'All') {
       res = filterIndustry === 'Untagged'
@@ -609,7 +648,18 @@ export default function LeadsScreen() {
         : res.filter(l => l.source === filterSource);
     }
     // Sort
-    if (sortBy === 'recent') {
+    if (followUpOnly && sortBy === 'recent') {
+      // Agent-set follow-ups first, by time (overdue → today 1 PM → tomorrow…),
+      // then auto-derived ones.
+      // Compute each lead's sort key ONCE (not inside the comparator, which
+      // would recompute it ~n·log n times).
+      const keyed = res.map(l => {
+        const f = getEffectiveFollowUp(l);
+        return { l, g: f ? (f.auto ? 1 : 0) : 2, t: f ? f.date.getTime() : 0 };
+      });
+      keyed.sort((a, b) => a.g - b.g || a.t - b.t);
+      res = keyed.map(x => x.l);
+    } else if (sortBy === 'recent') {
       // Most recently called or created — uses _raw_date which is max(createdAt, lastCalledAt)
       res.sort((a, b) => (b._raw_date || 0) - (a._raw_date || 0));
     } else if (sortBy === 'date_desc') {
@@ -685,6 +735,11 @@ export default function LeadsScreen() {
 
   const keyExtractor = useCallback((item) => item.id, []);
 
+  // Search/filters are cleared when the app is closed and reopened (see
+  // App.js → resetLeadFilters). Redux search/status are reset there; this
+  // clears the screen's own local filters too. Skips the initial mount.
+  const lastResetSeenRef = useRef(filtersResetAt);
+
   const clearAllFilters = useCallback(() => {
     handleSearchClear();
     dispatch(setFilterStatus('all'));
@@ -702,6 +757,12 @@ export default function LeadsScreen() {
     isNearTopRef.current = true;
     scrollToTop(false);
   }, [dispatch, handleSearchClear, scrollToTop]);
+
+  useEffect(() => {
+    if (filtersResetAt === lastResetSeenRef.current) return;
+    lastResetSeenRef.current = filtersResetAt;
+    clearAllFilters();
+  }, [filtersResetAt, clearAllFilters]);
 
   const hasActiveFilters = !!(
     localSearch || filterStatus !== 'all' || filterTemp !== 'All' ||
@@ -799,7 +860,7 @@ export default function LeadsScreen() {
       {followUpOnly && (
         <TouchableOpacity style={s.followUpBanner} onPress={clearAllFilters} activeOpacity={0.8}>
           <Icon name="calendar-clock" size={14} color={colors.amber} />
-          <Text style={s.followUpBannerTxt}>Showing follow-ups due today or overdue</Text>
+          <Text style={s.followUpBannerTxt}>Follow-ups: overdue & today first, then upcoming</Text>
           <Icon name="close-circle" size={15} color={colors.amber} />
         </TouchableOpacity>
       )}
@@ -902,7 +963,9 @@ export default function LeadsScreen() {
         scrollEventThrottle={100}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
-        getItemLayout={getItemLayout}
+        // getItemLayout removed: it assumed every card is 88px, but cards are
+        // taller and vary (campaign / remark / follow-up lines), which made
+        // FlatList skip and mis-position rows while scrolling.
         initialNumToRender={8}
         maxToRenderPerBatch={8}
         updateCellsBatchingPeriod={50}

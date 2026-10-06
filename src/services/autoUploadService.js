@@ -42,7 +42,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import notifee, { AndroidImportance, AndroidForegroundServiceType } from '@notifee/react-native';
 
 const PREF_KEY      = 'auto_upload_enabled_v1';
-const CHANNEL_ID    = 'auto_upload_service';
+// v2: new channel with badge disabled — Android channel settings can't be
+// changed after creation, so the old channel is deleted in ensureChannel().
+const OLD_CHANNEL_ID = 'auto_upload_service';
+const CHANNEL_ID    = 'auto_upload_service_v2';
 const CHANNEL_NAME  = 'Auto-Upload Service';
 const NOTIF_ID      = 'auto-upload-fgs';
 
@@ -77,10 +80,12 @@ async function setAutoUploadPref(enabled) {
 // ── Channel ───────────────────────────────────────────────────────────────────
 async function ensureChannel() {
   if (Platform.OS !== 'android') return;
+  try { await notifee.deleteChannel(OLD_CHANNEL_ID); } catch {}
   await notifee.createChannel({
     id:         CHANNEL_ID,
     name:       CHANNEL_NAME,
     importance: AndroidImportance.LOW,   // LOW = no sound, minimal intrusion
+    badge:      false,                   // never adds a dot/count on the app icon
   });
 }
 

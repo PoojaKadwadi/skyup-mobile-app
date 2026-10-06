@@ -106,8 +106,32 @@ async function _loadBadgeCount() {
   } catch { _badgeCount = 0; }
 }
 
+// FIX ("999+ even after clearing notifications"):
+// The old code kept a running total that ONLY ever went up — it was saved in
+// AsyncStorage, never reset (resetBadgeCount() was not called anywhere), and
+// bumped again every time a follow-up/new-lead/reassign check re-posted a
+// notification with the same id. Each notification carried that lifetime
+// total as its badge number, so after a few days every new notification told
+// the launcher "1500" → shown as 999+, no matter how often the shade was cleared.
+//
+// Now the badge = notifications ACTUALLY in the shade right now + the new
+// one(s). Clearing the shade really resets it. The persistent "Auto-upload
+// active" service notification is not counted.
+const NON_BADGE_IDS = new Set(['auto-upload-fgs']);
+const MAX_BADGE     = 99;
+
 async function _incrementBadge(n = 1) {
-  _badgeCount = Math.max(0, _badgeCount + n);
+  let inShade = 0;
+  try {
+    if (notifee && typeof notifee.getDisplayedNotifications === 'function') {
+      const shown = await notifee.getDisplayedNotifications();
+      inShade = (shown || []).filter(d => {
+        const id = d?.id || d?.notification?.id;
+        return !NON_BADGE_IDS.has(id);
+      }).length;
+    }
+  } catch { inShade = 0; }
+  _badgeCount = Math.min(MAX_BADGE, Math.max(0, inShade + n));
   try {
     await AsyncStorage.setItem(BADGE_COUNT_KEY, String(_badgeCount));
     if (notifee && typeof notifee.setBadgeCount === 'function') {
@@ -372,6 +396,150 @@ export async function checkAndNotifyNewLeads(leads) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// scheduleLeadFollowUp() — EXACT-TIME follow-up reminders
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX ("follow-up date & time added but no notification"):
+// Lead follow-ups were only ever shown by checkAndNotifyFollowUps(), a JS
+// poll that runs every ~5 min from backgroundSyncService and only while the
+// app process is alive. When the phone was idle/locked (Doze), the app was in
+// the background, or Android had closed it, the poll never ran inside the
+// 15-min window — so no notification at all. (Meetings already used scheduled
+// trigger notifications; lead follow-ups never did.)
+//
+// Now every future follow-up is handed to Android as a scheduled alarm
+// (AlarmManager, exact + allowed while idle), so it fires on time even if
+// the app is closed or the phone is locked:
+//   • FOLLOWUP_BEFORE_MIN minutes before  → "Follow-up call in 10 min"
+//   • at the exact time                    → "Follow-up call now"
+// IDs are deterministic (lfu_<leadId>_<ms>_before|attime), so re-scheduling
+// replaces instead of duplicating; an older time for the same lead is
+// cancelled when the follow-up is moved.
+// Main reminder fires AT the follow-up time (e.g. "demo at 1 PM" → 1:00 PM).
+// Optional heads-up this many minutes earlier; set to 0 to send ONLY the
+// at-time reminder.
+const FOLLOWUP_BEFORE_MIN   = 10;
+const FOLLOWUP_SCHEDULE_MAX = 60;                    // keep well under Android's alarm cap
+const FOLLOWUP_LOOKAHEAD_MS = 14 * 24 * 60 * 60 * 1000;
+
+function _exactTrigger(timestamp) {
+  const TriggerType = notifee.TriggerType ?? require('@notifee/react-native').TriggerType;
+  return {
+    type: TriggerType?.TIMESTAMP ?? 0,
+    timestamp,
+    // 3 = AlarmType.SET_EXACT_AND_ALLOW_WHILE_IDLE — fires through Doze.
+    alarmManager: { type: 3 },
+  };
+}
+
+async function _createFollowUpTrigger(notification, timestamp) {
+  try {
+    await notifee.createTriggerNotification(notification, _exactTrigger(timestamp));
+  } catch (e) {
+    // Exact-alarm access not granted (Android 12 with SCHEDULE_EXACT_ALARM
+    // denied) → fall back to an inexact schedule rather than nothing.
+    const TriggerType = notifee.TriggerType ?? require('@notifee/react-native').TriggerType;
+    await notifee.createTriggerNotification(notification, {
+      type: TriggerType?.TIMESTAMP ?? 0, timestamp,
+      alarmManager: { allowWhileIdle: true },
+    });
+  }
+}
+
+const _followUpDedupKey = (leadId, whenMs) => `${leadId}_${new Date(whenMs).toISOString()}`;
+
+/**
+ * Schedule reminders for one lead follow-up.
+ * @param {{leadId:string, leadName?:string, when:string|number|Date, label?:string, note?:string}} f
+ * @returns {Promise<boolean>} true if at least one reminder was scheduled
+ */
+export async function scheduleLeadFollowUp(f, existingIds = null) {
+  if (!notifee || !f?.leadId || !f?.when) return false;
+  const whenMs = new Date(f.when).getTime();
+  if (isNaN(whenMs)) return false;
+  const now = serverNow();
+  if (whenMs <= now) return false;
+
+  const leadId = String(f.leadId);
+  const base   = `lfu_${leadId}_${whenMs}`;
+  const label  = f.label || 'Follow-up call';
+  const body   = `${f.leadName || 'Lead'}${f.note ? ` · ${f.note}` : ''}`;
+  const common = {
+    data: { leadId, type: 'follow_up' },
+    android: {
+      channelId:     CHANNEL_FOLLOW_UP,
+      importance:    IMPORTANCE_HIGH,
+      smallIcon:     'ic_notification',
+      timestamp:     whenMs,
+      showTimestamp: true,
+      pressAction:   { id: 'open_lead', launchActivity: 'default' },
+    },
+    ios: { sound: 'default' },
+  };
+
+  // PERF: the 5-min poll passes the already-scheduled IDs; if this exact
+  // follow-up is already scheduled, skip all native calls.
+  if (existingIds && existingIds.has(`${base}_attime`)) {
+    try { await notifiedDedup.getSet(); notifiedDedup.add(_followUpDedupKey(leadId, whenMs)); } catch {}
+    return true;
+  }
+
+  let ok = false;
+  try {
+    // Moved follow-up → drop reminders still pending for this lead's old time.
+    if (typeof notifee.getTriggerNotificationIds === 'function') {
+      const ids   = existingIds ? [...existingIds] : await notifee.getTriggerNotificationIds();
+      const stale = (ids || []).filter(id =>
+        id.startsWith(`lfu_${leadId}_`) && !id.startsWith(base));
+      if (stale.length) await notifee.cancelTriggerNotifications(stale);
+    }
+
+    const beforeMs = whenMs - FOLLOWUP_BEFORE_MIN * 60 * 1000;
+    if (FOLLOWUP_BEFORE_MIN > 0 && beforeMs > now) {
+      await _createFollowUpTrigger({
+        ...common, id: `${base}_before`,
+        title: `📞 ${label} in ${FOLLOWUP_BEFORE_MIN} min`, body,
+      }, beforeMs);
+      ok = true;
+    }
+    // The reminder at the exact time the agent picked. Shows what was agreed
+    // (the remark, e.g. "Demo at 1 PM") so the agent knows why to call.
+    const timeStr = new Date(whenMs).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
+    await _createFollowUpTrigger({
+      ...common, id: `${base}_attime`,
+      title: `⏰ ${label} now (${timeStr}) — ${f.leadName || 'Lead'}`,
+      body:  f.note ? f.note : `Time to call ${f.leadName || 'the lead'}`,
+      android: {
+        ...common.android,
+        // Stays until the agent acts on it; big text shows the full remark.
+        autoCancel: true,
+        style: f.note ? { type: 1 /* BIGTEXT */, text: f.note } : undefined,
+        actions: [{ title: '📞 Open lead', pressAction: { id: 'open_lead', launchActivity: 'default' } }],
+      },
+    }, whenMs);
+    ok = true;
+  } catch (e) {
+    console.warn('[Notifications] scheduleLeadFollowUp error:', e?.message);
+  }
+
+  // Scheduled alarm covers it → stop the 5-min poll from posting a second
+  // "in X min" notification for the same follow-up.
+  if (ok) {
+    try { await notifiedDedup.getSet(); notifiedDedup.add(_followUpDedupKey(leadId, whenMs)); } catch {}
+  }
+  return ok;
+}
+
+/** Cancel every pending reminder for a lead (e.g. follow-up cleared). */
+export async function cancelLeadFollowUps(leadId) {
+  if (!notifee || !leadId || typeof notifee.getTriggerNotificationIds !== 'function') return;
+  try {
+    const ids = (await notifee.getTriggerNotificationIds()) || [];
+    const mine = ids.filter(id => id.startsWith(`lfu_${leadId}_`));
+    if (mine.length) await notifee.cancelTriggerNotifications(mine);
+  } catch {}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // checkAndNotifyFollowUps()
 // ─────────────────────────────────────────────────────────────────────────────
 export async function checkAndNotifyFollowUps(leads) {
@@ -395,6 +563,68 @@ export async function checkAndNotifyFollowUps(leads) {
     // RAM FIX: notifiedDedup loads once, stays in memory, debounce-flushes writes.
     await notifiedDedup.getSet(); // ensure loaded
     const newlyFired = [];
+    const future     = []; // follow-ups to hand to Android as exact alarms
+    // Posts the polled "in X min / overdue" notification.
+    const showPolled = async (lead, candidate, schedMs, dedupKey) => {
+      const minsUntil = Math.round(
+        (schedMs - now) / 60000
+      );
+
+      const timeLabel =
+        minsUntil < -60
+          ? `overdue by ${Math.round(-minsUntil / 60)}h`
+          : minsUntil < 0
+            ? `overdue by ${-minsUntil} min`
+            : minsUntil <= 1
+              ? 'now'
+              : `in ${minsUntil} min`;
+
+      const followupBadge = await _incrementBadge(1);
+
+      await notifee.displayNotification({
+        id: `followup_${dedupKey}`,
+        title: `📞 ${candidate.label} — ${timeLabel}`,
+        body:
+          `${lead.name}${
+            candidate.note
+              ? ` · ${candidate.note}`
+              : ''
+          }` +
+          (lead.Quality
+            ? ` ${QUALITY_EMOJI[lead.Quality] ?? ''}`
+            : ''),
+        // FIX: data must be at ROOT level (not inside android:{}) so
+        // handlePress can read notification.data?.leadId on tap.
+        data: { leadId: String(lead.id), type: 'follow_up' },
+        android: {
+          channelId: CHANNEL_FOLLOW_UP,
+          importance: IMPORTANCE_HIGH,
+          smallIcon: 'ic_notification',
+          timestamp: schedMs,
+          showTimestamp: true,
+          badgeCount: followupBadge,
+          badgeIconType: 1,
+
+            pressAction: {
+            id: 'open_lead',
+          },
+        },
+
+        ios: {
+          sound: 'default',
+          badge: followupBadge,
+          foregroundPresentationOptions: {
+            alert: true,
+            sound: true,
+            badge: true,
+          },
+        },
+      });
+      notifiedDedup.add(dedupKey);
+      newlyFired.push(dedupKey);
+    };
+    const upcomingPolled = [];
+
 
     for (const lead of leads) {
       const candidates = [];
@@ -446,72 +676,47 @@ export async function checkAndNotifyFollowUps(leads) {
 
         if (isNaN(schedMs)) continue;
 
+        if (schedMs > now && schedMs <= now + FOLLOWUP_LOOKAHEAD_MS) {
+          future.push({ leadId: lead.id, leadName: lead.name, when: schedMs,
+                        label: candidate.label,
+                        note:  candidate.note || (lead.remarkIsManual ? lead.remark : '') || '' });
+        }
+
         const isOverdue  = schedMs >= now - WINDOW_BEHIND_MS && schedMs < now;
         const isUpcoming = schedMs >= now && schedMs <= now + WINDOW_AHEAD_MS;
         if (!isOverdue && !isUpcoming) continue;
 
-        const dedupKey = `${lead.id}_${candidate.isoDate}`;
+        // Normalised ISO so it matches the key scheduleLeadFollowUp() writes.
+        const dedupKey = _followUpDedupKey(lead.id, schedMs);
 
         if (notifiedDedup.has(dedupKey)) continue;
 
-        const minsUntil = Math.round(
-          (schedMs - now) / 60000
-        );
-
-        const timeLabel =
-          minsUntil < -60
-            ? `overdue by ${Math.round(-minsUntil / 60)}h`
-            : minsUntil < 0
-              ? `overdue by ${-minsUntil} min`
-              : minsUntil <= 1
-                ? 'now'
-                : `in ${minsUntil} min`;
-
-        const followupBadge = await _incrementBadge(1);
-
-        await notifee.displayNotification({
-          id: `followup_${dedupKey}`,
-          title: `📞 ${candidate.label} — ${timeLabel}`,
-          body:
-            `${lead.name}${
-              candidate.note
-                ? ` · ${candidate.note}`
-                : ''
-            }` +
-            (lead.Quality
-              ? ` ${QUALITY_EMOJI[lead.Quality] ?? ''}`
-              : ''),
-          // FIX: data must be at ROOT level (not inside android:{}) so
-          // handlePress can read notification.data?.leadId on tap.
-          data: { leadId: String(lead.id), type: 'follow_up' },
-          android: {
-            channelId: CHANNEL_FOLLOW_UP,
-            importance: IMPORTANCE_HIGH,
-            smallIcon: 'ic_notification',
-            timestamp: schedMs,
-            showTimestamp: true,
-            badgeCount: followupBadge,
-            badgeIconType: 1,
-
-              pressAction: {
-              id: 'open_lead',
-            },
-          },
-
-          ios: {
-            sound: 'default',
-            badge: followupBadge,
-            foregroundPresentationOptions: {
-              alert: true,
-              sound: true,
-              badge: true,
-            },
-          },
-        });
-
-        notifiedDedup.add(dedupKey);
-        newlyFired.push(dedupKey);
+        if (isUpcoming) {
+          // Exact alarm (scheduled below) will cover it; poll only as fallback.
+          upcomingPolled.push([lead, candidate, schedMs, dedupKey]);
+          continue;
+        }
+        await showPolled(lead, candidate, schedMs, dedupKey);
       }
+    }
+
+    // Schedule exact alarms for the nearest upcoming follow-ups. Deterministic
+    // IDs make this idempotent across the 5-min polls.
+    future.sort((a, b) => a.when - b.when);
+    // PERF: read the scheduled IDs ONCE per poll; already-scheduled follow-ups
+    // are skipped without any native call (normally every poll after the first).
+    let existing = null;
+    try {
+      if (future.length && typeof notifee.getTriggerNotificationIds === 'function') {
+        existing = new Set((await notifee.getTriggerNotificationIds()) || []);
+      }
+    } catch { existing = null; }
+    for (const f of future.slice(0, FOLLOWUP_SCHEDULE_MAX)) {
+      await scheduleLeadFollowUp(f, existing);
+    }
+    // Upcoming (≤15 min) ones whose alarm could NOT be scheduled → old poll notice.
+    for (const [lead, candidate, schedMs, dedupKey] of upcomingPolled) {
+      if (!notifiedDedup.has(dedupKey)) await showPolled(lead, candidate, schedMs, dedupKey);
     }
 
     if (newlyFired.length === 0) return;
@@ -603,7 +808,8 @@ export function registerNotificationHandlers(
 
   notifee.onForegroundEvent(
     ({ type, detail }) => {
-      if (type === EventType.PRESS) {
+      // ACTION_PRESS = an action button (e.g. "📞 Open lead" on follow-ups).
+      if (type === EventType.PRESS || type === EventType.ACTION_PRESS) {
         handlePress(detail.notification);
       }
     }
@@ -611,7 +817,8 @@ export function registerNotificationHandlers(
 
   notifee.onBackgroundEvent(
     async ({ type, detail }) => {
-      if (type === EventType.PRESS) {
+      // ACTION_PRESS = an action button (e.g. "📞 Open lead" on follow-ups).
+      if (type === EventType.PRESS || type === EventType.ACTION_PRESS) {
         handlePress(detail.notification);
       }
     }

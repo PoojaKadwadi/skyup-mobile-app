@@ -26,6 +26,7 @@ import ClientMeetingScreen from '../screens/calls/ClientMeetingScreen'; // ← r
 import ProfileScreen       from '../screens/dashboard/ProfileScreen';
 import ClockInGate         from '../components/ClockInGate';
 import TermsGate           from '../components/TermsGate';
+import PendingCallResumer  from '../components/PendingCallResumer';
 import { useTheme }        from '../theme/ThemeContext';
 
 const Stack = createNativeStackNavigator();
@@ -95,6 +96,8 @@ function GatedMainTabs() {
     <TermsGate>
       <ClockInGate>
         <MainTabs />
+        {/* Reopens the lead + Remark popup if Android killed the app mid-call */}
+        <PendingCallResumer />
       </ClockInGate>
     </TermsGate>
   );

@@ -18,6 +18,7 @@ import { getCallLogsForNumber }                    from '../../services/phoneSer
 import { getLeadCallLogs }                         from '../../api/callLogsApi';
 import { markLeadInvalid, markNotInterested, getLeadActionSummary, getLeadById } from '../../api/leadsApi';
 import { triggerPostCallRecordingSync }            from '../../services/backgroundSyncService';
+import { savePendingCall, clearPendingCall, setLiveCallListener } from '../../services/pendingCallService';
 import { syncCallLogs }                            from '../../api/callLogsApi';
 import CallButton                                  from '../../components/CallButton';
 // SECURITY: block screenshots/screen-recording while sensitive PII is shown.
@@ -25,7 +26,7 @@ import { enableSecureScreen, disableSecureScreen } from '../../services/secureSc
 import LeadRecordingsSection                       from '../../components/LeadRecordingsSection';
 import CalendarDateTimePicker                       from '../../components/CalendarDateTimePicker';
 import { postMeetingRemark }                        from '../../api/meetingsApi';
-import { scheduleMeetingFollowUp }                  from '../../services/notificationService';
+import { scheduleMeetingFollowUp, scheduleLeadFollowUp } from '../../services/notificationService';
 import moment                                      from 'moment';
 import { useTheme }                                from '../../theme/ThemeContext';
 import useCustomization                            from '../../hooks/useCustomization';
@@ -173,7 +174,11 @@ export default function LeadDetailScreen() {
   const dispatch   = useDispatch();
   const navigation = useNavigation();
   const route      = useRoute();
-  const { leadId, postCall = false, highlightFollowUp = false } = route.params;
+  const {
+    leadId, postCall = false, highlightFollowUp = false,
+    // Set by PendingCallResumer when Android killed the app during a call.
+    resumeRemark = false, callNumber = '', callStartedAt = 0,
+  } = route.params;
   const { dark, colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -657,6 +662,9 @@ export default function LeadDetailScreen() {
   const finishCall = React.useCallback((numberToCall, startedAt) => {
     if (remarkShownRef.current || !isMountedRef.current) return;
     remarkShownRef.current = true;
+    // Call handled here — the cold-start resumer must not reopen it.
+    setLiveCallListener(false);
+    clearPendingCall();
 
     // Show the modal immediately — do NOT wait on any network/disk work.
     setShowRemarkModal(true);
@@ -684,6 +692,11 @@ export default function LeadDetailScreen() {
     callStartedAtRef.current = startedAt;
     remarkShownRef.current   = false;
     callPending.current      = true;
+
+    // Persist the call so the remark can still open if Android kills the app
+    // during a long call (see services/pendingCallService.js).
+    setLiveCallListener(true);
+    savePendingCall({ leadId, number: numberToCall, startedAt });
 
     // If the dialer is already opening (postCall navigation, or CallButton
     // fired openURL just before us), treat the current non-active state as the
@@ -796,6 +809,14 @@ export default function LeadDetailScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [postCall, lead?.id]);
 
+  // Cold-start resume: the app was killed during the call, PendingCallResumer
+  // brought us back here — open the Remark popup once the lead has loaded.
+  React.useEffect(() => {
+    if (!resumeRemark || !lead?.id) return;
+    finishCall(callNumber || lead?.mobile || lead?.primaryPhone || lead?.phone || '', callStartedAt || Date.now());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeRemark, lead?.id]);
+
   React.useEffect(() => {
     isMountedRef.current = true;
     return () => {
@@ -804,6 +825,8 @@ export default function LeadDetailScreen() {
       // always removed — even if the component unmounts before the call completes.
       isMountedRef.current = false;
       callPending.current  = false;
+      // Leaving the screen: let the resumer handle any still-pending call.
+      setLiveCallListener(false);
       if (callListenerRef.current) {
         callListenerRef.current.remove();
         callListenerRef.current = null;
@@ -1131,6 +1154,16 @@ export default function LeadDetailScreen() {
     // Calls by Day: show this lead's call as done right away, and reload it
     // as soon as the background save below has really finished.
     noteRemark(leadId, trimmed);
+
+    // Follow-up date/time set → schedule the reminder on the phone right now
+    // (exact alarm: fires even if the app is closed / phone locked). Doesn't
+    // wait for the server; the 5-min poll re-schedules from server data too.
+    if (followUp) {
+      // note = the remark, so the reminder says e.g. "Demo at 1 PM".
+      scheduleLeadFollowUp({ leadId, leadName: lead?.name, when: followUp, note: trimmed })
+        .catch(() => {});
+    }
+
     dispatch(submitCallRemark({
       leadId, remark: trimmed, outcome, industry: industry.trim(), service: services,
       followUpDate: followUp, document: null, recording: null,

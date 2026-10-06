@@ -14,6 +14,7 @@ import { uploadRecording, getLeadCallLogs } from '../api/callLogsApi';
 import { requestStoragePermission }         from '../services/permissionsService';
 import { buildScanDirs }                    from '../services/recordingPathService';
 import { normalizePhone }                   from '../services/phoneService';
+import { normaliseForNameMatch, filenameMatchesName, filenameNameTokens } from '../services/nameMatchService';
 import { onSyncEvent }                      from '../services/backgroundSyncService';
 
 // Mask phone digits inside a filename for display only.
@@ -170,14 +171,12 @@ function filenameNamesDifferentContact(filename, variants, leadName) {
   }
 
   // 2. Filename contains a name, and it isn't this lead's name.
-  const fileName = normaliseForNameMatch(prefix);
-  const wantName = normaliseForNameMatch(leadName || '');
-  if (fileName.length >= 2) {
-    if (!wantName) return true; // file is named for someone, lead has no name to match
-    const wantTokens = wantName.split(' ').filter(t => t.length >= 2);
-    const fileTokens = new Set(fileName.split(' ').filter(t => t.length >= 2));
-    const shares = wantTokens.some(t => fileTokens.has(t));
-    if (!shares) return true; // named for a different person
+  // A single shared token (e.g. "Kumar", "Syed") is NOT enough to call it the
+  // same person — use the same strict matcher as the name path.
+  const fileTokens = filenameNameTokens(prefix);
+  if (fileTokens.length > 0) {
+    if (!normaliseForNameMatch(leadName || '')) return true; // named for someone, lead has no name
+    if (!filenameMatchesName(prefix, leadName)) return true; // named for a different person
   }
 
   return false; // no conflicting identity → ambiguous, time match may rescue
@@ -195,48 +194,8 @@ function filenameNamesDifferentContact(filename, variants, leadName) {
 // (strip dialer boilerplate + date/time + the user's "last 4 digits" suffix)
 // and checks whether the lead-name tokens appear ANYWHERE inside it.
 
-// Dialer/app boilerplate words that are never part of a contact name.
-const FILENAME_NOISE = /\b(call|calls|recording|recordings|rec|record|voice|audio|incoming|outgoing|outgoingcall|incomingcall|with|to|from)\b/gi;
-
-function normaliseForNameMatch(text) {
-  return String(text || '')
-    .toLowerCase()
-    // turn separators into spaces
-    .replace(/[_\-.+()]+/g, ' ')
-    // drop date/time digit clusters (YYYYMMDD, HHMMSS, epoch, "1057"-style etc.)
-    .replace(/\d+/g, ' ')
-    // remove dialer boilerplate words
-    .replace(FILENAME_NOISE, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function filenameMatchesName(filename, leadName) {
-  if (!leadName || leadName.trim().length < 2) return false;
-
-  const nameNoExt = filename.replace(/\.[^.]+$/, '');
-  const haystack  = normaliseForNameMatch(nameNoExt);   // e.g. "pooja"
-  const needle    = normaliseForNameMatch(leadName);    // e.g. "pooja"
-  if (haystack.length < 2 || needle.length < 2) return false;
-
-  // Exact normalised equality (most common: "Call recording pooja 1057" → "pooja")
-  if (haystack === needle) return true;
-
-  // Whole-name substring either direction (handles extra tokens on either side)
-  if (haystack.includes(needle) || needle.includes(haystack)) return true;
-
-  // Token overlap: every word of the (shorter) lead name appears in the filename.
-  // Covers "Ramesh Kumar" lead vs a "ramesh" recording and vice-versa.
-  const hTokens = new Set(haystack.split(' ').filter(t => t.length >= 2));
-  const nTokens = needle.split(' ').filter(t => t.length >= 2);
-  if (nTokens.length === 0) return false;
-  const matched = nTokens.filter(t => hTokens.has(t));
-  // Require either all name tokens present, or at least one distinctive (≥4 char) token.
-  if (matched.length === nTokens.length) return true;
-  if (matched.some(t => t.length >= 4)) return true;
-
-  return false;
-}
+// Implementation lives in services/nameMatchService (shared with the auto
+// sync in recordingService) — see that file for the matching rules.
 
 // ── Timestamp fallback match ──────────────────────────────────────────────────
 function timestampMatchesCallLog(fileMtime, callLogs) {

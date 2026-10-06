@@ -54,7 +54,7 @@ export const _fullLeadCache = new Map();
 // Fields kept in Redux (list screen + notifications only need these).
 const SLIM_FIELDS = new Set([
   'id','name','mobile','primaryPhone','secondaryPhone','email',
-  'source','campaign','industry','service','status','remark','remarkIsManual',
+  'source','campaign','industry','service','status','remark','remarkIsManual','lastManualRemarkAt',
   'initialRemark','followUpDate','temperature','Quality','agent',
   'company','reassignCount','invalidStage','isClosed',
   'lastOutcome','lastCalledAt','_raw_date','date',
@@ -116,6 +116,29 @@ function toSlimLead(lead, { populateCache = true } = {}) {
     : (Array.isArray(lead.pendingScheduledCalls) ? lead.pendingScheduledCalls : []);
 
   return slim;
+}
+
+// ── One row per lead id ─────────────────────────────────────────────────────
+// FIX ("same lead shown twice in My Leads"): fetchLeadsDelta used to unshift
+// new leads INSIDE its loop without updating byId. Every unshift shifts all
+// indices by one, so for the next changed lead in the same delta, byId pointed
+// at the WRONG row — its data was merged over a neighbouring lead. Result: two
+// rows with the same id (the card shown twice) and the overwritten lead gone.
+// The broken list was then saved to the AsyncStorage cache, so it survived
+// restarts. Every path that builds the list now goes through this helper.
+let _cacheHadDuplicates = false;
+function dedupeAndIndex(state) {
+  const seen = new Set();
+  const before = state.items.length;
+  state.items = state.items.filter(l => {
+    const k = String(l?.id ?? '');
+    if (!k || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  state.byId = {};
+  state.items.forEach((l, i) => { state.byId[l.id] = i; });
+  return before - state.items.length;
 }
 
 // In-flight dedup: if a fetch is already running, return the same promise.
@@ -216,7 +239,8 @@ async function _loadSmart(force, getState, dispatch) {
       }
       st = getState();
     }
-    const needFull = force || !st.leads?.lastFetchedAt || (Date.now() - _lastFullAt > FULL_REFRESH_MS);
+    const needFull = force || _cacheHadDuplicates || !st.leads?.lastFetchedAt || (Date.now() - _lastFullAt > FULL_REFRESH_MS);
+    _cacheHadDuplicates = false;
     if (needFull) await dispatch(fetchLeads());
     else          await dispatch(fetchLeadsDelta(st.leads.lastFetchedAt));
     scheduleLeadsCacheSave(getState);
@@ -302,17 +326,27 @@ const leadsSlice = createSlice({
     lastFetchedAt: null,
     searchQuery:   '',
     filterStatus:  'all',
+    // Bumped by resetLeadFilters; LeadsScreen watches it to clear its local
+    // (temperature/industry/source/date/sort/follow-up) filters as well.
+    filtersResetAt: 0,
   },
   reducers: {
     setSearchQuery:  (state, action) => { state.searchQuery  = action.payload; },
     setFilterStatus: (state, action) => { state.filterStatus = action.payload; },
+    // Clear search + every Leads filter (fired when the app is closed/reopened).
+    resetLeadFilters: (state) => {
+      state.searchQuery    = '';
+      state.filterStatus   = 'all';
+      state.filtersResetAt = Date.now();
+    },
     clearLeadsError: (state)         => { state.error        = null; },
     leadsHydrated: (state, action) => {
       const { items, lastFetchedAt } = action.payload || {};
       if (!Array.isArray(items)) return;
       state.items = items;
-      state.byId = {};
-      state.items.forEach((l, i) => { state.byId[l.id] = i; });
+      // Cache saved by the old buggy delta may contain duplicates (and is
+      // missing the leads they overwrote) → dedupe now, full re-download next.
+      if (dedupeAndIndex(state) > 0) _cacheHadDuplicates = true;
       state.lastFetchedAt = lastFetchedAt || null;
       state.loading = false;
     },
@@ -334,8 +368,7 @@ const leadsSlice = createSlice({
       } else {
         state.items.unshift(slim);
         // Rebuild O(1) map after insert (indices shifted)
-        state.byId = {};
-        state.items.forEach((l, i) => { state.byId[l.id] = i; });
+        dedupeAndIndex(state);
       }
     },
   },
@@ -350,9 +383,9 @@ const leadsSlice = createSlice({
         // Clear the full cache and repopulate — full fetch replaces everything.
         _fullLeadCache.clear();
         state.items         = action.payload.map(toSlimLead);
-        // Rebuild O(1) lookup map
-        state.byId = {};
-        state.items.forEach((l, i) => { state.byId[l.id] = i; });
+        // Rebuild O(1) lookup map (and drop any duplicate ids, e.g. a lead
+        // returned on two pages when the list shifted mid-pagination).
+        dedupeAndIndex(state);
         state.lastFetchedAt = Date.now();
 
         checkAndNotifyNewLeads(action.payload).catch(() => {});
@@ -376,15 +409,21 @@ const leadsSlice = createSlice({
       // next delta asks only for newer changes.
       state.lastFetchedAt = Date.now();
       let rebuild = false;
+      // Update existing rows in place first (byId stays valid because nothing
+      // is inserted yet), collect genuinely new leads, then prepend them once.
+      const fresh = new Map();
       for (const lead of changed) {
         const slim = toSlimLead(lead);
         const idx = state.byId[slim.id] ?? -1;
-        if (idx !== -1) {
+        if (idx !== -1 && String(state.items[idx]?.id) === String(slim.id)) {
           state.items[idx] = { ...state.items[idx], ...slim };
         } else {
-          state.items.unshift(slim);
-          rebuild = true;
+          fresh.set(String(slim.id), { ...(fresh.get(String(slim.id)) || {}), ...slim });
         }
+      }
+      if (fresh.size) {
+        state.items = [...fresh.values(), ...state.items];
+        rebuild = true;
       }
       // Drop leads that are no longer mine (reassigned / closed / merged).
       if (Array.isArray(ids)) {
@@ -393,10 +432,7 @@ const leadsSlice = createSlice({
         state.items = state.items.filter(l => keep.has(String(l.id)));
         if (state.items.length !== before) rebuild = true;
       }
-      if (rebuild) {
-        state.byId = {};
-        state.items.forEach((l, i) => { state.byId[l.id] = i; });
-      }
+      if (rebuild) dedupeAndIndex(state);
     });
 
     // Logout → forget the previous user's leads immediately.
@@ -456,6 +492,8 @@ const leadsSlice = createSlice({
         state.items[idx] = {
           ...prev,
           remark,
+          remarkIsManual:     true,
+          lastManualRemarkAt: Date.now(),
           lastOutcome:      outcome || prev.lastOutcome,
           lastCalledAt:     new Date().toISOString(),
           callHistoryCount: (prev.callHistoryCount || 0) + 1,
@@ -464,6 +502,12 @@ const leadsSlice = createSlice({
           // causing a stale status to persist until the next delta fetch.
           ...(status       !== undefined ? { status }       : {}),
           ...(followUpDate ? { followUpDate } : {}),
+          // Show the new follow-up in the Follow-ups list immediately and keep
+          // it after slim refreshes until the server's scheduledCalls arrive.
+          ...(followUpDate ? {
+            pendingScheduledCalls: [{ scheduledAt: followUpDate, type: 'follow_up', note: remark }],
+            hasScheduledCalls: true,
+          } : {}),
           ...(industry     !== undefined ? { industry } : {}),
           ...(service      !== undefined ? { service  } : {}),
         };
@@ -472,7 +516,7 @@ const leadsSlice = createSlice({
   },
 });
 
-export const { setSearchQuery, setFilterStatus, clearLeadsError, upsertLead, leadsHydrated } = leadsSlice.actions;
+export const { setSearchQuery, setFilterStatus, resetLeadFilters, clearLeadsError, upsertLead, leadsHydrated } = leadsSlice.actions;
 
 export const selectFilteredLeads = createSelector(
   (state) => state.leads?.items ?? [],
@@ -522,11 +566,40 @@ export function isNotContacted(lead) {
 //     an untouched lead should never just sit there with no follow-up date
 //     and quietly fall off everyone's radar. Basis = last call time if the
 //     agent has called before, else the lead's creation date. (auto: true)
+// FIX ("follow-up added but not in the Follow-ups list"): the backend does
+// NOT keep a top-level followUpDate on the lead — a follow-up set in a call
+// remark is stored as a scheduledCalls[] entry (see the note above
+// pendingScheduledCalls in slimLead). This function only read followUpDate,
+// so after any refresh the agent's "Demo at 1 PM" follow-up vanished from the
+// list (and the lead only showed up, if at all, via the auto next-day rule).
+// The agent-set follow-up is now the EARLIEST pending scheduled call, or
+// followUpDate when present (set optimistically right after saving).
+// When several are pending: the earliest one from TODAY onward wins (so a
+// newly set "today 1 PM" isn't hidden behind an old, never-closed entry from
+// last week); if all are in the past, the most recent one (overdue) is used.
+export function getScheduledFollowUp(lead) {
+  if (!lead) return null;
+  const dates = [];
+  const add = (v) => {
+    if (!v) return;
+    const d = new Date(v);
+    if (!isNaN(d.getTime())) dates.push(d);
+  };
+  const arr = Array.isArray(lead.pendingScheduledCalls) ? lead.pendingScheduledCalls
+            : (Array.isArray(lead.scheduledCalls) ? lead.scheduledCalls : []);
+  for (const sc of arr) if (sc && !sc.done) add(sc.scheduledAt);
+  add(lead.followUpDate);
+  if (!dates.length) return null;
+  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+  const fromToday = dates.filter(d => d.getTime() >= startOfToday.getTime())
+                         .sort((a, b) => a - b);
+  if (fromToday.length) return fromToday[0];
+  return dates.sort((a, b) => b - a)[0];
+}
+
 export function getEffectiveFollowUp(lead) {
-  if (lead?.followUpDate) {
-    const d = new Date(lead.followUpDate);
-    return isNaN(d.getTime()) ? null : { date: d, auto: false };
-  }
+  const scheduled = getScheduledFollowUp(lead);
+  if (scheduled) return { date: scheduled, auto: false };
   if (isNotContacted(lead) || lead?.status === 'In Progress') {
     const basis = lead.lastCalledAt || lead._raw_date || lead.date;
     if (!basis) return null;

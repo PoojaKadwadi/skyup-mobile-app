@@ -309,10 +309,12 @@ function formatLead(lead) {
         h.timestamp != null ||
         (typeof h.remark === 'string' && /call from mobile app/i.test(h.remark));
     let lastManualRemark = '';
+    let lastManualRemarkAt = 0; // ms — used by Calls by Day to clear "Remark pending"
     for (let i = callHistory.length - 1; i >= 0; i--) {
         const h = callHistory[i];
         if (h && h.remark && String(h.remark).trim() !== '' && !isCallLogEntry(h)) {
             lastManualRemark = String(h.remark).trim();
+            lastManualRemarkAt = h.calledAt ? new Date(h.calledAt).getTime() || 0 : 0;
             break;
         }
     }
@@ -365,8 +367,17 @@ function formatLead(lead) {
         })(),
         remark: displayRemark,
         remarkIsManual,
+        lastManualRemarkAt,
         initialRemark,
-        followUpDate: lead.followUpDate || null,
+        // Backend stores remark follow-ups as scheduledCalls[], not a top-level
+        // followUpDate — fall back to the earliest pending one so Lead Detail's
+        // "Follow-Up" row and the Follow-ups list both see it.
+        followUpDate: lead.followUpDate || (Array.isArray(lead.scheduledCalls)
+            ? (lead.scheduledCalls
+                .filter(sc => sc && !sc.done && sc.scheduledAt)
+                .map(sc => sc.scheduledAt)
+                .sort((a, b) => new Date(a) - new Date(b))[0] || null)
+            : null),
         temperature: lead.temperature || lead.Quality || null,
         Quality: lead.temperature || lead.Quality || null,
         agent: (lead.user && lead.user.name) || 'Unknown',

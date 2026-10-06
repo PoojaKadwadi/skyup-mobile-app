@@ -19,7 +19,7 @@
 //  ALL PREVIOUS FIXES RETAINED.
 
 import React, { useEffect, useMemo, useRef } from 'react';
-import { StatusBar, View, ActivityIndicator, StyleSheet, InteractionManager } from 'react-native';
+import { StatusBar, View, ActivityIndicator, StyleSheet, InteractionManager, AppState, BackHandler } from 'react-native';
 
 import { Provider, useSelector, useDispatch } from 'react-redux';
 import { PersistGate } from 'redux-persist/integration/react';
@@ -29,12 +29,13 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { enableScreens } from 'react-native-screens';
 
 import { store, persistor } from './src/store';
+import { resetLeadFilters } from './src/store/slices/leadsSlice';
 import { ThemeProvider, useTheme } from './src/theme/ThemeContext';
 import AppNavigator from './src/navigation/AppNavigator';
 import ErrorBoundary from './src/components/ErrorBoundary';
 
 import { startBackgroundSync, stopBackgroundSync } from './src/services/backgroundSyncService';
-import { setupNotifications, registerNotificationHandlers, clearNotificationState } from './src/services/notificationService';
+import { setupNotifications, registerNotificationHandlers, clearNotificationState, resetBadgeCount } from './src/services/notificationService';
 import { startCallStateListener, stopCallStateListener } from './src/services/callStateService';
 import { drainOfflineQueue } from './src/services/callSyncService';
 import { warmUpBackend, _injectStoreAndNav } from './src/services/api';
@@ -99,6 +100,40 @@ function AppManager() {
 
   // Warm up Render free-tier backend on first launch
   useEffect(() => { warmUpBackend(); }, []);
+
+  // ── Clear Leads search/filters when the app is closed ─────────────────────
+  // Filters used to survive "closing" the app because Android rarely kills the
+  // process (the auto-upload foreground service keeps it alive), so the Redux
+  // search text + status filter were still there on reopen.
+  // Cleared when:
+  //   1. the app UI starts fresh (swiped away from Recents, or restarted),
+  //   2. the user exits with the Back button from the first screen,
+  //   3. the app comes back after a long time in the background.
+  // A normal phone call (short background) does NOT clear them, so an agent
+  // working through a filtered list keeps their place between calls.
+  useEffect(() => {
+    store.dispatch(resetLeadFilters());                                  // 1
+    resetBadgeCount().catch(() => {}); // opening the app clears the stored badge total
+
+    const backSub = BackHandler.addEventListener('hardwareBackPress', () => {
+      const nav = navigationRef.current;
+      if (nav && !nav.canGoBack()) store.dispatch(resetLeadFilters());  // 2
+      return false; // never block the normal back behaviour
+    });
+
+    const LONG_BACKGROUND_MS = 30 * 60 * 1000;                           // 3
+    let backgroundAt = 0;
+    const appSub = AppState.addEventListener('change', (s) => {
+      if (s === 'background') backgroundAt = Date.now();
+      if (s === 'active') resetBadgeCount().catch(() => {});
+      if (s === 'active' && backgroundAt) {
+        if (Date.now() - backgroundAt >= LONG_BACKGROUND_MS) store.dispatch(resetLeadFilters());
+        backgroundAt = 0;
+      }
+    });
+
+    return () => { backSub.remove(); appSub.remove(); };
+  }, []);
 
   useEffect(() => {
     if (user) {

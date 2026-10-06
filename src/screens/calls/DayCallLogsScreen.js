@@ -96,14 +96,29 @@ function getNextFollowUp(lead) {
   return pending.sort((a, b) => new Date(a.scheduledAt) - new Date(b.scheduledAt))[0].scheduledAt;
 }
 
-// A real agent remark vs an auto-generated one
-function isDone(log) {
+// A real agent remark vs an auto-generated one.
+//
+// FIX ("Remark pending" never clearing): the agent's remark is saved on the
+// LEAD (callHistory), not on the synced call-log row, so log.remark is usually
+// the auto text "Outgoing call … from mobile app". Previously the only other
+// signal was an in-memory note that was lost when the app restarted, and it
+// only knew about remarks typed on THIS phone. Now a call is Done when:
+//   1. the call-log row itself carries a real remark, OR
+//   2. the lead has a manual remark saved at/after this call (from the lead's
+//      callHistory — survives restarts, and covers remarks added on the web), OR
+//   3. a remark was just typed in Lead Detail (save may still be in flight).
+// One remark therefore clears every earlier call to that lead (e.g. two
+// unanswered attempts then a connected call + remark → all three Done).
+const REMARK_SLACK_MS = 2 * 60 * 1000;
+function isDone(log, remarkAtByLead) {
   const r = (log.remark || '').trim();
   if (r && !/^(outgoing|incoming|missed|rejected|voicemail|blocked|unknown)?\s*call\b.*from mobile app/i.test(r)) return true;
-  // Remark just added in Lead Detail (save may still be in flight) → done.
   const leadId = log.matchedLead?._id || log.matchedLeadId;
+  if (!leadId) return false;
   const ts = log._tsMs || (log.timestamp ? new Date(log.timestamp).getTime() : 0);
-  return !!(leadId && getRecentRemark(leadId, ts - 2 * 60 * 1000));
+  const leadRemarkAt = remarkAtByLead ? (remarkAtByLead.get(String(leadId)) || 0) : 0;
+  if (leadRemarkAt && leadRemarkAt >= ts - REMARK_SLACK_MS) return true;
+  return !!getRecentRemark(leadId, ts - REMARK_SLACK_MS);
 }
 
 // How long has this lead been waiting (for "Not Called" cards)
@@ -241,12 +256,14 @@ const NotCalledCard = React.memo(function NotCalledCard({ item, onPress, colors,
 
 // ─── Call log card (for "Pending" and "Done" sections) ───────────────────────
 
-const CallLogCard = React.memo(function CallLogCard({ item, onPress, colors, s }) {
+const CallLogCard = React.memo(function CallLogCard({ item, onPress, colors, s, done: doneProp }) {
   const cfg  = CALL_TYPE_CFG[item.callType] || CALL_TYPE_CFG.incoming;
   const lead = item.matchedLead;
   const time = item.timestamp ? fmtTime(new Date(item.timestamp).getTime()) : '—';
   const dur  = formatDuration(item.duration);
-  const done = isDone(item);
+  // Section decides done/pending (it knows the lead's remark time); the card
+  // must agree or a Done card would still show "Add remark".
+  const done = doneProp != null ? doneProp : isDone(item);
   const rm   = done ? (item.remark || '').trim() : null;
   const stColor  = lead?.status ? (statusColor(lead.status) || STATUS_COLORS[lead.status] || '#64748B') : '#64748B';
   const displayName  = lead?.name || item.name || null;
@@ -563,10 +580,18 @@ export default function DayCallLogsScreen() {
     return off;
   }, [fetchAll]);
 
+  // Numbers dialled from this phone in this session — hides the lead from
+  // "Not Called" the moment the call ends, before the server has the call.
+  const [justCalled, setJustCalled] = useState(() => new Set());
+
   // Background sync pushed new calls / a call just ended → refresh quietly.
   useEffect(() => {
     let t = null;
-    const off = onSyncEvent((type) => {
+    const off = onSyncEvent((type, payload) => {
+      if (type === 'callEnded' && payload?.phoneNumber) {
+        const n = normalizePhone(payload.phoneNumber);
+        if (n) setJustCalled(prev => (prev.has(n) ? prev : new Set(prev).add(n)));
+      }
       if (type !== 'calllogs' && type !== 'recordings' && type !== 'callEnded') return;
       if (t) clearTimeout(t);
       t = setTimeout(() => fetchAll('silent'), type === 'callEnded' ? 6000 : 800);
@@ -594,6 +619,16 @@ export default function DayCallLogsScreen() {
       if (log.matchedLeadId)    ids.add(String(log.matchedLeadId));
     }
     return ids;
+  }, [logs]);
+
+  // Every number that appears in this day's call logs (normalised).
+  const calledPhones = useMemo(() => {
+    const set = new Set();
+    for (const log of logs) {
+      const n = normalizePhone(log.phoneNumber || '');
+      if (n && n.length >= 7) set.add(n);
+    }
+    return set;
   }, [logs]);
 
   const q = search.trim().toLowerCase();
@@ -625,12 +660,54 @@ export default function DayCallLogsScreen() {
     for (const l of storeLeads || []) if (l?.id) m.set(String(l.id), l.name || '');
     return m;
   }, [storeLeads]);
+  // leadId → time (ms) of the lead's latest manual remark (see isDone).
+  const remarkAtByLead = useMemo(() => {
+    const m = new Map();
+    for (const l of storeLeads || []) {
+      if (l?.id && l.lastManualRemarkAt) m.set(String(l.id), Number(l.lastManualRemarkAt) || 0);
+    }
+    return m;
+  }, [storeLeads]);
+  const lastCalledById = useMemo(() => {
+    const m = new Map();
+    for (const l of storeLeads || []) {
+      const t = l?.lastCalledAt ? new Date(l.lastCalledAt).getTime() : 0;
+      if (l?.id && t) m.set(String(l.id), t);
+    }
+    return m;
+  }, [storeLeads]);
+
+  // FIX ("called a number but the lead stays in Not Called"): a lead used to
+  // leave Not Called ONLY when the server had linked a call-log row to its id.
+  // If the server matched the call by a different number format, the lead's
+  // secondary number was dialled, or the call hadn't been synced yet, it
+  // stayed. Now a lead counts as called when ANY of these is true:
+  //   • a call log is linked to the lead id (as before);
+  //   • any of the lead's numbers appears in the day's call logs;
+  //   • (today) the number was just dialled from this phone, or the lead's
+  //     lastCalledAt is today (e.g. remark already saved).
+  const dayStartMs = selectedDate.getTime();
+  const isLeadCalled = useCallback((l) => {
+    if (!l) return false;
+    const id = String(l._id || l.id || '');
+    if (id && calledLeadIds.has(id)) return true;
+    const nums = [l.mobile, l.primaryPhone, l.secondaryPhone, l.phone]
+      .map(x => normalizePhone(x || ''))
+      .filter(n => n && n.length >= 7);
+    if (nums.some(n => calledPhones.has(n))) return true;
+    if (isToday) {
+      if (nums.some(n => justCalled.has(n))) return true;
+      const lc = lastCalledById.get(id) || 0;
+      if (lc >= dayStartMs) return true;
+    }
+    return false;
+  }, [calledLeadIds, calledPhones, justCalled, lastCalledById, isToday, dayStartMs]);
 
   const filtered = useMemo(() => {
     const srcNotCalled = (q && Array.isArray(searchUncalled))
       ? searchUncalled
       : uncalled.filter(l => matchesSearch(q, l.name, l.mobile, l.primaryPhone, l.campaign));
-    const notCalled = srcNotCalled.filter(l => !calledLeadIds.has(String(l._id)));
+    const notCalled = srcNotCalled.filter(l => !isLeadCalled(l));
     const callLogs = logs
       .filter(l => callType === 'all' || l.callType === callType)
       .filter(l => !leadsOnly || l.matchedLead?._id || l.matchedLeadId)
@@ -642,14 +719,14 @@ export default function DayCallLogsScreen() {
       ));
     return {
       notCalled,
-      pending: callLogs.filter(l => !isDone(l) && (l.matchedLead?._id || l.matchedLeadId)),
-      done:    callLogs.filter(l => isDone(l)),
-      other:   callLogs.filter(l => !isDone(l) && !(l.matchedLead?._id || l.matchedLeadId)),
+      pending: callLogs.filter(l => !isDone(l, remarkAtByLead) && (l.matchedLead?._id || l.matchedLeadId)),
+      done:    callLogs.filter(l => isDone(l, remarkAtByLead)),
+      other:   callLogs.filter(l => !isDone(l, remarkAtByLead) && !(l.matchedLead?._id || l.matchedLeadId)),
     };
-  }, [uncalled, searchUncalled, leadNameById, logs, calledLeadIds, callType, leadsOnly, q, remarkTick]);
+  }, [uncalled, searchUncalled, leadNameById, logs, isLeadCalled, callType, leadsOnly, q, remarkTick, remarkAtByLead]);
 
   const summaryNotCalledRef = useRef(0);
-  summaryNotCalledRef.current = Math.max(0, uncalledTotal - uncalled.filter(l => calledLeadIds.has(String(l._id))).length);
+  summaryNotCalledRef.current = Math.max(0, uncalledTotal - uncalled.filter(isLeadCalled).length);
 
   const sections = useMemo(() => {
     const out = [];
@@ -672,9 +749,9 @@ export default function DayCallLogsScreen() {
     missed:    logs.filter(l => l.callType === 'missed').length,
     talkSecs:  logs.reduce((a, l) => a + (Number(l.duration) || 0), 0),
     // Server total minus the loaded ones that were called today.
-    notCalled: Math.max(0, uncalledTotal - uncalled.filter(l => calledLeadIds.has(String(l._id))).length),
-    pending:   logs.filter(l => !isDone(l) && (l.matchedLead?._id || l.matchedLeadId)).length,
-  }), [logs, uncalled, uncalledTotal, calledLeadIds, remarkTick]);
+    notCalled: Math.max(0, uncalledTotal - uncalled.filter(isLeadCalled).length),
+    pending:   logs.filter(l => !isDone(l, remarkAtByLead) && (l.matchedLead?._id || l.matchedLeadId)).length,
+  }), [logs, uncalled, uncalledTotal, isLeadCalled, remarkTick, remarkAtByLead]);
 
   const activeFilterCount = (callType !== 'all' ? 1 : 0) + (leadsOnly ? 1 : 0);
   const dayLabel = isToday ? 'Today' : moment(selectedDate).format('ddd, DD MMM YYYY');
@@ -683,7 +760,7 @@ export default function DayCallLogsScreen() {
   const renderItem = useCallback(({ item, section }) => (
     section.key === 'notCalled'
       ? <NotCalledCard item={item} onPress={openLead} colors={colors} s={s} />
-      : <CallLogCard item={item} onPress={openLead} colors={colors} s={s} />
+      : <CallLogCard item={item} onPress={openLead} colors={colors} s={s} done={section.key === 'done'} />
   ), [openLead, colors, s]);
 
   const renderSectionHeader = useCallback(({ section }) => <SectionHeader section={section} s={s} />, [s]);

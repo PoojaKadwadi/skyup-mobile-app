@@ -74,7 +74,15 @@ export default function ClockInGate({ children }) {
     if (!force && now - lastRefreshMsRef.current < REFRESH_THROTTLE_MS) return;
     lastRefreshMsRef.current = now;
 
-    setGate(GATE.LOADING);
+    // FIX ("every page jumps to 'Checking attendance…' and back to Dashboard"):
+    // this used to setGate(LOADING) on EVERY refresh. LOADING renders a spinner
+    // INSTEAD of children, which unmounts the whole MainTabs navigator. Any
+    // AppState 'active' event (returning from the dialer after a call, an
+    // Android permission dialog, file/camera picker, etc.) triggered it, so the
+    // user lost their screen and landed back on the Dashboard tab.
+    // Now: if already clocked in, re-check silently in the background and keep
+    // the app mounted. Only switch away if the server says they're clocked out.
+    setGate(prev => (prev === GATE.CLOCKED_IN ? prev : GATE.LOADING));
     try {
       const res = await api.get('/attendance/my-today');
       const rec = res.data;

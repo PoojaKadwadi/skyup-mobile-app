@@ -48,6 +48,7 @@ import { uploadRecording }   from '../api/callLogsApi';
 import { buildScanDirs }     from './recordingPathService';
 import { getDeviceCallLogs } from './phoneService';
 import { normalizePhone }    from './phoneService';
+import { normaliseForNameMatch, filenameMatchesName } from './nameMatchService';
 
 // ── Safe RNFS import ──────────────────────────────────────────────────────────
 let RNFS;
@@ -202,38 +203,7 @@ function extractLast4FromFilename(filename) {
 // missing it entirely, which is why files uploaded manually but never
 // automatically. We normalise the filename (strip dialer boilerplate, digits,
 // separators) and check whether the lead-name tokens appear inside it.
-const FILENAME_NOISE = /\b(call|calls|recording|recordings|rec|record|voice|audio|incoming|outgoing|outgoingcall|incomingcall|with|to|from)\b/gi;
-
-function normaliseForNameMatch(text) {
-  return String(text || '')
-    .toLowerCase()
-    .replace(/[_\-.+()]+/g, ' ')
-    .replace(/\d+/g, ' ')
-    .replace(FILENAME_NOISE, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function filenameMatchesName(filename, leadName) {
-  if (!leadName || String(leadName).trim().length < 2) return false;
-  const nameNoExt = filename.replace(/\.[^.]+$/, '');
-  const haystack  = normaliseForNameMatch(nameNoExt);
-  const needle    = normaliseForNameMatch(leadName);
-  if (haystack.length < 2 || needle.length < 2) return false;
-
-  if (haystack === needle) return true;
-  if (haystack.includes(needle) || needle.includes(haystack)) return true;
-
-  const hTokens = new Set(haystack.split(' ').filter(t => t.length >= 2));
-  const nTokens = needle.split(' ').filter(t => t.length >= 2);
-  if (nTokens.length === 0) return false;
-  const matched = nTokens.filter(t => hTokens.has(t));
-  if (matched.length === nTokens.length) return true;
-  // One distinctive (≥4 char) token in common is enough — handles
-  // "Ramesh Kumar" lead vs a "ramesh" recording.
-  if (matched.some(t => t.length >= 4)) return true;
-  return false;
-}
+// Implementation lives in nameMatchService (shared with LeadRecordingsSection).
 
 // ── Resolve a 4-digit suffix to a full phone number ───────────────────────────
 // Given the last-4 digits from a filename, find the full number it belongs to:
