@@ -173,28 +173,28 @@ api.interceptors.response.use(
 function buildUserMessage(error) {
   if (!error.response) {
     if (error.code === 'ECONNABORTED')
-      return 'Request timed out. Check your backend is running and reachable.';
-    if (error.message?.includes('Network Error'))
-      return `Cannot reach the server at ${BASE_URL}. Make sure:\n` +
-             `1. Backend is running (npm run dev)\n` +
-             `2. Your device and PC are on the same WiFi\n` +
-             `3. The IP in src/config/config.js matches your PC's LAN IP`;
-    return 'Network error. Please try again.';
+      return 'The server is taking too long to respond. Please check your internet and try again.';
+    return 'Cannot connect to the server. Please check your internet connection and try again.';
   }
 
   const { status, data } = error.response;
   const serverMsg = data?.message || data?.error || '';
 
+  // Always prefer the server's own reason (e.g. "Incorrect password",
+  // "No account found with this email", "Company is suspended",
+  // "Too many attempts, try after 15 minutes").
+  if (serverMsg) return serverMsg;
+
   switch (status) {
-    case 400: return serverMsg || 'Invalid request. Please check your input.';
-    case 401: return serverMsg || 'Session expired. Please log in again.';
+    case 400: return 'Invalid request. Please check your input.';
+    case 401: return 'Session expired. Please log in again.';
     case 403: return 'You do not have permission to do that.';
-    case 404: return 'Resource not found.';
-    case 422: return serverMsg || 'Validation failed.';
-    case 429: return 'Too many requests. Please wait a moment.';
-    case 500: return serverMsg || 'Server error. Please try again later.';
-    case 503: return 'Server is temporarily unavailable.';
-    default:  return serverMsg || `Unexpected error (${status}).`;
+    case 404: return 'Not found.';
+    case 422: return 'Validation failed.';
+    case 429: return 'Too many attempts. Please wait a few minutes and try again.';
+    case 500: return 'Server error. Please try again later.';
+    case 503: return 'Server is temporarily unavailable. Please try again shortly.';
+    default:  return `Unexpected error (${status}). Please try again.`;
   }
 }
 

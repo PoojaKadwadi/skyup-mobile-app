@@ -184,6 +184,26 @@ export async function displayFCMNotification(data) {
           foregroundPresentationOptions: { alert: true, sound: true, badge: false },
         },
       });
+    } else if (data.type === 'scheduled_call_reminder') {
+      // FOLLOW-UP PING FIX: with the app OPEN, Android does not show FCM
+      // notifications by itself — this type used to be silently dropped.
+      // Same id as the on-device follow-up check → never shown twice.
+      await notifee.displayNotification({
+        id:    data.scheduledAt ? `followup_${data.leadId}_${data.scheduledAt}` : `fcm_followup_${data.leadId}`,
+        title: data.title || `📞 Call back — "${data.leadName || 'Lead'}"`,
+        body:  data.body  || 'Your scheduled follow-up is due.',
+        data:  { type: data.type, leadId: data.leadId },
+        android: {
+          channelId:   'followup_channel_v2',
+          importance:  IMPORTANCE_HIGH,
+          smallIcon:   'ic_notification',
+          pressAction: { id: 'open_lead' },
+        },
+        ios: {
+          sound: 'default',
+          foregroundPresentationOptions: { alert: true, sound: true, badge: false },
+        },
+      });
     } else if (data.type === 'reassigned_lead') {
       await notifee.displayNotification({
         id:    `fcm_reassigned_${data.leadId}`,

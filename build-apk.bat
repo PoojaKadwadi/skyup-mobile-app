@@ -1,7 +1,7 @@
 @echo off
 REM ── SkyUp CRM : build installable APK on Windows ─────────────────────────
 REM Needs: Node 18+, JDK 17, Android SDK (default D:\Android\Sdk)
-REM Output: android\app\build\outputs\apk\release\SkyUpCRM-v1.1.0.apk
+REM Output: android\app\build\outputs\apk\release\SkyUpCRM-v1.1.4.apk
 setlocal
 cd /d "%~dp0"
 

@@ -31,7 +31,7 @@ import { useNavigation, useRoute,
          useFocusEffect }               from '@react-navigation/native';
 import Icon                             from 'react-native-vector-icons/MaterialCommunityIcons';
 import {
-  fetchLeads, fetchLeadsDelta, selectFilteredLeads,
+  fetchLeads, fetchLeadsDelta, loadLeadsSmart, selectFilteredLeads,
   setSearchQuery, setFilterStatus, isFollowUpDue,
 } from '../../store/slices/leadsSlice';
 import CallButton                    from '../../components/CallButton';
@@ -545,11 +545,7 @@ export default function LeadsScreen() {
       const isStale = !lastFetchedAt || (Date.now() - lastFetchedAt > STALE_MS);
       if (!isStale) return;
       const task = InteractionManager.runAfterInteractions(() => {
-        if (lastFetchedAt) {
-          dispatch(fetchLeadsDelta(lastFetchedAt));
-        } else {
-          dispatch(fetchLeads());
-        }
+        dispatch(loadLeadsSmart());
       });
       return () => task.cancel();
     }, [lastFetchedAt])
@@ -587,7 +583,7 @@ export default function LeadsScreen() {
     listRef.current?.scrollToOffset?.({ offset: 0, animated: false });
   }, [dispatch]);
 
-  const onRefresh = useCallback(() => { dispatch(fetchLeads()); }, [dispatch]);
+  const onRefresh = useCallback(() => { dispatch(loadLeadsSmart()); }, [dispatch]);
 
   const handleLeadPress = useCallback((leadId) => {
     navigation.navigate('LeadDetail', { leadId });

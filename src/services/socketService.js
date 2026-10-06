@@ -16,7 +16,7 @@
 import { io }       from 'socket.io-client';
 import { getToken } from './tokenStorage';
 import { BASE_URL } from '../config/config';
-import { fetchLeads, upsertLead } from '../store/slices/leadsSlice';
+import { fetchLeads, upsertLead, loadLeadsSmart } from '../store/slices/leadsSlice';
 import { getLeadById }            from '../api/leadsApi';
 import { showNewLeadNotification, showReassignedLeadNotification } from './notificationService';
 
@@ -61,15 +61,9 @@ export function connectSocket(userId, dispatch) {
     reconnectionDelayMax: 10000,
     reconnectionAttempts: Infinity,
     timeout:              10000,
-    auth: {},  // token attached below after async getToken()
-  });
-
-  // Attach auth token so backend socket middleware can verify the employee
-  getToken().then(tok => {
-    if (tok && socket) {
-      socket.auth = { token: tok };
-      if (socket.connected) socket.emit('agent_join', { userId: _userId });
-    }
+    // The server identifies the employee ONLY from this token (it ignores ids
+    // sent in events), so it is read fresh on every (re)connect.
+    auth: (cb) => { getToken().then(tok => cb(tok ? { token: tok } : {})).catch(() => cb({})); },
   });
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -106,11 +100,11 @@ export function connectSocket(userId, dispatch) {
           }
         } catch (fetchErr) {
           console.warn('[Socket] single-lead fetch failed, falling back to full refresh:', fetchErr.message);
-          await _dispatch(fetchLeads());
+          await _dispatch(loadLeadsSmart());
         }
       } else if (_dispatch) {
         // No leadId in payload — fall back to full refresh
-        await _dispatch(fetchLeads());
+        await _dispatch(loadLeadsSmart());
       }
       if (payload?.leadName) {
         if (payload.eventType === 'reassigned') {

@@ -12,6 +12,7 @@ import { useDispatch, useSelector }                from 'react-redux';
 import { useNavigation, useRoute, useFocusEffect }                 from '@react-navigation/native';
 import Icon                                        from 'react-native-vector-icons/MaterialCommunityIcons';
 import { submitCallRemark, patchLead, fetchLeads, upsertLead, getFullLeadFromCache } from '../../store/slices/leadsSlice';
+import { noteRemark, remarkSaved, remarkFailed } from '../../services/remarkBus';
 import { makePhoneCall, normalizePhone }           from '../../services/phoneService';
 import { getCallLogsForNumber }                    from '../../services/phoneService';
 import { getLeadCallLogs }                         from '../../api/callLogsApi';
@@ -1127,12 +1128,16 @@ export default function LeadDetailScreen() {
     // sending the CURRENT effective status (whether it changed or not) means
     // the backend's shouldSchedule check correctly evaluates against
     // followUpDate/outcome regardless of whether status happened to change.
+    // Calls by Day: show this lead's call as done right away, and reload it
+    // as soon as the background save below has really finished.
+    noteRemark(leadId, trimmed);
     dispatch(submitCallRemark({
       leadId, remark: trimmed, outcome, industry: industry.trim(), service: services,
       followUpDate: followUp, document: null, recording: null,
       status: effectiveStatus || lead?.status,
     }))
       .unwrap()
+      .then((res) => { remarkSaved(leadId); return res; }, (err) => { remarkFailed(leadId); throw err; })
       .catch((e) => {
         if (statusChanged) {
           // Roll back the optimistic status update — the whole request failed,
@@ -1146,27 +1151,6 @@ export default function LeadDetailScreen() {
         );
       });
   };
-
-  if (!lead) {
-    // Still resolving from the server — show a spinner instead of "not found".
-    if (leadLoading || (!leadFetchFail && !storeLead)) {
-      return (
-        <View style={styles.notFound}>
-          <ActivityIndicator size="large" color={colors.blue} />
-          <Text style={[styles.notFoundText, { marginTop: 12 }]}>Loading lead…</Text>
-        </View>
-      );
-    }
-    return (
-      <View style={styles.notFound}>
-        <Icon name="account-alert" size={48} color={colors.textMuted} />
-        <Text style={styles.notFoundText}>Lead not found</Text>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Text style={styles.backLink}>← Go back</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
 
   // ── Save to Contacts (auto) ─────────────────────────────────────────────────
   // Saves the lead as a phone contact with name = "LeadName XXXX"
@@ -1374,6 +1358,31 @@ export default function LeadDetailScreen() {
     return () => task?.cancel?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lead?.id]);
+
+  // NOTE: this early return must stay BELOW every hook (useEffect etc.).
+  // It used to sit above the contacts useEffect, so when the lead finished
+  // loading React saw one more hook and crashed with
+  // "Rendered more hooks than during the previous render".
+  if (!lead) {
+    // Still resolving from the server — show a spinner instead of "not found".
+    if (leadLoading || (!leadFetchFail && !storeLead)) {
+      return (
+        <View style={styles.notFound}>
+          <ActivityIndicator size="large" color={colors.blue} />
+          <Text style={[styles.notFoundText, { marginTop: 12 }]}>Loading lead…</Text>
+        </View>
+      );
+    }
+    return (
+      <View style={styles.notFound}>
+        <Icon name="account-alert" size={48} color={colors.textMuted} />
+        <Text style={styles.notFoundText}>Lead not found</Text>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
+          <Text style={styles.backLink}>← Go back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   // Resolve primary & secondary numbers. `mobile` is the canonical/primary
   // (already prefers primaryPhone in the normalizer); secondaryPhone is optional.

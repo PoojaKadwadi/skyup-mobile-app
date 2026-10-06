@@ -31,6 +31,18 @@ function clearPerUserCaches() {
     const { clearAutoSyncCache } = require('../../screens/dashboard/DashboardScreen');
     if (typeof clearAutoSyncCache === 'function') clearAutoSyncCache();
   } catch { /* non-critical */ }
+  try {
+    const { clearLeadsCache } = require('./leadsSlice');
+    if (typeof clearLeadsCache === 'function') clearLeadsCache();
+  } catch { /* non-critical */ }
+  try {
+    const { clearRemarks } = require('../../services/remarkBus');
+    if (typeof clearRemarks === 'function') clearRemarks();
+  } catch { /* non-critical */ }
+  try {
+    const { clearSyncState } = require('../../services/backgroundSyncService');
+    if (typeof clearSyncState === 'function') clearSyncState();
+  } catch { /* non-critical */ }
 }
 
 // ─── Thunks ───────────────────────────────────────────────────────────────────

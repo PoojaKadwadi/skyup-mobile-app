@@ -86,11 +86,21 @@ export const getMyLeads = async() => {
 // ── Delta fetch — only leads modified since a given timestamp ─────────────────
 // Used by the stale-check refresh instead of a full re-download.
 // Returns { leads: FormattedLead[], delta: true } — the store upserts each one.
+// Only what changed since the last fetch (+ the ids of all current leads so
+// leads reassigned away / closed drop out). 2-min overlap covers clock skew.
 export const getLeadsDelta = async (since) => {
-    const isoSince = new Date(since).toISOString();
-    const res = await apiClient.get(`/lead/my-leads?since=${encodeURIComponent(isoSince)}`);
-    const leads = res.data?.leads || [];
-    return leads.map(formatLead);
+    const isoSince = new Date(Number(since) - 2 * 60 * 1000).toISOString();
+    const res = await apiClient.get(`/lead/my-leads?since=${encodeURIComponent(isoSince)}&withIds=1`);
+    if (res.data?.hasMore) {
+        // Too many changes at once (e.g. bulk reassign) — caller does a full fetch.
+        const e = new Error('delta_overflow');
+        e.code = 'DELTA_OVERFLOW';
+        throw e;
+    }
+    return {
+        leads: (res.data?.leads || []).map(formatLead),
+        ids:   Array.isArray(res.data?.ids) ? res.data.ids.map(String) : null,
+    };
 };
 
 export const getLeadById = async(id) => {

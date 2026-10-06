@@ -22,7 +22,7 @@ import AsyncStorage                     from '@react-native-async-storage/async-
 import { useDispatch, useSelector }     from 'react-redux';
 import { useNavigation, useFocusEffect }                from '@react-navigation/native';
 import Icon                             from 'react-native-vector-icons/MaterialCommunityIcons';
-import { fetchLeads, fetchLeadsDelta, isNotContacted, isFollowUpDue }   from '../../store/slices/leadsSlice';
+import { fetchLeads, fetchLeadsDelta, loadLeadsSmart, isNotContacted, isFollowUpDue }   from '../../store/slices/leadsSlice';
 import { triggerManualSync }            from '../../services/backgroundSyncService';
 import { checkAllPermissions }          from '../../services/permissionsService';
 import { checkAndNotifyNewLeads, checkAndNotifyFollowUps, checkAndScheduleClockInReminder } from '../../services/notificationService';
@@ -238,11 +238,7 @@ export default function DashboardScreen() {
         const isStale = !lastFetchedAt || (Date.now() - lastFetchedAt > STALE_MS);
         if (isStale) {
           // Delta fetch when we already have data — only download what changed
-          if (lastFetchedAt) {
-            dispatch(fetchLeadsDelta(lastFetchedAt));
-          } else {
-            dispatch(fetchLeads());
-          }
+          dispatch(loadLeadsSmart());
         }
 
         // Schedule (or cancel) clock-in reminder based on today's attendance.
@@ -269,7 +265,7 @@ export default function DashboardScreen() {
     // like nothing happened. triggerManualSync is awaited first (call-log +
     // recording sweep), then fetchLeads pulls the updated lead list.
     triggerManualSync().catch(() => {});
-    await dispatch(fetchLeads());
+    await dispatch(loadLeadsSmart());
   }, [dispatch]);
 
   const kpi = useMemo(() => computeKpi(leads), [leads]);

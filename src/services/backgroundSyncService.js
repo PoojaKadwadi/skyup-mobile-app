@@ -34,7 +34,7 @@ import { syncRecordings }   from './recordingService';
 import { checkAndNotifyFollowUps } from './notificationService';
 
 import { store }      from '../store';
-import { fetchLeads } from '../store/slices/leadsSlice';
+import { fetchLeads, loadLeadsSmart } from '../store/slices/leadsSlice';
 
 const LAST_SYNC_KEY     = 'last_call_log_sync_ts';
 const LAST_REC_SYNC_KEY = 'last_recording_sync_ts';
@@ -187,7 +187,7 @@ const doFollowUpCheck = async () => {
     if (!Array.isArray(leads) || leads.length === 0) {
       console.log('[Sync] Follow-up: store empty — fetching leads first');
       try {
-        await store.dispatch(fetchLeads());
+        await store.dispatch(loadLeadsSmart());
         const fresh = store.getState().leads;
         leads = fresh?.items ?? fresh?.leads?.items ?? [];
       } catch (fetchErr) {
@@ -217,7 +217,7 @@ async function _knownNumbers() {
   if (set.size === 0) {
     // Leads not loaded yet (app opened straight on a calls screen) — load them
     // so the CRM-only filter works instead of uploading every personal call.
-    try { await store.dispatch(fetchLeads()); set = getKnownLeadNumberSet(); } catch { /* ignore */ }
+    try { await store.dispatch(loadLeadsSmart()); set = getKnownLeadNumberSet(); } catch { /* ignore */ }
   }
   return set;
 }
@@ -525,3 +525,14 @@ export const triggerPostCallRecordingSync = (phoneNumber, callStartedAt, leadNam
 
 export const initBackgroundSync = startBackgroundSync;
 export default { startBackgroundSync, stopBackgroundSync, triggerManualSync, triggerPostCallRecordingSync, syncCallLogsNow, onSyncEvent };
+// ── Logout: drop per-user in-memory sync state (next user starts clean) ──────
+export function clearSyncState() {
+  try {
+    _postCallSyncedNumbers.clear();
+    _uploadQueue.length = 0;
+    _lastAutoUploadAt = 0;
+    _lastRanMs = 0;
+    _lastLogSyncAt = 0;
+    _logSyncPromise = null;
+  } catch { /* non-critical */ }
+}

@@ -41,6 +41,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createSelector, createSlice, createAsyncThunk } from '@reduxjs/toolkit';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getMyLeads, getLeadsDelta, updateLead, addCallRemarkWithAttachments } from '../../api/leadsApi';
 import { checkAndNotifyNewLeads, checkAndNotifyReassignedLeads, checkAndNotifyFollowUps } from '../../services/notificationService';
 
@@ -129,6 +130,7 @@ export const fetchLeads = createAsyncThunk(
     _fetchInFlight = getMyLeads();
     try {
       const result = await _fetchInFlight;
+      _lastFullAt = Date.now();
       return result;
     } catch (error) {
       return rejectWithValue(
@@ -140,6 +142,86 @@ export const fetchLeads = createAsyncThunk(
   },
 );
 
+// ── Local leads cache (per user) ──────────────────────────────────────────────
+// Leads are saved on the phone after every fetch, so re-opening the app shows
+// them instantly and only the CHANGES are downloaded (delta), instead of the
+// whole list every time. Cleared on logout.
+const LEADS_CACHE_PREFIX = 'leads_cache_v1_';
+const FULL_REFRESH_MS    = 6 * 60 * 60 * 1000; // safety full refresh every 6 h
+const CACHE_MAX_CHARS    = 1500000;            // Android AsyncStorage row limit safety
+let _saveTimer = null;
+let _lastFullAt = 0;
+
+function _cacheKey(state) {
+  const u = state?.auth?.user;
+  const id = u?._id || u?.id || u?.userId;
+  return id ? `${LEADS_CACHE_PREFIX}${id}` : null;
+}
+
+export function scheduleLeadsCacheSave(getState) {
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(async () => {
+    try {
+      const st  = getState();
+      const key = _cacheKey(st);
+      const { items, lastFetchedAt } = st.leads || {};
+      if (!key || !lastFetchedAt || !Array.isArray(items)) return;
+      const json = JSON.stringify({ v: 1, items, lastFetchedAt, lastFullAt: _lastFullAt });
+      if (json.length > CACHE_MAX_CHARS) { await AsyncStorage.removeItem(key); return; }
+      await AsyncStorage.setItem(key, json);
+    } catch { /* cache is best-effort */ }
+  }, 2500);
+}
+
+export async function clearLeadsCache() {
+  try {
+    const keys = await AsyncStorage.getAllKeys();
+    const mine = keys.filter(k => k.startsWith(LEADS_CACHE_PREFIX));
+    if (mine.length) await AsyncStorage.multiRemove(mine);
+  } catch { /* ignore */ }
+  _lastFullAt = 0;
+}
+
+/**
+ * The ONE way screens should load leads:
+ *   • first time ever (no cache)  → full download
+ *   • otherwise                   → show cached leads instantly, then fetch only changes
+ *   • force / every 6 h           → full download (safety net)
+ */
+export const loadLeadsSmart = createAsyncThunk(
+  'leads/loadLeadsSmart',
+  async ({ force = false } = {}, { getState, dispatch }) => {
+    // Several screens/services may ask at once — share one request.
+    if (_smartInFlight && !force) return _smartInFlight;
+    _smartInFlight = _loadSmart(force, getState, dispatch).finally(() => { _smartInFlight = null; });
+    return _smartInFlight;
+  },
+);
+let _smartInFlight = null;
+async function _loadSmart(force, getState, dispatch) {
+    let st = getState();
+    if (!st.leads?.lastFetchedAt) {
+      const key = _cacheKey(st);
+      if (key) {
+        try {
+          const raw = await AsyncStorage.getItem(key);
+          if (raw) {
+            const c = JSON.parse(raw);
+            if (c && Array.isArray(c.items) && c.lastFetchedAt) {
+              _lastFullAt = Number(c.lastFullAt) || 0;
+              dispatch(leadsSlice.actions.leadsHydrated({ items: c.items, lastFetchedAt: c.lastFetchedAt }));
+            }
+          }
+        } catch { /* corrupt cache → full fetch below */ }
+      }
+      st = getState();
+    }
+    const needFull = force || !st.leads?.lastFetchedAt || (Date.now() - _lastFullAt > FULL_REFRESH_MS);
+    if (needFull) await dispatch(fetchLeads());
+    else          await dispatch(fetchLeadsDelta(st.leads.lastFetchedAt));
+    scheduleLeadsCacheSave(getState);
+}
+
 export const fetchLeadsDelta = createAsyncThunk(
   'leads/fetchLeadsDelta',
   async (since, { dispatch, rejectWithValue }) => {
@@ -147,8 +229,12 @@ export const fetchLeadsDelta = createAsyncThunk(
       const changed = await getLeadsDelta(since);
       return changed;
     } catch (error) {
-      console.warn('[leadsSlice] Delta fetch failed, falling back to full fetch:', error.message);
-      dispatch(fetchLeads());
+      // Only a too-big change set needs a full download. A network blip just
+      // keeps the current list (it used to re-download everything).
+      if (error?.code === 'DELTA_OVERFLOW') {
+        console.warn('[leadsSlice] Many leads changed — doing one full fetch');
+        await dispatch(fetchLeads());
+      }
       return rejectWithValue('delta_failed');
     }
   },
@@ -221,6 +307,15 @@ const leadsSlice = createSlice({
     setSearchQuery:  (state, action) => { state.searchQuery  = action.payload; },
     setFilterStatus: (state, action) => { state.filterStatus = action.payload; },
     clearLeadsError: (state)         => { state.error        = null; },
+    leadsHydrated: (state, action) => {
+      const { items, lastFetchedAt } = action.payload || {};
+      if (!Array.isArray(items)) return;
+      state.items = items;
+      state.byId = {};
+      state.items.forEach((l, i) => { state.byId[l.id] = i; });
+      state.lastFetchedAt = lastFetchedAt || null;
+      state.loading = false;
+    },
     upsertLead: (state, action) => {
       // Also update the full cache if we have a richer payload
       if (action.payload.id && _fullLeadCache.has(action.payload.id)) {
@@ -274,21 +369,48 @@ const leadsSlice = createSlice({
       });
 
     builder.addCase(fetchLeadsDelta.fulfilled, (state, action) => {
-      if (!Array.isArray(action.payload) || action.payload.length === 0) return;
+      const p = action.payload;
+      const changed = Array.isArray(p) ? p : (p?.leads || []);
+      const ids     = Array.isArray(p) ? null : p?.ids;
+      // Always move the marker forward — even when nothing changed — so the
+      // next delta asks only for newer changes.
       state.lastFetchedAt = Date.now();
-      for (const lead of action.payload) {
+      let rebuild = false;
+      for (const lead of changed) {
         const slim = toSlimLead(lead);
         const idx = state.byId[slim.id] ?? -1;
         if (idx !== -1) {
           state.items[idx] = { ...state.items[idx], ...slim };
         } else {
           state.items.unshift(slim);
-          // Rebuild map after insert (all indices shifted)
-          state.byId = {};
-          state.items.forEach((l, i) => { state.byId[l.id] = i; });
+          rebuild = true;
         }
       }
+      // Drop leads that are no longer mine (reassigned / closed / merged).
+      if (Array.isArray(ids)) {
+        const keep = new Set(ids);
+        const before = state.items.length;
+        state.items = state.items.filter(l => keep.has(String(l.id)));
+        if (state.items.length !== before) rebuild = true;
+      }
+      if (rebuild) {
+        state.byId = {};
+        state.items.forEach((l, i) => { state.byId[l.id] = i; });
+      }
     });
+
+    // Logout → forget the previous user's leads immediately.
+    builder.addMatcher(
+      (a) => a.type === 'auth/logout/fulfilled' || a.type === 'auth/forceLogout/fulfilled' || a.type === 'auth/logout/pending',
+      (state) => {
+        _fullLeadCache.clear();
+        state.items = [];
+        state.byId = {};
+        state.lastFetchedAt = null;
+        state.loading = false;
+        state.error = null;
+      },
+    );
 
     builder.addCase(patchLead.fulfilled, (state, action) => {
       const { id, data } = action.payload;
@@ -350,7 +472,7 @@ const leadsSlice = createSlice({
   },
 });
 
-export const { setSearchQuery, setFilterStatus, clearLeadsError, upsertLead } = leadsSlice.actions;
+export const { setSearchQuery, setFilterStatus, clearLeadsError, upsertLead, leadsHydrated } = leadsSlice.actions;
 
 export const selectFilteredLeads = createSelector(
   (state) => state.leads?.items ?? [],

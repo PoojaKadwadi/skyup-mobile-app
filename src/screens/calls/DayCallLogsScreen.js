@@ -42,6 +42,7 @@ import { normalizePhone } from '../../services/phoneService';
 import { statusLabel, statusColor } from '../../services/customizationService';
 import { syncCallLogsNow, onSyncEvent } from '../../services/backgroundSyncService';
 import FilterDropdown from '../../components/FilterDropdown';
+import { getRecentRemark, onRemark } from '../../services/remarkBus';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -98,9 +99,11 @@ function getNextFollowUp(lead) {
 // A real agent remark vs an auto-generated one
 function isDone(log) {
   const r = (log.remark || '').trim();
-  if (!r) return false;
-  if (/^(outgoing|incoming|missed|rejected) call from mobile app/i.test(r)) return false;
-  return true;
+  if (r && !/^(outgoing|incoming|missed|rejected|voicemail|blocked|unknown)?\s*call\b.*from mobile app/i.test(r)) return true;
+  // Remark just added in Lead Detail (save may still be in flight) → done.
+  const leadId = log.matchedLead?._id || log.matchedLeadId;
+  const ts = log._tsMs || (log.timestamp ? new Date(log.timestamp).getTime() : 0);
+  return !!(leadId && getRecentRemark(leadId, ts - 2 * 60 * 1000));
 }
 
 // How long has this lead been waiting (for "Not Called" cards)
@@ -391,6 +394,8 @@ export default function DayCallLogsScreen() {
   const [uncalled,    setUncalled]    = useState([]);
   const [uncalledTotal, setUncalledTotal] = useState(0);
   const [uncalledPage,  setUncalledPage]  = useState(1);
+  const uncalledPageRef = useRef(1);
+  uncalledPageRef.current = uncalledPage;
   const [loadingMore,   setLoadingMore]   = useState(false);
   const [syncing,       setSyncing]       = useState(false);
   const [loading,     setLoading]     = useState(false);
@@ -419,6 +424,9 @@ export default function DayCallLogsScreen() {
   const LOG_PAGE = 500;
   const UNCALLED_PAGE = 100;
   const reqIdRef = useRef(0);
+  // Remembers what we already have, so background refreshes download only
+  // NEW / CHANGED calls instead of the whole day again.
+  const lastSyncRef = useRef({ date: null, serverTime: null, uncalledAt: 0 });
   const fetchAll = useCallback(async (mode = 'load') => {
     const reqId = ++reqIdRef.current;
     if (mode === 'refresh') setRefreshing(true);
@@ -426,8 +434,43 @@ export default function DayCallLogsScreen() {
     if (mode !== 'silent') setError(null);
     try {
       const base = { date: dateParam, tzOffset };
+
+      // ── Incremental (silent) refresh ─────────────────────────────────────
+      const known = lastSyncRef.current;
+      if (mode === 'silent' && known.date === dateParam && known.serverTime) {
+        try {
+          const since = new Date(new Date(known.serverTime).getTime() - 60 * 1000).toISOString();
+          const r = await apiClient.get('/call-logs', { params: { ...base, since } });
+          if (reqId !== reqIdRef.current) return;
+          if (r.data?.delta) {
+            if (r.data.serverTime) known.serverTime = r.data.serverTime;
+            const changed = r.data.logs || [];
+            if (changed.length) {
+              setLogs(prev => {
+                const m = new Map(prev.map(l => [String(l._id), l]));
+                for (const l of changed) m.set(String(l._id), l);
+                return normLogs([...m.values()]);
+              });
+            }
+            // Not-called list changes rarely (calls made are hidden locally) —
+            // refresh its first page at most every 5 minutes.
+            if (Date.now() - known.uncalledAt > 5 * 60 * 1000 && uncalledPageRef.current <= 1) {
+              known.uncalledAt = Date.now();
+              const u = await apiClient.get('/call-logs/uncalled', { params: { ...base, page: 1, limit: UNCALLED_PAGE } }).catch(() => null);
+              if (u && reqId === reqIdRef.current) {
+                setUncalled(u.data?.leads || []);
+                setUncalledTotal(Number(u.data?.total) || (u.data?.leads || []).length);
+              }
+            }
+            return;
+          }
+        } catch { /* fall back to a full load below */ }
+      }
+
+      let firstServerTime = null;
       const getAllLogs = async () => {
         const first = await apiClient.get('/call-logs', { params: { ...base, page: 1, limit: LOG_PAGE } });
+        firstServerTime = first.data.serverTime || null;
         let all = first.data.logs || [];
         const pages = Math.min(first.data.totalPages || 1, 20); // 10,000 calls/day ceiling
         for (let p = 2; p <= pages; p++) {
@@ -442,7 +485,10 @@ export default function DayCallLogsScreen() {
         apiClient.get('/call-logs/uncalled', { params: { ...base, page: 1, limit: UNCALLED_PAGE } }),
       ]);
       if (reqId !== reqIdRef.current) return; // a newer request superseded this one
-      if (logsRes.status === 'fulfilled') setLogs(normLogs(logsRes.value));
+      if (logsRes.status === 'fulfilled') {
+        setLogs(normLogs(logsRes.value));
+        lastSyncRef.current = { date: dateParam, serverTime: firstServerTime, uncalledAt: Date.now() };
+      }
       else if (mode !== 'silent') {
         setLogs([]);
         setError(logsRes.reason?.response?.data?.message || 'Could not load call logs.');
@@ -506,6 +552,17 @@ export default function DayCallLogsScreen() {
     }, [syncThenFetch, isToday])
   );
 
+  // A remark was added / finished saving in Lead Detail → refresh so the call
+  // moves to Done (the optimistic flag shows it instantly; this confirms it).
+  const [remarkTick, setRemarkTick] = useState(0);
+  useEffect(() => {
+    const off = onRemark((type) => {
+      setRemarkTick((n) => n + 1);                   // re-evaluate isDone now
+      if (type === 'saved') setTimeout(() => fetchAll('silent'), 400);
+    });
+    return off;
+  }, [fetchAll]);
+
   // Background sync pushed new calls / a call just ended → refresh quietly.
   useEffect(() => {
     let t = null;
@@ -541,21 +598,55 @@ export default function DayCallLogsScreen() {
 
   const q = search.trim().toLowerCase();
 
+  // Search ALL of the agent's not-called leads on the server (the screen only
+  // has the first pages loaded, so a lead further down was never found).
+  const [searchUncalled, setSearchUncalled] = useState(null); // null = not searching
+  const [searchingSrv,   setSearchingSrv]   = useState(false);
+  useEffect(() => {
+    const term = search.trim();
+    if (term.length < 2) { setSearchUncalled(null); setSearchingSrv(false); return undefined; }
+    let cancelled = false;
+    setSearchingSrv(true);
+    const t = setTimeout(async () => {
+      try {
+        const r = await apiClient.get('/call-logs/uncalled', { params: { date: dateParam, tzOffset, page: 1, limit: 100, search: term } });
+        if (!cancelled) setSearchUncalled(r.data?.leads || []);
+      } catch { if (!cancelled) setSearchUncalled(null); }
+      finally { if (!cancelled) setSearchingSrv(false); }
+    }, 400);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [search, dateParam, tzOffset]);
+
+  // Lead names from the leads list — call logs matched only by id had no name
+  // to search on.
+  const storeLeads = useSelector(st => st.leads?.items);
+  const leadNameById = useMemo(() => {
+    const m = new Map();
+    for (const l of storeLeads || []) if (l?.id) m.set(String(l.id), l.name || '');
+    return m;
+  }, [storeLeads]);
+
   const filtered = useMemo(() => {
-    const notCalled = uncalled
-      .filter(l => !calledLeadIds.has(String(l._id)))
-      .filter(l => matchesSearch(q, l.name, l.mobile, l.primaryPhone, l.campaign));
+    const srcNotCalled = (q && Array.isArray(searchUncalled))
+      ? searchUncalled
+      : uncalled.filter(l => matchesSearch(q, l.name, l.mobile, l.primaryPhone, l.campaign));
+    const notCalled = srcNotCalled.filter(l => !calledLeadIds.has(String(l._id)));
     const callLogs = logs
       .filter(l => callType === 'all' || l.callType === callType)
       .filter(l => !leadsOnly || l.matchedLead?._id || l.matchedLeadId)
-      .filter(l => matchesSearch(q, l.matchedLead?.name, l.name, l.phoneNumber, l.remark));
+      .filter(l => matchesSearch(
+        q,
+        l.matchedLead?.name,
+        leadNameById.get(String(l.matchedLead?._id || l.matchedLeadId || '')),
+        l.name, l.contactName, l.phoneNumber, l.remark,
+      ));
     return {
       notCalled,
       pending: callLogs.filter(l => !isDone(l) && (l.matchedLead?._id || l.matchedLeadId)),
       done:    callLogs.filter(l => isDone(l)),
       other:   callLogs.filter(l => !isDone(l) && !(l.matchedLead?._id || l.matchedLeadId)),
     };
-  }, [uncalled, logs, calledLeadIds, callType, leadsOnly, q]);
+  }, [uncalled, searchUncalled, leadNameById, logs, calledLeadIds, callType, leadsOnly, q, remarkTick]);
 
   const summaryNotCalledRef = useRef(0);
   summaryNotCalledRef.current = Math.max(0, uncalledTotal - uncalled.filter(l => calledLeadIds.has(String(l._id))).length);
@@ -583,7 +674,7 @@ export default function DayCallLogsScreen() {
     // Server total minus the loaded ones that were called today.
     notCalled: Math.max(0, uncalledTotal - uncalled.filter(l => calledLeadIds.has(String(l._id))).length),
     pending:   logs.filter(l => !isDone(l) && (l.matchedLead?._id || l.matchedLeadId)).length,
-  }), [logs, uncalled, uncalledTotal, calledLeadIds]);
+  }), [logs, uncalled, uncalledTotal, calledLeadIds, remarkTick]);
 
   const activeFilterCount = (callType !== 'all' ? 1 : 0) + (leadsOnly ? 1 : 0);
   const dayLabel = isToday ? 'Today' : moment(selectedDate).format('ddd, DD MMM YYYY');
@@ -741,7 +832,7 @@ export default function DayCallLogsScreen() {
       ) : isEmpty ? (
         <View style={s.center}>
           <Icon name={q || activeFilterCount || view !== 'all' ? 'filter-remove-outline' : 'phone-check-outline'} size={52} color={colors.textMuted} />
-          <Text style={s.emptyTitle}>{q || activeFilterCount || view !== 'all' ? 'Nothing matches these filters' : `All clear for ${dayLabel}`}</Text>
+          <Text style={s.emptyTitle}>{q && searchingSrv ? 'Searching…' : q || activeFilterCount || view !== 'all' ? 'Nothing matches these filters' : `All clear for ${dayLabel}`}</Text>
           <Text style={s.emptyTxt}>
             {q || activeFilterCount || view !== 'all'
               ? 'Try a different search or clear the filters.'
