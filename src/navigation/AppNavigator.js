@@ -22,6 +22,7 @@ import LeadsScreen         from '../screens/leads/LeadsScreen';
 import LeadDetailScreen    from '../screens/leads/LeadDetailScreen';
 import CallLogsScreen      from '../screens/calls/CallLogsScreen';
 import DayCallLogsScreen   from '../screens/calls/DayCallLogsScreen';
+import FollowUpsScreen     from '../screens/followups/FollowUpsScreen';   // pending follow-ups + employee notes
 import ClientMeetingScreen from '../screens/calls/ClientMeetingScreen'; // ← replaces RecordingsScreen
 import ProfileScreen       from '../screens/dashboard/ProfileScreen';
 import ClockInGate         from '../components/ClockInGate';
@@ -115,6 +116,7 @@ export default function AppNavigator() {
           <Stack.Screen name="Main"       component={GatedMainTabs}    />
           <Stack.Screen name="LeadDetail" component={LeadDetailScreen} />
           <Stack.Screen name="DayCallLogs" component={DayCallLogsScreen} />
+          <Stack.Screen name="FollowUps"   component={FollowUpsScreen} />
           {/* "Recordings" stack screen removed — ClientMeeting is now a tab */}
         </>
       )}

@@ -25,6 +25,11 @@
 //  6. Pull-to-refresh, prev/next day nav, calendar picker.
 //
 //  7. Timezone offset fix (tzOffset param) on both API calls.
+//  8. LEAD FILTERS (apply to BOTH lists, server-side):
+//       • "Assigned" → only leads NEWLY ASSIGNED on the selected day (created that day, or assigned /
+//         re-assigned that day). Also a "New today" tile.
+//       • "Ad"       → campaign → ad set → ad (searchable sheet, with lead counts).
+//     Options come from GET /call-logs/lead-filters; the picked filters go to /call-logs and /call-logs/uncalled.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
@@ -42,6 +47,8 @@ import { normalizePhone } from '../../services/phoneService';
 import { statusLabel, statusColor } from '../../services/customizationService';
 import { syncCallLogsNow, onSyncEvent } from '../../services/backgroundSyncService';
 import FilterDropdown from '../../components/FilterDropdown';
+import AdFilterModal, { AdFilterPill } from '../../components/AdFilterModal';
+import { EMPTY_AD, hasAdFilter, leadFilterQuery, pruneAdFilter, adLine } from './dayFilterUtils';
 import { getRecentRemark, onRemark } from '../../services/remarkBus';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -235,7 +242,22 @@ const NotCalledCard = React.memo(function NotCalledCard({ item, onPress, colors,
               <Text style={[s.badgeTxt, { color: colors.textMuted }]} numberOfLines={1}>{item.campaign}</Text>
             </View>
           ) : null}
+          {/* A brand-new lead already says "Assigned today" (top right). This tag is for a lead that is older but was
+              assigned / re-assigned to you on the selected day. */}
+          {item.assignedOnDay && days > 0 ? (
+            <View style={[s.badge, { backgroundColor: '#8B5CF618' }]}>
+              <Icon name="star-four-points" size={10} color="#8B5CF6" />
+              <Text style={[s.badgeTxt, { color: '#8B5CF6' }]}>Newly assigned</Text>
+            </View>
+          ) : null}
         </View>
+
+        {adLine(item) ? (
+          <View style={s.adRow}>
+            <Icon name="bullhorn-outline" size={11} color={colors.textMuted} />
+            <Text style={s.adTxt} numberOfLines={1}>{adLine(item)}</Text>
+          </View>
+        ) : null}
 
         {remark ? <Text style={s.initialRemark} numberOfLines={1}>"{remark}"</Text> : null}
 
@@ -316,6 +338,13 @@ const CallLogCard = React.memo(function CallLogCard({ item, onPress, colors, s, 
             </View>
           ) : null}
         </View>
+
+        {adLine(lead) ? (
+          <View style={s.adRow}>
+            <Icon name="bullhorn-outline" size={11} color={colors.textMuted} />
+            <Text style={s.adTxt} numberOfLines={1}>{adLine(lead)}</Text>
+          </View>
+        ) : null}
 
         {isNavigable ? (done ? (
           <View style={s.remarkRow}>
@@ -425,9 +454,18 @@ export default function DayCallLogsScreen() {
   const [leadsOnly,  setLeadsOnly]  = useState(false);
   const [search,     setSearch]     = useState('');
   const [notCalledShown, setNotCalledShown] = useState(PAGE);
+  // Lead filters — newly assigned that day / ad level (campaign → ad set → ad)
+  const [assignedOnly, setAssignedOnly] = useState(false);
+  const [adFilter,     setAdFilter]     = useState(EMPTY_AD);
+  const [adOpen,       setAdOpen]       = useState(false);
+  const [adTree,       setAdTree]       = useState(null);   // what exists for the selected day (server)
+  const [adLoading,    setAdLoading]    = useState(false);
 
   const dateParam = useMemo(() => moment(selectedDate).format('YYYY-MM-DD'), [selectedDate]);
   const tzOffset  = useMemo(() => -new Date().getTimezoneOffset(), []);
+  // The lead filters go to BOTH lists so the whole screen agrees. leadKey changes only when a filter really changes.
+  const leadQuery = useMemo(() => leadFilterQuery({ assignedOnly, ad: adFilter }), [assignedOnly, adFilter]);
+  const leadKey   = useMemo(() => JSON.stringify(leadQuery), [leadQuery]);
   const isToday   = useMemo(() => {
     const t = new Date(); t.setHours(0, 0, 0, 0);
     return t.getTime() === selectedDate.getTime();
@@ -443,18 +481,18 @@ export default function DayCallLogsScreen() {
   const reqIdRef = useRef(0);
   // Remembers what we already have, so background refreshes download only
   // NEW / CHANGED calls instead of the whole day again.
-  const lastSyncRef = useRef({ date: null, serverTime: null, uncalledAt: 0 });
+  const lastSyncRef = useRef({ date: null, key: '', serverTime: null, uncalledAt: 0 });
   const fetchAll = useCallback(async (mode = 'load') => {
     const reqId = ++reqIdRef.current;
     if (mode === 'refresh') setRefreshing(true);
     else if (mode === 'load') setLoading(true);
     if (mode !== 'silent') setError(null);
     try {
-      const base = { date: dateParam, tzOffset };
+      const base = { date: dateParam, tzOffset, ...leadQuery };
 
       // ── Incremental (silent) refresh ─────────────────────────────────────
       const known = lastSyncRef.current;
-      if (mode === 'silent' && known.date === dateParam && known.serverTime) {
+      if (mode === 'silent' && known.date === dateParam && known.key === leadKey && known.serverTime) {
         try {
           const since = new Date(new Date(known.serverTime).getTime() - 60 * 1000).toISOString();
           const r = await apiClient.get('/call-logs', { params: { ...base, since } });
@@ -504,7 +542,7 @@ export default function DayCallLogsScreen() {
       if (reqId !== reqIdRef.current) return; // a newer request superseded this one
       if (logsRes.status === 'fulfilled') {
         setLogs(normLogs(logsRes.value));
-        lastSyncRef.current = { date: dateParam, serverTime: firstServerTime, uncalledAt: Date.now() };
+        lastSyncRef.current = { date: dateParam, key: leadKey, serverTime: firstServerTime, uncalledAt: Date.now() };
       }
       else if (mode !== 'silent') {
         setLogs([]);
@@ -519,7 +557,7 @@ export default function DayCallLogsScreen() {
     } finally {
       if (reqId === reqIdRef.current) { setLoading(false); setRefreshing(false); }
     }
-  }, [dateParam, tzOffset]);
+  }, [dateParam, tzOffset, leadKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Next page of not-called leads from the server.
   const loadMoreUncalled = useCallback(async () => {
@@ -527,7 +565,7 @@ export default function DayCallLogsScreen() {
     setLoadingMore(true);
     try {
       const next = uncalledPage + 1;
-      const r = await apiClient.get('/call-logs/uncalled', { params: { date: dateParam, tzOffset, page: next, limit: UNCALLED_PAGE } });
+      const r = await apiClient.get('/call-logs/uncalled', { params: { date: dateParam, tzOffset, ...leadQuery, page: next, limit: UNCALLED_PAGE } });
       const more = r.data?.leads || [];
       setUncalled(prev => {
         const seen = new Set(prev.map(l => String(l._id)));
@@ -536,7 +574,20 @@ export default function DayCallLogsScreen() {
       setUncalledPage(next);
       if (r.data?.total != null) setUncalledTotal(Number(r.data.total));
     } catch { /* keep what we have */ } finally { setLoadingMore(false); }
-  }, [loadingMore, uncalled.length, uncalledTotal, uncalledPage, dateParam, tzOffset]);
+  }, [loadingMore, uncalled.length, uncalledTotal, uncalledPage, dateParam, tzOffset, leadKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // What exists for this day (campaigns → ad sets → ads, with counts, + how many leads are new today) — feeds the
+  // "Assigned" pill and the Ad sheet. If a picked ad no longer exists (day changed), it is cleared.
+  const loadAdTree = useCallback(async () => {
+    setAdLoading(true);
+    try {
+      const r = await apiClient.get('/call-logs/lead-filters', { params: { date: dateParam, tzOffset, ...(assignedOnly ? { assigned: 'day' } : {}) } });
+      setAdTree(r.data || null);
+      setAdFilter((f) => pruneAdFilter(f, r.data));
+    } catch { /* keep the options we already have */ }
+    finally { setAdLoading(false); }
+  }, [dateParam, tzOffset, assignedOnly]);
+  useEffect(() => { loadAdTree(); }, [loadAdTree]);
 
   // Push this phone's newest calls to the server, then reload — so the list is
   // always current without anyone tapping "Rescan".
@@ -644,13 +695,13 @@ export default function DayCallLogsScreen() {
     setSearchingSrv(true);
     const t = setTimeout(async () => {
       try {
-        const r = await apiClient.get('/call-logs/uncalled', { params: { date: dateParam, tzOffset, page: 1, limit: 100, search: term } });
+        const r = await apiClient.get('/call-logs/uncalled', { params: { date: dateParam, tzOffset, ...leadQuery, page: 1, limit: 100, search: term } });
         if (!cancelled) setSearchUncalled(r.data?.leads || []);
       } catch { if (!cancelled) setSearchUncalled(null); }
       finally { if (!cancelled) setSearchingSrv(false); }
     }, 400);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [search, dateParam, tzOffset]);
+  }, [search, dateParam, tzOffset, leadKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Lead names from the leads list — call logs matched only by id had no name
   // to search on.
@@ -753,7 +804,7 @@ export default function DayCallLogsScreen() {
     pending:   logs.filter(l => !isDone(l, remarkAtByLead) && (l.matchedLead?._id || l.matchedLeadId)).length,
   }), [logs, uncalled, uncalledTotal, isLeadCalled, remarkTick, remarkAtByLead]);
 
-  const activeFilterCount = (callType !== 'all' ? 1 : 0) + (leadsOnly ? 1 : 0);
+  const activeFilterCount = (callType !== 'all' ? 1 : 0) + (leadsOnly ? 1 : 0) + (assignedOnly ? 1 : 0) + (hasAdFilter(adFilter) ? 1 : 0);
   const dayLabel = isToday ? 'Today' : moment(selectedDate).format('ddd, DD MMM YYYY');
   const isEmpty  = !loading && sections.length === 0;
 
@@ -836,6 +887,8 @@ export default function DayCallLogsScreen() {
           active={view === 'notCalled'} onPress={() => { setCallType('all'); setView(v => (v === 'notCalled' ? 'all' : 'notCalled')); }} />
         <Stat icon="clock-alert-outline" color="#F59E0B" value={summary.pending} label="Remark pending"
           active={view === 'pending'} onPress={() => setView(v => (v === 'pending' ? 'all' : 'pending'))} />
+        <Stat icon="star-four-points" color="#8B5CF6" value={adTree?.assignedCount ?? '–'} label={isToday ? 'New today' : 'New this day'}
+          active={assignedOnly} onPress={() => setAssignedOnly((v) => !v)} />
         <Stat icon="timer-outline" color="#8B5CF6" value={formatDuration(summary.talkSecs) || '0s'} label="Talk time" />
       </ScrollView>
 
@@ -880,9 +933,20 @@ export default function DayCallLogsScreen() {
           onChange={(v) => setLeadsOnly(v === 'leads')}
           dark={dark} colors={colors}
         />
+        <FilterDropdown
+          label="Assigned"
+          value={assignedOnly ? 'new' : 'all'}
+          options={[
+            { value: 'all', label: 'All leads' },
+            { value: 'new', label: `${isToday ? 'New today' : 'New on this day'}${adTree?.assignedCount != null ? ` (${adTree.assignedCount})` : ''}` },
+          ]}
+          onChange={(v) => setAssignedOnly(v === 'new')}
+          dark={dark} colors={colors}
+        />
+        <AdFilterPill value={adFilter} tree={adTree} onPress={() => setAdOpen(true)} dark={dark} colors={colors} />
         {(activeFilterCount > 0 || view !== 'all' || q) ? (
           <TouchableOpacity
-            onPress={() => { setView('all'); setCallType('all'); setLeadsOnly(false); setSearch(''); }}
+            onPress={() => { setView('all'); setCallType('all'); setLeadsOnly(false); setSearch(''); setAssignedOnly(false); setAdFilter(EMPTY_AD); }}
             style={[s.clearPill, { borderColor: dark ? '#7F1D1D' : '#FECACA', backgroundColor: dark ? '#3B1212' : '#FEF2F2' }]}
             activeOpacity={0.75}
           >
@@ -932,10 +996,22 @@ export default function DayCallLogsScreen() {
           removeClippedSubviews
           keyboardShouldPersistTaps="handled"
           refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); syncThenFetch('refresh', true); }} tintColor={colors.blue || '#2563EB'} />
+            <RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); syncThenFetch('refresh', true); loadAdTree(); }} tintColor={colors.blue || '#2563EB'} />
           }
         />
       )}
+
+      <AdFilterModal
+        visible={adOpen}
+        onClose={() => setAdOpen(false)}
+        onApply={(f) => { setAdFilter(f); setAdOpen(false); }}
+        value={adFilter}
+        tree={adTree}
+        loading={adLoading && !adTree}
+        dayLabel={dayLabel}
+        colors={colors}
+        dark={dark}
+      />
 
       <DayPickerModal
         visible={pickerOpen}
@@ -1011,6 +1087,8 @@ function __buildStyles(colors) {
     phoneText:    { fontSize: 11, color: colors.textMuted, fontFamily: 'monospace', marginBottom: 6 },
 
     badgeRow:     { flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginBottom: 6 },
+    adRow:        { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 },
+    adTxt:        { flex: 1, fontSize: 11.5, color: colors.textMuted },
     badge:        { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 7, paddingVertical: 3, borderRadius: 6 },
     badgeTxt:     { fontSize: 11, fontWeight: '700' },
 

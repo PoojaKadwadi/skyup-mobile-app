@@ -6,10 +6,11 @@
 // invisible on some Android builds).
 // ─────────────────────────────────────────────────────────────────────────────
 import React, { useState, useRef } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Modal as RNModal } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Modal as RNModal, ScrollView } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 
-export default function FilterDropdown({ label, value, options, onChange, dark, colors }) {
+// neutralValue (optional): a value that is just the normal state (e.g. "By employee" grouping) — the pill stays plain.
+export default function FilterDropdown({ label, value, options, onChange, dark, colors, neutralValue }) {
   const [open,    setOpen]    = useState(false);
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
   const pillRef = useRef(null);
@@ -22,7 +23,7 @@ export default function FilterDropdown({ label, value, options, onChange, dark, 
     return typeof found === 'object' ? found.label : found;
   })();
 
-  const isActive = !!(value && value !== 'all' && value !== 'All' && value !== 'recent');
+  const isActive = !!(value && value !== 'all' && value !== 'All' && value !== 'recent' && value !== neutralValue);
 
   const openMenu = () => {
     if (!pillRef.current) return;
@@ -67,6 +68,8 @@ export default function FilterDropdown({ label, value, options, onChange, dark, 
           backgroundColor: colors.surface,
           borderColor:     colors.border,
         }]}>
+          {/* scrolls when there are many options (e.g. a long employee list) */}
+          <ScrollView style={dd.menuScroll} nestedScrollEnabled keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator>
           {options.map(opt => {
             const optVal   = typeof opt === 'object' ? opt.value : opt;
             const optLabel = typeof opt === 'object' ? opt.label : (opt === 'all' ? 'All' : opt);
@@ -84,6 +87,7 @@ export default function FilterDropdown({ label, value, options, onChange, dark, 
               </TouchableOpacity>
             );
           })}
+          </ScrollView>
         </View>
       </RNModal>
     </>
@@ -95,6 +99,7 @@ const dd = StyleSheet.create({
   pillValue: { fontSize: 12, fontWeight: '800' },
   backdrop:  { ...StyleSheet.absoluteFillObject },
   menu:      { position: 'absolute', minWidth: 190, borderRadius: 12, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 14 },
+  menuScroll: { maxHeight: 320 },
   menuItem:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12 },
   menuTxt:   { fontSize: 13, fontWeight: '500' },
 });

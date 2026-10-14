@@ -275,7 +275,9 @@ export default function DashboardScreen() {
 
   // Deep-link handlers for the action cards.
   const goNewLeads    = useCallback(() => navigation.navigate('Leads', { filterStatus: 'New' }),          [navigation]);
-  const goFollowups   = useCallback(() => navigation.navigate('Leads', { followUpOnly: true }),             [navigation]);
+  // Opens the Follow-ups list (due date + the employee's note, overdue / today / upcoming). The old Leads view of
+  // follow-ups is one tap away from inside that screen.
+  const goFollowups   = useCallback(() => navigation.navigate('FollowUps'),                                    [navigation]);
   const goConverted   = useCallback(() => navigation.navigate('Leads', { filterStatus: 'Converted' }),      [navigation]);
   const goInProgress  = useCallback(() => navigation.navigate('Leads', { filterStatus: 'In Progress' }),    [navigation]);
   const goAllLeads    = useCallback(() => navigation.navigate('Leads', {}),                                  [navigation]);
