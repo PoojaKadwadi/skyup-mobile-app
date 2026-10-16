@@ -40,8 +40,8 @@ configurations.all {
         applicationId "com.skyupcrm"
         minSdkVersion 24
         targetSdkVersion 35
-        versionCode 7
-        versionName "1.1.4"
+        versionCode 8
+        versionName "1.1.5"
     }
 
     // ONE universal APK that installs on every Android phone (32-bit and
